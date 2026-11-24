@@ -1,0 +1,20 @@
+# Rust / Cargo build output
+/target/
+**/target/
+
+# Local, non-portable editor state
+.vscode/
+.idea/
+*.user
+
+# OS metadata
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local project files, caches, and rendered output
+*.arcline
+*.arcline.tmp
+cache/
+scratch/
+exports/

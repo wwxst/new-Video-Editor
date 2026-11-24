@@ -1,0 +1,67 @@
+; arcline timeline text format — version 1
+; Normative grammar for inspect.timeline / timeline.apply_text (docs/06-agent-interface.md §5)
+; Lines terminate with LF or CRLF. A line beginning with '#' (after optional WSP) is a comment.
+; Times are HH:MM:SS:FF at the sequence timebase (drop-frame notation HH:MM:SS;FF is display-only
+; and MUST NOT appear on the wire). The version line MUST be the first line.
+; This grammar is frozen at v1; additions require a new format version.
+
+timeline        = version-line sequence-line *WSP
+                  *( track / marker-block / comment-line / blank-line )
+
+version-line    = "# arcline timeline v1" endl
+sequence-line   = "SEQ" 1*WSP quoted-name 1*WSP resolution 1*WSP timebase
+                  1*WSP "dur=" timecode endl
+
+resolution      = 1*DIGIT "x" 1*DIGIT          ; 1920x1080
+timebase        = 1*DIGIT "/" 1*DIGIT          ; frame duration, e.g. 30000/1001
+timecode        = 1*2DIGIT ":" 2DIGIT ":" 2DIGIT ":" 2DIGIT
+number          = ["-"] 1*DIGIT ["." 1*DIGIT]
+boolean         = "true" / "false"
+
+track           = "TRK" 1*WSP track-kind 1*DIGIT *WSP *( track-attr 1*WSP ) endl
+                  *( clip / blank-line )
+track-kind      = "V" / "A" / "S"              ; video / audio / subtitle (kind is fixed per track)
+track-attr      = "name=" quoted-name
+                / "op=" number                  ; video track opacity
+                / "gain=" db                    ; audio track gain
+                / "enabled=" boolean
+                / "locked=" boolean
+
+db              = number "dB"                   ; e.g. -6.0dB (may also be written as -6dB)
+
+clip            = 2*WSP "[" clip-id "]" 1*WSP source 1*WSP
+                  "in=" timecode 1*WSP "len=" timecode 1*WSP "@" timecode
+                  *WSP *( clip-attr 1*WSP ) endl
+
+clip-id         = 1*( ALPHA / DIGIT / "_" )
+source          = quoted-name                   ; asset file name as shown in the media bin
+                / "<<" 1*WSP generator 1*WSP ">>"
+generator       = "TITLE" 1*WSP quoted-name     ; e.g. <<TITLE "Chapter One">>
+
+clip-attr       = "fx=" effect-name [ "(" [ param-list ] ")" ]
+                / "style=" style-name
+                / "fade=" fade-spec
+                / "speed=" number ["x"]
+                / "label=" quoted-name
+
+effect-name     = 1*( ALPHA / DIGIT / "." / "_" )
+param-list      = param *( "," param )
+param           = 1*( ALPHA / DIGIT / "_" ) "=" value
+value           = quoted-name / number / boolean
+
+fade-spec       = "in:" duration [ "," "out:" duration ]
+duration        = number ( "ms" / "s" )         ; e.g. 500ms, 2s
+
+style-name      = 1*( ALPHA / DIGIT / "_" )
+
+marker-block    = "MARK" endl *( 2*WSP timecode *WSP quoted-name *( 1*WSP marker-attr ) endl )
+marker-attr     = "color=" hex-color
+hex-color       = "#" 6HEXDIG
+
+quoted-name     = DQUOTE *( %x20-21 / %x23-7E / UTF8-2 / UTF8-3 / UTF8-4 ) DQUOTE
+                  ; any printable character except '"'; UTF-8 permitted; '\' escapes are not used —
+                  ; names containing '"' are not representable and MUST be rejected at write time.
+
+comment-line    = *WSP "#" *( %x20-7E / UTF8-2 / UTF8-3 / UTF8-4 ) endl
+blank-line      = *WSP endl
+endl            = CRLF / LF

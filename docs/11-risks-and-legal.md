@@ -27,6 +27,9 @@ Scoring: likelihood (L) and impact (I) on 1–5; exposure = L×I.
 | R16 | **Live-session misuse** (a local process drives the user's open project) | 2 | 4 | 8 | User-only pipe ACL, discovery token, per-client consent, takeover, attributed and undoable edits ([13](13-product-modes-and-live-sessions.md)) | Disable external attach in settings; revoke "always allow" entries |
 | R17 | **Agent hosts change MCP Apps support or behavior** | 3 | 2 | 6 | Companion window is primary; MCP Apps view optional; image fallback works everywhere | Drop the view for a host and say so |
 | R18 | **Agent panel cost, privacy, or API changes** | 3 | 2 | 6 | Off by default; frames sent only on `inspect_frame`; key in OS credential store; model ID configurable | Users attach an external agent instead |
+| R19 | **Cross-process child-window embedding misbehaves on Windows** (input coupling, focus, DPI, presentation) | 3 | 4 | 12 | One-week PoC right after Phase A with go criteria; watchdog + companion fallback; reference host in CI ([13 §2.4](13-product-modes-and-live-sessions.md)) | Shared-texture composition spike as the L1 mechanism; full embedding stays the goal |
+| R20 | **No third-party host offers native embedding** (L2 stays empty) | 4 | 2 | 8 | L3 covers every MCP client; adapters are thin and built only on demand | Keep L2 as a contract; revisit per host release |
+| R21 | **macOS port needs a different embedding mechanism** | 4 | 3 | 12 | Decided during the v1.1 port; mechanism isolated in the host loop and embed channel | Ship macOS v1.1 with L3 only if the mechanism is not ready |
 
 The top exposures (R1, R2/R3) are revisited at every phase gate.
 

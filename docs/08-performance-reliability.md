@@ -31,6 +31,9 @@ v2 scales both to a single developer: fewer gates, one reference machine, and te
 | Agent edit → visible in GUI (attached) | ≤ 100 ms after commit | IPC + publish + repaint |
 | Notification delivery (`session.changed`) | ≤ 50 ms after commit | per attached client |
 | Takeover effective | next validated batch | engine-thread check |
+| Embedded (L1/L2) frame pacing and input latency | indistinguishable from top-level (PoC go criterion) | child window, reference host |
+| Embedded resize/move | no visible artifacts; layout settles ≤ 1 frame after `embed.resize` | |
+| Embed watchdog fallback | companion window open ≤ 3 s after peer stops responding; session intact | |
 | Forced-kill recovery | zero lost *acknowledged* edits, 100 trials | journal ack rule, §4 |
 
 ## 3. Memory policy
@@ -223,6 +226,9 @@ crash: the user loses no acknowledged edits and reopens into the recovered state
 - **Interchange**: FCPXML DTD validation, OTIO reference-library load, FCP7 XML structural checks,
   exact frame-count checks, and byte-stable golden exports of 12 reference projects
   ([12 §7](12-project-interchange.md)). Import into target editors is a manual lab step.
+- **Embedding** (reference host in CI on Windows): attach, resize, visibility, DPI change, focus handoff and
+  return, IME in the embedded editor, host hang and host crash (watchdog → companion window, session intact),
+  editor crash (host shows *Reopen*), *Pop out* ([13 §2](13-product-modes-and-live-sessions.md)).
 - **Live sessions**: IPC endpoint rejects other users and remote clients; consent required before any edit;
   4-client limit; takeover races (agent batch in flight while the human takes over) resolve per
   [13 §5](13-product-modes-and-live-sessions.md); notifications arrive in revision order; client disconnect

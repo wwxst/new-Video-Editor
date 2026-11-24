@@ -264,10 +264,10 @@ Post-1.0 and unscheduled. When added, the protocol does not change; only transpo
 
 1. Remote WebSocket: TLS required for non-loopback binds; a scoped capability token per session.
 2. Multi-session daemon: sessions become addressable and isolated.
-3. Native in-window embedding, if an agent host offers a native parent handle
-   ([13 §2](13-product-modes-and-live-sessions.md)).
 
-(The local named-pipe topology moved into v1.0 — [ADR-0013](adr/0013-product-modes-and-live-sessions.md).)
+(The local named-pipe topology moved into v1.0 — [ADR-0013](adr/0013-product-modes-and-live-sessions.md).
+Native editor embedding in agent clients is a v1.0 goal with its own host-adapter channel, separate from this
+agent API — [13 §2](13-product-modes-and-live-sessions.md).)
 
 ## 10. Worked example: agent produces a 24-second cut
 

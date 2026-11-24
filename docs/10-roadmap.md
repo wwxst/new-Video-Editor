@@ -14,21 +14,23 @@ does not run them in parallel. (Earlier versions of this plan overlapped phases 
 parallel work and understated the calendar by about 12 weeks; corrected 2026-11-24.)
 
 ```
-Weeks  1    5    10   15   20   25   30   35   40   45   50
-       |----|----|----|----|----|----|----|----|----|----|
+Weeks  1    5    10   15   20   25   30   35   40   45   50   55
+       |----|----|----|----|----|----|----|----|----|----|----|
 A Spine        ███
-B Pipeline        █████
-C Compositor           ███████
-D Audio                       ████
-E Lifecycle                       ████
-F Agent surface + live sessions       ███████
-J Agent workspace                            ████
-G Finish                                         ███████
-I Interchange                                           █████
-H Harden                                                     ████
+P Embed PoC       █
+B Pipeline         █████
+C Compositor            ███████
+D Audio                        ████
+E Lifecycle                        ████
+F Agent surface + live sessions        ███████
+J Agent workspace + embedding                 ██████
+G Finish                                            ███████
+I Interchange                                              █████
+H Harden                                                        ████
 ```
 
-Order rationale: A → B → C build the editor; D and E make it trustworthy; F and J deliver both product modes
+Order rationale: A builds the core; P tests native embedding before any UI is built on it; B → C build the
+editor; D and E make it trustworthy; F and J deliver both product modes and all three integration levels
 ([13](13-product-modes-and-live-sessions.md)) as soon as the command surface exists, so agent workflows are
 dogfooded through G; I maps the finished feature set; H is last.
 
@@ -51,7 +53,27 @@ Deliverables
   supported rates); no floats in timing types.
 - `arcline-cli new demo.arcline && arcline-cli apply` produces a valid container.
 
-## 3. Phase B — Headless pipeline (weeks 4–8)
+## 3. Phase P — Embedding PoC (week 4)
+
+**Goal:** prove or disprove full-editor embedding as a native child window before the UI is built on it
+([13 §2.4](13-product-modes-and-live-sessions.md)).
+
+Deliverables
+
+- Minimal `egui-winit` + `egui-wgpu` app (dock layout, timeline-like canvas, 60 fps animated texture, IME text
+  field) running top-level and as a child window in a Win32 reference host and a minimal Electron host.
+- Embed channel prototype (attach, resize, focus, ping) on a named pipe.
+- Measurements against the go criteria; one-day survey of candidate L2 host extension APIs.
+- Decision recorded in [ADR-0014](adr/0014-integration-levels-and-native-embedding.md).
+
+**Exit criteria**
+
+- Go: frame pacing and input indistinguishable from top-level, artifact-free resize, correct focus and IME,
+  survivable hang/crash on either side, presentation on the child window — or
+- No-go: a second time-boxed spike (≤ 1 week, added to the schedule) on shared-texture composition, and the
+  chosen L1 mechanism recorded. Either outcome keeps full embedding as the goal.
+
+## 4. Phase B — Headless pipeline (weeks 5–9)
 
 **Goal:** import → trim → export, end to end, without a UI.
 
@@ -71,7 +93,7 @@ Deliverables
 - A corrupt file produces a clean per-clip error; a file that crashes or hangs `ffprobe`/`ffmpeg` in the
   import check is quarantined and the parent process survives (mutated-media corpus).
 
-## 4. Phase C — Compositor and shell (weeks 9–15)
+## 5. Phase C — Compositor and shell (weeks 10–16)
 
 **Goal:** the editor exists: timeline, preview, multi-track compositing.
 
@@ -79,7 +101,8 @@ Deliverables
 
 - Direct compositor: tracks, transforms, effects chain, transitions, overlays.
 - Six built-in effects, text/title renderer, frame cache.
-- `arc-app`: `egui` shell, docking, media bin, inspector generated from manifests, viewer via `egui_wgpu`.
+- `arc-app`: `egui` shell on the `egui-winit` + `egui-wgpu` host loop from Phase P (top-level and child-window
+  modes), docking, media bin, inspector generated from manifests, viewer via `egui_wgpu`.
 - Timeline canvas: paint, virtualization, LOD, hit testing, move/trim/split, snapping.
 - Preview scheduler with audio-clock placeholder and two-level quality fallback.
 - Command palette, keymap, native dialogs, IME.
@@ -90,7 +113,7 @@ Deliverables
 - A user can import, arrange, trim, split, and scrub a project entirely in the GUI.
 - IME works for CJK title entry on Windows.
 
-## 5. Phase D — Audio (weeks 16–19)
+## 6. Phase D — Audio (weeks 17–20)
 
 **Goal:** playback and mixing that stay in sync.
 
@@ -107,7 +130,7 @@ Deliverables
 - Master-bus output at 1× transport and the offline export mix are hash-identical on the fixture project,
   including clips with non-1× clip speed.
 
-## 6. Phase E — Project lifecycle (weeks 20–23)
+## 7. Phase E — Project lifecycle (weeks 21–24)
 
 **Goal:** trust the app with real work.
 
@@ -132,7 +155,7 @@ Deliverables
 - A forced native crash during preview decode reopens into the recovered state with the asset quarantined.
 - A project with moved media opens with placeholders and relinks by path or hash.
 
-## 7. Phase F — Agent surface and live sessions (weeks 24–30)
+## 8. Phase F — Agent surface and live sessions (weeks 25–31)
 
 **Goal:** agents edit with parity, headless or attached to a live GUI session.
 
@@ -160,15 +183,20 @@ Deliverables
 - Path escapes (`..`, symlinks, absolute paths outside root) are rejected by tests.
 - Protocol conformance suite (~180 cases) passes identically headless, attached, and in-process.
 
-## 8. Phase J — Agent workspace (weeks 31–34)
+## 9. Phase J — Agent workspace and embedding (weeks 32–37)
 
-**Goal:** both product modes are pleasant to use, not just possible.
+**Goal:** both product modes are pleasant to use, and the full editor runs embedded (L1).
 
 Deliverables
 
+- **L1 embedding, production:** embed channel complete ([13 §2.2](13-product-modes-and-live-sessions.md)),
+  child-window mode in the `arc-app` host loop, focus/shortcut handoff, DPI, watchdog and *Pop out* fallback,
+  Agent panel hidden when embedded, reference host (`examples/embed_host`) in CI, embed-channel spec for our
+  agent client. (If the PoC chose shared-texture composition, this item implements that mechanism instead.)
+
 - **Agent panel** (Standalone): Messages API loop on a worker thread, streaming, tool-call display with
   undo links, confirmations, OS credential storage, first-use disclosure ([13 §7](13-product-modes-and-live-sessions.md)).
-- **Companion layout** (Embedded): compact workspace preset; `--launch` opens it.
+- **Companion window** (L3): full editor with a compact starting layout; `--launch` opens it.
 - **MCP Apps view** `ui://arcline/workspace`: preview monitor, timeline overview, control buttons, job
   progress ([13 §8](13-product-modes-and-live-sessions.md)); tested in Claude Desktop and VS Code.
 
@@ -176,11 +204,14 @@ Deliverables
 
 - Standalone: a user asks the Agent panel for a captioned rough cut of imported footage, reviews it, undoes
   one agent step, and exports — without leaving Arcline.
-- Embedded: the success scenario in [00 §9](00-product-scope.md) passes in Claude Desktop with the MCP Apps
-  view, and in one host without MCP Apps using the companion window and image results.
+- L1: the full editor runs inside the reference host; the [00 §9](00-product-scope.md) L1 scenario passes,
+  including takeover in the embedded window and watchdog fallback to the companion window without session
+  loss.
+- L3: the [00 §9](00-product-scope.md) L3 scenario passes in Claude Desktop with the MCP Apps view, and in one
+  host without MCP Apps using the companion window and image results.
 - Agent-panel replay tests pass offline; no key material appears in logs or crash bundles.
 
-## 9. Phase G — Finish (weeks 35–41)
+## 10. Phase G — Finish (weeks 38–44)
 
 **Goal:** a project a non-developer can complete.
 
@@ -197,7 +228,7 @@ Deliverables
 - A 10-minute, 4-track project with titles, music, and effects is edited and exported by a non-developer.
 - Budgets met on both reference machines.
 
-## 10. Phase I — Interchange export (weeks 42–46)
+## 11. Phase I — Interchange export (weeks 45–49)
 
 **Goal:** an Arcline edit opens as an editable timeline in Premiere Pro, DaVinci Resolve, and Final Cut Pro,
 and in Jianying Pro if an import path is confirmed ([12](12-project-interchange.md)).
@@ -223,7 +254,7 @@ Deliverables
 - Jianying Pro and CapCut each have a recorded lab verdict, and their profiles reflect it (editable import,
   or handoff package).
 
-## 11. Phase H — Harden (weeks 47–50)
+## 12. Phase H — Harden (weeks 50–53)
 
 **Goal:** ship v1.0 on Windows.
 
@@ -246,45 +277,47 @@ Deliverables
   notarized universal DMG. Same features as v1.0.
 - **Linux** — post-1.0, no date commitment; Flatpak, started on demonstrated demand.
 
-## 12. Explicit v1 cut list
+## 13. Explicit v1 cut list
 
-No plugins (OFX/WASM/VST3); no plugins for third-party video editors; no native in-window embedding inside
-agent clients; no remote or multi-user agent access; no HDR/ACES/OCIO; no collaboration; no render
+No plugins (OFX/WASM/VST3); no plugins for third-party video editors; no L2 host adapters until a host is
+confirmed; no embedding into hosts without their cooperation; no remote or multi-user agent access; no HDR/ACES/OCIO; no collaboration; no render
 farm/multi-GPU; no project import from other editors, no EDL/AAF, no native Jianying/CapCut drafts; no
 multicam; no screen-reader certification; no image sequences; no
 audio EQ/compressor/loudness; no three-OS installer matrix.
 
 These are not failures. They are the difference between shipping and not.
 
-## 13. Effort assumptions
+## 14. Effort assumptions
 
 | Phase | Weeks | Notes |
 |---|---|---|
 | A | 3 | pure logic, very AI-friendly |
+| P | 1 | embedding PoC (+1 if the no-go spike is needed) |
 | B | 5 | FFmpeg build matrix is the schedule risk |
 | C | 7 | UI work; the largest phase |
 | D | 4 | cpal + sync; mostly known |
 | E | 4 | persistence; test-heavy |
 | F | 7 | protocol + MCP (5) + local IPC, attach, control, sync (2) |
-| J | 4 | Agent panel (2), MCP Apps view (1.5), companion layout (0.5) |
+| J | 6 | L1 embedding (2), Agent panel (2), MCP Apps view (1.5), companion window (0.5) |
 | G | 7 | broad surface; cut aggressively if late |
 | I | 5 | 1 week lab + 4 weeks writers, packaging, reports |
 | H | 4 | packaging + hardening |
-| **Total** | **~50** | sequential; v1.0 (Windows) ≈ week 50; v1.1 macOS port +3–4 |
+| **Total** | **~53** | sequential; v1.0 (Windows) ≈ week 53; v1.1 macOS port +3–4 (+ macOS embedding mechanism) |
 
 If a phase slips beyond its estimate by more than 30%, cut from Phase G's list before extending the
 schedule — the v1 promise is a working editor with an agent surface, not a feature checklist. Within
 Phase I, cut in this order: OTIO for Premiere, consolidate/transcode modes, stems; never the report.
 
-If the release date matters more than scope, these cuts bring v1.0 toward ~week 42, in this order:
+If the release date matters more than scope, these cuts bring v1.0 toward ~week 45, in this order:
 1. MCP Apps view → companion window + image results only (−1.5 weeks).
 2. Agent panel → external agent clients only (−2 weeks).
 3. Phase I → FCPXML + FCP7 XML only, no OTIO; Jianying/CapCut lab deferred (−1.5 weeks).
 4. Phase G → keyframe UI and chroma key deferred (−3 weeks).
 
-Never cut: live attach, takeover, the journal guarantees, or the compatibility report.
+Never cut: full-editor embedding for our own client (L1), live attach, takeover, the journal guarantees, or
+the compatibility report.
 
-## 14. KPIs
+## 15. KPIs
 
 | KPI | Target at 1.0 |
 |---|---|

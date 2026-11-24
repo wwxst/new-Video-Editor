@@ -49,8 +49,9 @@ Explicit and binding. Each item removed here is weeks returned to the core produ
   the door open ([09](09-effects-and-extensions.md)).
 - **No HDR, ACES, or OCIO.** Rec.709 SDR with LUT support is the v1 color story.
 - **No collaboration or multi-user.** Command logs remain mergeable in principle; live sync is post-1.0.
-- **No native in-window embedding inside agent clients.** Current agent hosts offer no way to host a native
-  window; Embedded mode uses a live-attached companion window plus an MCP Apps view ([13 §2](13-product-modes-and-live-sessions.md)).
+- **No embedding into third-party hosts without their cooperation.** Native embedding needs a host-supplied
+  window handle (L1 our client, L2 confirmed hosts); other hosts get the companion window and MCP Apps view
+  ([13 §2](13-product-modes-and-live-sessions.md)).
 - **No plugins for third-party video editors** (Premiere, Resolve, Final Cut, Jianying, CapCut).
 - **No remote or multi-user agent access.** Live sessions are local, same-user only.
 - **No project import from other editors** (export only; see §8). No AAF/EDL, and no native Jianying/CapCut
@@ -123,13 +124,19 @@ decision: [ADR-0012](adr/0012-project-interchange-export.md)):
 ## 9. Product modes
 
 Arcline ships in two modes on one engine, one project format, and one command system (design:
-[13](13-product-modes-and-live-sessions.md), decision: [ADR-0013](adr/0013-product-modes-and-live-sessions.md)):
+[13](13-product-modes-and-live-sessions.md), decisions: [ADR-0013](adr/0013-product-modes-and-live-sessions.md),
+[ADR-0014](adr/0014-integration-levels-and-native-embedding.md)):
 
 1. **Standalone Editor.** The user runs Arcline, edits manually, and can open the **Agent panel** to have an
    agent edit the same project. Agent edits appear live, are attributed, and are undoable.
-2. **Embedded Editor.** An external agent client (via MCP) drives a live Arcline session. The human watches in
-   a companion window next to the client — and, in hosts that support MCP Apps, in a view inside the client —
-   and can take over at any moment with one action.
+2. **Embedded Editor.** An agent client drives a live Arcline session and the human edits alongside it, with
+   takeover at any moment. Three integration levels:
+   - **L1 — our own agent client:** the **full, interactive editor embedded in the client window**. This is
+     the product goal for v1.0, not a preview panel.
+   - **L2 — third-party clients that expose a native window handle to extensions:** the same full editor
+     through a thin host adapter, once such a host is confirmed.
+   - **L3 — all other MCP clients:** the full editor in a companion window beside the client, plus an MCP
+     Apps view inside clients that support it, plus image results.
 
 Requirements for both modes:
 
@@ -140,5 +147,9 @@ Requirements for both modes:
 - Human takeover always available; no external client can edit before the human consents.
 - Headless operation remains available for batch and CI use.
 
-Success criterion: an agent in Claude Desktop builds a rough cut in a live Arcline window; the human takes
-over mid-edit, fixes a clip, hands control back, and the agent continues from the new revision.
+Success criteria:
+
+- **L1:** in the reference host (and in our agent client once it integrates the adapter), the full editor runs
+  inside the host window; an agent builds a rough cut, the human takes over in the same window, fixes a clip,
+  hands back, and the agent continues from the new revision.
+- **L3:** the same scenario in Claude Desktop with the companion window and the MCP Apps view.

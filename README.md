@@ -28,7 +28,8 @@ and the MCP server are consequences of that one decision.
 What changed in v2, after review: a solo-calibrated scope, `egui` instead of a custom widget toolkit, six
 crates instead of eighteen, a direct compositor instead of a generic render graph, in-process decode, a
 simplified agent surface, cross-editor project export, two product modes (Standalone with an Agent panel;
-Embedded with live attach and human takeover), and a sequential ~50-week solo roadmap to v1.0 on Windows.
+Embedded with live attach, human takeover, and full-editor embedding in agent clients), and a sequential
+~53-week solo roadmap to v1.0 on Windows.
 
 ---
 
@@ -46,10 +47,10 @@ Embedded with live attach and human takeover), and a sequential ~50-week solo ro
 | 07 | [UI Architecture](docs/07-ui-architecture.md) | `egui` shell, custom timeline/viewer canvases, inspector, input |
 | 08 | [Performance & Reliability](docs/08-performance-reliability.md) | Budgets, memory policy, crash recovery, testing strategy |
 | 09 | [Effects & Extensions](docs/09-effects-and-extensions.md) | Built-in effect manifests; deferred plugin tiers |
-| 10 | [Development Roadmap](docs/10-roadmap.md) | Phases A–J, exit criteria, scope cut list, KPIs |
+| 10 | [Development Roadmap](docs/10-roadmap.md) | Phases A–J and P, exit criteria, scope cut list, KPIs |
 | 11 | [Risks & Legal](docs/11-risks-and-legal.md) | Risk register, codec/FFmpeg licensing, platform compliance |
 | 12 | [Cross-Editor Project Export](docs/12-project-interchange.md) | FCPXML / FCP7 XML / OTIO export, target matrix, packaging, compatibility reports |
-| 13 | [Product Modes & Live Sessions](docs/13-product-modes-and-live-sessions.md) | Standalone/Embedded modes, local IPC, live attach, takeover, state sync, Agent panel, embedding feasibility |
+| 13 | [Product Modes & Live Sessions](docs/13-product-modes-and-live-sessions.md) | Standalone/Embedded modes, integration levels L1–L3, native embedding and embed channel, local IPC, live attach, takeover, state sync, Agent panel |
 | ADR | [Decision Records](docs/adr/README.md) | Decisions with alternatives; revised after review |
 | — | [Architecture Review](reports/architecture-review.md) | Independent review that motivates v2 |
 
@@ -71,7 +72,8 @@ Embedded with live attach and human takeover), and a sequential ~50-week solo ro
 | Plugins | None in v1; internal effect manifests only; OFX/WASM/VST3 deferred | [0008](docs/adr/0008-plugin-strategy.md) |
 | Determinism | Bit-exact per machine; tolerance-bounded golden tests; no cross-device contract in v1 | [0009](docs/adr/0009-determinism-contract.md) |
 | Agent text | Read-only EDL-like text view; writes go through JSON commands | [0010](docs/adr/0010-text-timeline-for-agents.md) |
-| Product modes | Standalone (Agent panel) and Embedded (live attach, companion window, MCP Apps view); one engine and format; no native in-window embedding | [0013](docs/adr/0013-product-modes-and-live-sessions.md) |
+| Product modes | Standalone (Agent panel) and Embedded (live attach, takeover); one engine and format | [0013](docs/adr/0013-product-modes-and-live-sessions.md) |
+| Integration levels | L1 our client: full editor embedded as a native child window; L2 confirmed third-party hosts via thin adapters; L3 companion window + MCP Apps view; early PoC | [0014](docs/adr/0014-integration-levels-and-native-embedding.md) |
 | Interchange | `.arcline` native; export FCPXML, FCP7 XML, OTIO with packaging and compatibility reports; no foreign import in v1.0 | [0012](docs/adr/0012-project-interchange-export.md) |
 
 ---
@@ -81,17 +83,18 @@ Embedded with live attach and human takeover), and a sequential ~50-week solo ro
 | Phase | Weeks | Exit criterion |
 |-------|-------|----------------|
 | **A Spine** | 1–3 | `arcline-cli render` transcode is frame-accurate; command property tests pass 10k sequences |
-| **B Headless pipeline** | 4–8 | Import → trim → export works end-to-end from the CLI with hardware encode |
-| **C Compositor + shell** | 9–15 | 1080p preview ≥ 30 fps with 4 tracks and 8 effects; move/trim/split in the GUI |
-| **D Audio** | 16–19 | 10-minute playback drifts ≤ 1 frame; preview (1×) and export master-bus hashes match |
-| **E Lifecycle** | 20–23 | 100 forced kills during edit/save lose zero acknowledged edits |
-| **F Agent surface + live sessions** | 24–30 | An agent builds a cut headless and live-attached; the human takes over mid-edit |
-| **J Agent workspace** | 31–34 | Agent panel cut in Standalone; MCP Apps view in Claude Desktop |
-| **G Finish** | 35–41 | A non-developer edits and exports a 10-minute project |
-| **I Interchange** | 42–46 | Reference projects open editable in Premiere, Resolve, and Final Cut Pro; lab verdicts for Jianying Pro and CapCut |
-| **H Harden** | 47–50 | Budgets met; Windows installer; beta with external users |
+| **P Embedding PoC** | 4 | egui + wgpu child window in Win32 and Electron hosts meets the go criteria (or no-go path chosen) |
+| **B Headless pipeline** | 5–9 | Import → trim → export works end-to-end from the CLI with hardware encode |
+| **C Compositor + shell** | 10–16 | 1080p preview ≥ 30 fps with 4 tracks and 8 effects; move/trim/split in the GUI |
+| **D Audio** | 17–20 | 10-minute playback drifts ≤ 1 frame; preview (1×) and export master-bus hashes match |
+| **E Lifecycle** | 21–24 | 100 forced kills during edit/save lose zero acknowledged edits |
+| **F Agent surface + live sessions** | 25–31 | An agent builds a cut headless and live-attached; the human takes over mid-edit |
+| **J Agent workspace + embedding** | 32–37 | Full editor embedded in the reference host (L1); Agent panel cut; MCP Apps view in Claude Desktop |
+| **G Finish** | 38–44 | A non-developer edits and exports a 10-minute project |
+| **I Interchange** | 45–49 | Reference projects open editable in Premiere, Resolve, and Final Cut Pro; lab verdicts for Jianying Pro and CapCut |
+| **H Harden** | 50–53 | Budgets met; Windows installer; beta with external users |
 
-**v1.0 (Windows): ~week 50** (sequential solo calendar; cut order to reach ~week 42 in the roadmap). v1.1 (macOS port, no new features): +3–4 weeks. Linux: post-1.0, no date.
+**v1.0 (Windows): ~week 53** (sequential solo calendar; cut order to reach ~week 45 in the roadmap). v1.1 (macOS port, no new features): +3–4 weeks. Linux: post-1.0, no date.
 
 ---
 

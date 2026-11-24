@@ -2,6 +2,9 @@
 
 **Status:** Accepted, 2026-11-24 — replaces the original "custom retained-mode widget toolkit" decision.
 **Revised after:** [architecture review](../../reports/architecture-review.md).
+**Amended 2026-11-24 by [ADR-0014](0014-integration-levels-and-native-embedding.md):** the app loop uses
+`egui-winit` + `egui-wgpu` directly instead of `eframe`, so the editor can run as a child window inside a host.
+The `egui` decision itself is unchanged.
 
 ## Context
 
@@ -13,7 +16,8 @@ is months spent producing no video-editing capability.
 
 ## Decision
 
-Use **`egui`** (`eframe` with the `wgpu` backend, `egui_dock`, `egui_extras`) for the application shell, and
+Use **`egui`** (`egui-winit` + `egui-wgpu` host loop — originally `eframe`, see amendment — with `egui_dock`
+and `egui_extras`) for the application shell, and
 **custom-painted canvases** for the two surfaces that matter:
 
 - Viewer: the compositor's output is presented as an `egui_wgpu` user texture — one device, no copies.

@@ -1,7 +1,9 @@
 # ADR-0013 — Two product modes and live GUI sessions in v1
 
 **Status:** Accepted, 2026-11-24. Supersedes in part [ADR-0006](0006-embedded-core-and-daemon.md) (live GUI
-attach and named-pipe transport were deferred there).
+attach and named-pipe transport were deferred there). **Superseded in part by
+[ADR-0014](0014-integration-levels-and-native-embedding.md)** (2026-11-24): decision 5 is replaced by three
+integration levels with full native embedding as the goal; the rest stands.
 
 ## Context
 

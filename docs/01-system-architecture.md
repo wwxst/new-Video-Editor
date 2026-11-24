@@ -32,7 +32,7 @@ and no machinery that does not serve a v1 user.
 | Hardware decode | D3D11VA/D3D12VA via FFmpeg | VideoToolbox | VAAPI/NVDEC |
 | Hardware encode | NVENC / QSV / AMF | VideoToolbox | NVENC / VAAPI |
 | Audio device | WASAPI (shared) | CoreAudio | PipeWire/ALSA |
-| Windowing | `winit` (via `eframe`) | `winit` | `winit` |
+| Windowing | `winit` (via `egui-winit`; top-level or child window) | `winit` | `winit` |
 | Packaging | Portable zip + MSIX, signed | DMG, notarized, universal | Flatpak (community) |
 
 Minimums: Windows 10 21H2 (x64) for v1.0; macOS 13 for v1.1; Ubuntu 22.04 when Linux support starts. Code
@@ -45,7 +45,7 @@ One engine, three shapes. A and B are the two product modes; C is the headless f
 window and by batch jobs.
 
 ```
- A. Standalone Editor                         B. Embedded Editor (live attach)
+ A. Standalone Editor                         B. Embedded Editor, level L3 (live attach)
  ┌──────────────────────────────────────┐     ┌──────────────┐  MCP stdio  ┌─────────────────────────┐
  │ arcline  (arc-app)                   │     │ agent client │◄───────────►│ arcline-cli mcp --attach│
  │  ├── UI thread: egui layout + paint  │     │ (Claude      │             │ (bridge, no document)   │
@@ -61,6 +61,16 @@ window and by batch jobs.
          ├── ffprobe / ffmpeg      import check, proxies, thumbnails, waveforms
          └── arcline-cli render    exports
 
+ B1. Embedded Editor, levels L1/L2 (full editor inside the host window)
+ ┌──────────────────────────── agent client window (ours, or a confirmed L2 host) ──────────────┐
+ │  conversation UI   │ ┌────────────────── host-reserved region ─────────────────────────────┐ │
+ │                    │ │  arcline.exe child window: full egui + wgpu editor                  │ │
+ │  host adapter ─────┼─┼─► embed channel (named pipe): attach/resize/focus/ping             │ │
+ │  agent ── MCP ─────┼─┼─► session (named pipe): commands, notifications, control           │ │
+ │                    │ └─────────────────────────────────────────────────────────────────────┘ │
+ └──────────────────────────────────────────────────────────────────────────────────────────────┘
+   separate processes; watchdog falls back to a companion window without losing the session
+
  C. Headless (batch, CI, agents without a window)
  ┌──────────────┐   JSON-RPC / MCP    ┌──────────────────────────────┐
  │ agent / MCP  │◄── stdio (NDJSON) ─►│ arcline-cli mcp --project …  │
@@ -68,10 +78,10 @@ window and by batch jobs.
  └──────────────┘                     └──────────────────────────────┘
 ```
 
-In B, every command runs in the GUI's engine, so the human sees each edit as it lands and can take over at
-any time. Local IPC, consent, control and takeover, state synchronization, and the embedding feasibility
-analysis (native in-window embedding is not available from current agent hosts) are defined in
-[13](13-product-modes-and-live-sessions.md).
+In B and B1, every command runs in the GUI's engine, so the human sees each edit as it lands and can take
+over at any time. B is integration level L3 (companion window + MCP Apps view); B1 is L1/L2 (native child
+window in the host). Integration levels, the embed channel, local IPC, consent, control and takeover, and
+state synchronization are defined in [13](13-product-modes-and-live-sessions.md).
 
 **No decode worker process in v1.** Preview decode runs FFmpeg in-process behind a `Decoder` trait. Error
 codes and Rust panics are recovered per clip, but a native fault inside FFmpeg (segfault, `abort`) ends the
@@ -124,7 +134,7 @@ boundaries inside `arc-core` (e.g. `model` vs `command`) carry the discipline th
 ## 5. Runtime: threads and ownership
 
 ```
- ┌──────────────────── UI THREAD (eframe/egui) ────────────────────┐
+ ┌────────────────── UI THREAD (egui-winit/egui) ───────────────────┐
  │ event loop · egui layout · paint · timeline canvas · presenter   │
  │ never blocks > 4 ms; missing data renders as stale, never stall  │
  └───────┬───────────────────────────────────────────────┬─────────┘
@@ -264,7 +274,7 @@ faults and is never relied on for them.
 | New built-in effect | WGSL pass + JSON manifest registered in `arc-render` | v1 |
 | Automation | JSON-RPC / MCP / CLI, headless or live-attached | v1 |
 | In-client view | MCP Apps resource `ui://arcline/workspace` | v1 ([13 §8](13-product-modes-and-live-sessions.md)) |
-| Native in-window embedding in agent hosts | not offered by current hosts | Post-1.0, if a host supplies a native parent handle |
+| Full editor embedding in agent clients | out-of-process native child window + embed channel; host adapters | v1.0 for our client (L1, PoC-gated); per confirmed host (L2) ([13 §2](13-product-modes-and-live-sessions.md)) |
 | Third-party effect plugins | OFX / WASM | Post-1.0 ([09](09-effects-and-extensions.md)) |
 | Interchange export | FCPXML / FCP7 XML / OTIO writers in `arc-core::interchange`, export job in `arc-cli` | v1.0 ([12](12-project-interchange.md)) |
 | Interchange import | OTIO first | Post-1.0 |

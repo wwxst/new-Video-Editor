@@ -9,7 +9,7 @@ and `egui` already provides docking, dialogs, tables, menus, text editing, and a
 
 ```
 arc-app
-├── eframe (winit + wgpu backend)
+├── host loop: egui-winit + egui-wgpu   # top-level window, or child window when embedded (13 §2.1)
 ├── egui + egui_dock + egui_extras      # shell, panels, tables, dialogs
 ├── custom timeline canvas              # egui::Painter first; dedicated pass if needed
 ├── custom viewer                       # egui_wgpu user texture

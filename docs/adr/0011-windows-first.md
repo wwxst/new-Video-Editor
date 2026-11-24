@@ -17,11 +17,11 @@ question is sequencing, not architecture.
 
 | Release | Platform | Scope | Target |
 |---|---|---|---|
-| **v1.0** | Windows 10 21H2+ / 11, x64 | The full v1 feature set (Phases A–I), including cross-editor export | ~week 32 |
+| **v1.0** | Windows 10 21H2+ / 11, x64 | The full v1 feature set (Phases A–J), including cross-editor export and both product modes | ~week 50 ([roadmap](../10-roadmap.md)) |
 | **v1.1** | macOS 13+, universal (Apple silicon + x86_64) | **Port only**: same features as v1.0, plus VideoToolbox decode/encode, CoreAudio, Metal validation, notarized DMG. No new product features. | v1.0 + 3–4 weeks |
 | **Linux** | Ubuntu 22.04+ class, Flatpak | Port of the then-current release; system or Flatpak-provided FFmpeg | **Post-1.0, no date commitment**; started when there is demonstrated demand |
 
-New features after v1.0 (audio DSP, round-trip text timeline, live GUI attach, plugins, HDR, interchange import)
+New features after v1.0 (audio DSP, round-trip text timeline, remote agent access, plugins, HDR, interchange import)
 ship in later releases on all supported platforms; none of them is part of v1.1.
 
 Windows on ARM is not a v1.0 target.

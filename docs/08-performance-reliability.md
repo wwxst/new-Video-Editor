@@ -28,6 +28,9 @@ v2 scales both to a single developer: fewer gates, one reference machine, and te
 | Memory, 4K project + caches | ≤ 6 GB RSS | memory manager enforces |
 | Audio callback | ≤ 3 ms worst case at 128 frames | p99.9 |
 | Determinism | bit-exact, same machine | asserted in CI |
+| Agent edit → visible in GUI (attached) | ≤ 100 ms after commit | IPC + publish + repaint |
+| Notification delivery (`session.changed`) | ≤ 50 ms after commit | per attached client |
+| Takeover effective | next validated batch | engine-thread check |
 | Forced-kill recovery | zero lost *acknowledged* edits, 100 trials | journal ack rule, §4 |
 
 ## 3. Memory policy
@@ -220,6 +223,13 @@ crash: the user loses no acknowledged edits and reopens into the recovered state
 - **Interchange**: FCPXML DTD validation, OTIO reference-library load, FCP7 XML structural checks,
   exact frame-count checks, and byte-stable golden exports of 12 reference projects
   ([12 §7](12-project-interchange.md)). Import into target editors is a manual lab step.
+- **Live sessions**: IPC endpoint rejects other users and remote clients; consent required before any edit;
+  4-client limit; takeover races (agent batch in flight while the human takes over) resolve per
+  [13 §5](13-product-modes-and-live-sessions.md); notifications arrive in revision order; client disconnect
+  and GUI crash yield `session_ended` and a clean recovery; a protocol conformance run executes the same
+  suite headless, attached, and through the Agent panel transport with identical results.
+- **Agent panel**: recorded API responses replayed offline (no network in CI), including refusal,
+  `max_tokens`, malformed tool input, and API errors; no key material in logs or crash bundles.
 - **CI matrix**: per the release plan in [ADR-0011](adr/0011-windows-first.md) — Windows: build, full test
   suite, packaging. macOS: `cargo check` on every PR until v1.1 work starts, then full tests. Linux:
   `cargo check` plus `arc-core` tests on every PR (core is platform-independent).

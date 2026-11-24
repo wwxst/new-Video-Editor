@@ -49,8 +49,16 @@ speculatively.
 ```
 
 - **Docking** via `egui_dock`: panels split, tab, and collapse; layouts are serializable to the workspace
-  file. One workspace in v1; presets (`Edit`, `Color`, `Agent Ops`) are saved layout snapshots.
+  file. One workspace in v1; presets (`Edit`, `Color`, `Agent Ops`, `Companion`) are saved layout snapshots. `Companion` is the compact
+  Embedded-mode layout: viewer, timeline, activity strip ([13 §8](13-product-modes-and-live-sessions.md)).
 - **Single-document window.** Tabs are a post-1.0 feature.
+- **Agent panel** (dockable): chat, streamed replies, each tool call with its result and an *Undo* link,
+  confirmation prompts for renders/exports/new save paths, model and key settings
+  ([13 §7](13-product-modes-and-live-sessions.md)).
+- **Activity strip** (shown whenever any agent is connected): connected clients, control state
+  (`shared` / `human` / `agent`), last applied commands, and a **Take over** button. Agent edits are
+  highlighted briefly on the timeline and attributed in the history panel.
+- **Consent prompt** on the first connection from an external client ([13 §3](13-product-modes-and-live-sessions.md)).
 - **Startup:** window and skeleton appear immediately; project load fills panels progressively
   ([01 §8](01-system-architecture.md)).
 

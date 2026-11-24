@@ -24,6 +24,9 @@ Scoring: likelihood (L) and impact (I) on 1–5; exposure = L×I.
 | R13 | **Determinism expectations misunderstood** | 2 | 2 | 4 | Same-machine contract stated in docs and export report; tolerance-based goldens | Diagnostics in `export_report.json` explain differences |
 | R14 | **Target editors change or reject imports** (FCPXML version lag in Resolve, Premiere OTIO beta, undocumented Jianying behavior) | 4 | 3 | 12 | Versioned target profiles with evidence levels; compatibility lab per target version; FCP7 XML for Premiere; reports mark unverified mappings | Fall back to the handoff package for that target and say so in the report |
 | R15 | **CapCut/Jianying expectations exceed what is possible** | 3 | 3 | 9 | No assumed support; CapCut handoff package; no reverse-engineered drafts ([12 §5.5](12-project-interchange.md)) | Publish the verified matrix; add a profile only when a documented path exists |
+| R16 | **Live-session misuse** (a local process drives the user's open project) | 2 | 4 | 8 | User-only pipe ACL, discovery token, per-client consent, takeover, attributed and undoable edits ([13](13-product-modes-and-live-sessions.md)) | Disable external attach in settings; revoke "always allow" entries |
+| R17 | **Agent hosts change MCP Apps support or behavior** | 3 | 2 | 6 | Companion window is primary; MCP Apps view optional; image fallback works everywhere | Drop the view for a host and say so |
+| R18 | **Agent panel cost, privacy, or API changes** | 3 | 2 | 6 | Off by default; frames sent only on `inspect_frame`; key in OS credential store; model ID configurable | Users attach an external agent instead |
 
 The top exposures (R1, R2/R3) are revisited at every phase gate.
 
@@ -83,6 +86,11 @@ becomes a commercial decision rather than a launch blocker.
 - Crash reporting is opt-in, off by default, disclosed at first run, with a machine-readable setting and a
   CLI override. No media content, file names, or project names leave the machine.
 - Bundles contain command types/hashes only ([08 §5](08-performance-reliability.md)).
+- **Agent panel** is the only feature that sends data to a network service (the Anthropic API). It is off until
+  the user enters a key; first use discloses what is sent (conversation, tool results, and frames only when
+  the agent inspects them — never media files); the key is stored in the OS credential store
+  ([13 §7](13-product-modes-and-live-sessions.md)). The provider's data-retention terms apply and are
+  linked in the panel settings.
 - GDPR/CCPA: data inventory and retention (90 days for crash reports); deletion request path. No
   third-party trackers in the app.
 

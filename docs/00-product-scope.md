@@ -37,8 +37,9 @@ produce user-visible capability in the first six months is deferred.
 | Audio processing | [05](05-audio-engine.md) | D |
 | Video export | [04 §7](04-media-pipeline.md), [03 §7](03-render-engine.md) | B, G |
 | Cross-editor project export (FCPXML, FCP7 XML, OTIO; media packaging; compatibility report) | [12](12-project-interchange.md), [ADR-0012](adr/0012-project-interchange-export.md) | I |
-| Agent interfaces (MCP, APIs) | [06](06-agent-interface.md) | F |
-| Performance, stability, maintainability | [08](08-performance-reliability.md) | A–I |
+| Agent interfaces (MCP, JSON-RPC, CLI, local IPC) | [06](06-agent-interface.md) | F |
+| Standalone mode with Agent panel; Embedded mode with live attach, real-time preview, state sync, human takeover | [13](13-product-modes-and-live-sessions.md), [ADR-0013](adr/0013-product-modes-and-live-sessions.md) | F, J |
+| Performance, stability, maintainability | [08](08-performance-reliability.md) | A–J |
 
 ## 4. Non-goals for v1.0
 
@@ -48,8 +49,10 @@ Explicit and binding. Each item removed here is weeks returned to the core produ
   the door open ([09](09-effects-and-extensions.md)).
 - **No HDR, ACES, or OCIO.** Rec.709 SDR with LUT support is the v1 color story.
 - **No collaboration or multi-user.** Command logs remain mergeable in principle; live sync is post-1.0.
-- **No live GUI agent attach.** Agents run headless against project files; attaching to an open GUI session
-  is post-1.0 and unscheduled.
+- **No native in-window embedding inside agent clients.** Current agent hosts offer no way to host a native
+  window; Embedded mode uses a live-attached companion window plus an MCP Apps view ([13 §2](13-product-modes-and-live-sessions.md)).
+- **No plugins for third-party video editors** (Premiere, Resolve, Final Cut, Jianying, CapCut).
+- **No remote or multi-user agent access.** Live sessions are local, same-user only.
 - **No project import from other editors** (export only; see §8). No AAF/EDL, and no native Jianying/CapCut
   draft files.
 - **No multicam, cloud rendering, render farms, multi-GPU, or mobile.**
@@ -116,3 +119,26 @@ decision: [ADR-0012](adr/0012-project-interchange-export.md)):
 8. **Automatic compatibility report** for every export: per clip and feature, with outcome and evidence
    level; unverified mappings are labeled as such.
 9. **Agent access:** the same export is available to agents via MCP and JSON-RPC.
+
+## 9. Product modes
+
+Arcline ships in two modes on one engine, one project format, and one command system (design:
+[13](13-product-modes-and-live-sessions.md), decision: [ADR-0013](adr/0013-product-modes-and-live-sessions.md)):
+
+1. **Standalone Editor.** The user runs Arcline, edits manually, and can open the **Agent panel** to have an
+   agent edit the same project. Agent edits appear live, are attributed, and are undoable.
+2. **Embedded Editor.** An external agent client (via MCP) drives a live Arcline session. The human watches in
+   a companion window next to the client — and, in hosts that support MCP Apps, in a view inside the client —
+   and can take over at any moment with one action.
+
+Requirements for both modes:
+
+- Same editing core, `.arcline` format, commands, undo, and journal.
+- Access via MCP, JSON-RPC, CLI, and local IPC (per-user named pipe).
+- Real-time preview of agent edits; state synchronization (revision, changes, control, selection, playhead,
+  job progress) to every connected client.
+- Human takeover always available; no external client can edit before the human consents.
+- Headless operation remains available for batch and CI use.
+
+Success criterion: an agent in Claude Desktop builds a rough cut in a live Arcline window; the human takes
+over mid-edit, fixes a clip, hands control back, and the agent continues from the new revision.

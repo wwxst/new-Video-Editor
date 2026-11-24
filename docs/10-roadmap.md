@@ -9,23 +9,28 @@ post-1.0 with no date. The release plan and CI tiers are defined in [ADR-0011](a
 
 ## 1. Phase overview
 
+**Calendar = sum of effort.** One developer works on one phase at a time; AI assistance shortens phases but
+does not run them in parallel. (Earlier versions of this plan overlapped phases on the chart, which implied
+parallel work and understated the calendar by about 12 weeks; corrected 2026-11-24.)
+
 ```
-Weeks  1    4    8    12   16   20   24   28   32
-       |----|----|----|----|----|----|----|----|
-A Spine     ███
-B Pipeline     ███████
-C Compositor        ████████████
-D Audio                  ██████
-E Lifecycle                 ████
-F Agent                        █████
-G Finish                          ████████
-I Interchange                           ██████
-H Harden                                    ███████
+Weeks  1    5    10   15   20   25   30   35   40   45   50
+       |----|----|----|----|----|----|----|----|----|----|
+A Spine        ███
+B Pipeline        █████
+C Compositor           ███████
+D Audio                       ████
+E Lifecycle                       ████
+F Agent surface + live sessions       ███████
+J Agent workspace                            ████
+G Finish                                         ███████
+I Interchange                                           █████
+H Harden                                                     ████
 ```
 
-Critical path: A → B → C → G → I → H. F depends on C's command surface and can run in parallel with late
-C/D. D is independent of F. E depends on C and D. I depends on F (jobs, reports) and G (titles, subtitles,
-keyframes — the features it must map). H stays last.
+Order rationale: A → B → C build the editor; D and E make it trustworthy; F and J deliver both product modes
+([13](13-product-modes-and-live-sessions.md)) as soon as the command surface exists, so agent workflows are
+dogfooded through G; I maps the finished feature set; H is last.
 
 ## 2. Phase A — Spine (weeks 1–3)
 
@@ -46,7 +51,7 @@ Deliverables
   supported rates); no floats in timing types.
 - `arcline-cli new demo.arcline && arcline-cli apply` produces a valid container.
 
-## 3. Phase B — Headless pipeline (weeks 3–7)
+## 3. Phase B — Headless pipeline (weeks 4–8)
 
 **Goal:** import → trim → export, end to end, without a UI.
 
@@ -66,7 +71,7 @@ Deliverables
 - A corrupt file produces a clean per-clip error; a file that crashes or hangs `ffprobe`/`ffmpeg` in the
   import check is quarantined and the parent process survives (mutated-media corpus).
 
-## 4. Phase C — Compositor and shell (weeks 6–12)
+## 4. Phase C — Compositor and shell (weeks 9–15)
 
 **Goal:** the editor exists: timeline, preview, multi-track compositing.
 
@@ -85,7 +90,7 @@ Deliverables
 - A user can import, arrange, trim, split, and scrub a project entirely in the GUI.
 - IME works for CJK title entry on Windows.
 
-## 5. Phase D — Audio (weeks 11–14)
+## 5. Phase D — Audio (weeks 16–19)
 
 **Goal:** playback and mixing that stay in sync.
 
@@ -102,7 +107,7 @@ Deliverables
 - Master-bus output at 1× transport and the offline export mix are hash-identical on the fixture project,
   including clips with non-1× clip speed.
 
-## 6. Phase E — Project lifecycle (weeks 13–16)
+## 6. Phase E — Project lifecycle (weeks 20–23)
 
 **Goal:** trust the app with real work.
 
@@ -127,27 +132,55 @@ Deliverables
 - A forced native crash during preview decode reopens into the recovered state with the asset quarantined.
 - A project with moved media opens with placeholders and relinks by path or hash.
 
-## 7. Phase F — Agent surface (weeks 15–19)
+## 7. Phase F — Agent surface and live sessions (weeks 24–30)
 
-**Goal:** agents edit with parity.
+**Goal:** agents edit with parity, headless or attached to a live GUI session.
 
 Deliverables
 
-- `arc-cli`: `arcline-cli rpc` with the 13 JSON-RPC methods of [06 §4.1](06-agent-interface.md),
-  revisions, dry-run, idempotency, typed errors, acknowledgement after journal write.
-- `arcline-cli mcp` with the tools of [06 §6.1](06-agent-interface.md), resources, and rendered-frame
-  inspection.
-- Text timeline (`inspect.timeline`), read-only.
-- Render jobs with progress and reports.
-- Reference agent script and integration guide.
+- `arc-cli` library: session server, the 15 JSON-RPC methods and 4 notifications of
+  [06 §4.1](06-agent-interface.md), revisions, dry-run, idempotency, typed errors, acknowledgement after a
+  complete journal write; `arc-app` depends on it.
+- `arcline-cli mcp` with the 23 tools of [06 §6.1](06-agent-interface.md), resources and subscriptions,
+  rendered-frame inspection; text timeline (`inspect.timeline`), read-only; render jobs.
+- Local IPC in the GUI: per-user named pipe, discovery file, token, consent prompt
+  ([13 §3](13-product-modes-and-live-sessions.md)).
+- `--attach` / `--launch` bridge; up to 4 clients; `client_id` attribution in history.
+- Control and takeover (`shared` / `human` / `agent:<id>`), state-sync notifications, activity strip with
+  *Take over*.
+- Reference agent script and integration guide for headless and attached use.
 
 **Exit criteria**
 
-- The worked example in [06 §10](06-agent-interface.md) runs end-to-end and produces a reviewable export.
+- The worked example in [06 §10](06-agent-interface.md) runs end-to-end headless **and** attached to a live
+  GUI, with every edit visible in the window ≤ 100 ms after commit.
+- Takeover mid-edit: the human takes over, edits, hands back; the agent receives `not_in_control`, then
+  `control.changed`, and continues from the new revision. No edit is lost or applied twice.
+- Another Windows user's process cannot open the pipe; no edit is possible before consent.
 - Path escapes (`..`, symlinks, absolute paths outside root) are rejected by tests.
-- Protocol conformance suite passes ~150 request/response cases.
+- Protocol conformance suite (~180 cases) passes identically headless, attached, and in-process.
 
-## 8. Phase G — Finish (weeks 18–24)
+## 8. Phase J — Agent workspace (weeks 31–34)
+
+**Goal:** both product modes are pleasant to use, not just possible.
+
+Deliverables
+
+- **Agent panel** (Standalone): Messages API loop on a worker thread, streaming, tool-call display with
+  undo links, confirmations, OS credential storage, first-use disclosure ([13 §7](13-product-modes-and-live-sessions.md)).
+- **Companion layout** (Embedded): compact workspace preset; `--launch` opens it.
+- **MCP Apps view** `ui://arcline/workspace`: preview monitor, timeline overview, control buttons, job
+  progress ([13 §8](13-product-modes-and-live-sessions.md)); tested in Claude Desktop and VS Code.
+
+**Exit criteria**
+
+- Standalone: a user asks the Agent panel for a captioned rough cut of imported footage, reviews it, undoes
+  one agent step, and exports — without leaving Arcline.
+- Embedded: the success scenario in [00 §9](00-product-scope.md) passes in Claude Desktop with the MCP Apps
+  view, and in one host without MCP Apps using the companion window and image results.
+- Agent-panel replay tests pass offline; no key material appears in logs or crash bundles.
+
+## 9. Phase G — Finish (weeks 35–41)
 
 **Goal:** a project a non-developer can complete.
 
@@ -164,7 +197,7 @@ Deliverables
 - A 10-minute, 4-track project with titles, music, and effects is edited and exported by a non-developer.
 - Budgets met on both reference machines.
 
-## 9. Phase I — Interchange export (weeks 23–28)
+## 10. Phase I — Interchange export (weeks 42–46)
 
 **Goal:** an Arcline edit opens as an editable timeline in Premiere Pro, DaVinci Resolve, and Final Cut Pro,
 and in Jianying Pro if an import path is confirmed ([12](12-project-interchange.md)).
@@ -190,7 +223,7 @@ Deliverables
 - Jianying Pro and CapCut each have a recorded lab verdict, and their profiles reflect it (editable import,
   or handoff package).
 
-## 10. Phase H — Harden (weeks 27–32)
+## 11. Phase H — Harden (weeks 47–50)
 
 **Goal:** ship v1.0 on Windows.
 
@@ -213,16 +246,17 @@ Deliverables
   notarized universal DMG. Same features as v1.0.
 - **Linux** — post-1.0, no date commitment; Flatpak, started on demonstrated demand.
 
-## 11. Explicit v1 cut list
+## 12. Explicit v1 cut list
 
-No plugins (OFX/WASM/VST3); no HDR/ACES/OCIO; no collaboration; no live GUI agent attach; no render
+No plugins (OFX/WASM/VST3); no plugins for third-party video editors; no native in-window embedding inside
+agent clients; no remote or multi-user agent access; no HDR/ACES/OCIO; no collaboration; no render
 farm/multi-GPU; no project import from other editors, no EDL/AAF, no native Jianying/CapCut drafts; no
 multicam; no screen-reader certification; no image sequences; no
 audio EQ/compressor/loudness; no three-OS installer matrix.
 
 These are not failures. They are the difference between shipping and not.
 
-## 12. Effort assumptions
+## 13. Effort assumptions
 
 | Phase | Weeks | Notes |
 |---|---|---|
@@ -231,17 +265,26 @@ These are not failures. They are the difference between shipping and not.
 | C | 7 | UI work; the largest phase |
 | D | 4 | cpal + sync; mostly known |
 | E | 4 | persistence; test-heavy |
-| F | 5 | protocol + MCP; well-scoped |
+| F | 7 | protocol + MCP (5) + local IPC, attach, control, sync (2) |
+| J | 4 | Agent panel (2), MCP Apps view (1.5), companion layout (0.5) |
 | G | 7 | broad surface; cut aggressively if late |
-| I | 5 | 1 week lab + 4 weeks writers, packaging, reports; overlaps late G |
+| I | 5 | 1 week lab + 4 weeks writers, packaging, reports |
 | H | 4 | packaging + hardening |
-| **Total** | **~32** | v1.0 (Windows); v1.1 macOS port +3–4 |
+| **Total** | **~50** | sequential; v1.0 (Windows) ≈ week 50; v1.1 macOS port +3–4 |
 
 If a phase slips beyond its estimate by more than 30%, cut from Phase G's list before extending the
 schedule — the v1 promise is a working editor with an agent surface, not a feature checklist. Within
 Phase I, cut in this order: OTIO for Premiere, consolidate/transcode modes, stems; never the report.
 
-## 13. KPIs
+If the release date matters more than scope, these cuts bring v1.0 toward ~week 42, in this order:
+1. MCP Apps view → companion window + image results only (−1.5 weeks).
+2. Agent panel → external agent clients only (−2 weeks).
+3. Phase I → FCPXML + FCP7 XML only, no OTIO; Jianying/CapCut lab deferred (−1.5 weeks).
+4. Phase G → keyframe UI and chroma key deferred (−3 weeks).
+
+Never cut: live attach, takeover, the journal guarantees, or the compatibility report.
+
+## 14. KPIs
 
 | KPI | Target at 1.0 |
 |---|---|
@@ -251,4 +294,5 @@ Phase I, cut in this order: OTIO for Premiere, consolidate/transcode modes, stem
 | p95 seek latency (proxy) | ≤ 300 ms |
 | Export throughput (1080p H.264) | ≥ 2× real time |
 | Golden-test pass rate on CI | 100% (tolerance-bounded) |
+| Human takeover of a live agent session | effective on the next batch; zero lost or duplicated edits |
 | Forced-kill recovery | zero lost acknowledged batches over 100 trials |

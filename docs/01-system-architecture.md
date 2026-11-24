@@ -1,12 +1,14 @@
 # 01 — System Architecture
 
 This document is the spine of the proposal. It describes a system sized for one developer with AI
-assistance: six crates, two deployment shapes, and no machinery that does not serve a v1 user.
+assistance: six crates, two product modes (Standalone and Embedded, [13](13-product-modes-and-live-sessions.md)),
+and no machinery that does not serve a v1 user.
 
 ## 1. Design principles
 
-1. **One core, two clients.** The engine is a library. The GUI (`arc-app`) and the headless tool
-   (`arc-cli`) are its only clients, and both drive it through the same command model.
+1. **One core, one session server, many clients.** The engine is a library. The GUI (`arc-app`) and the
+   headless tool (`arc-cli`) host the same session server; humans, the built-in Agent panel, and external
+   agents (attached or headless) all drive it through the same command model.
 2. **Commands are the only way to change state.** No component mutates the project directly. A GUI drag is
    a `MoveClip` command; an agent call is the same command. This buys undo, audit, crash recovery, and
    dry-run from one mechanism.
@@ -39,34 +41,37 @@ v1.0. The release plan and per-platform CI tiers are defined once in [ADR-0011](
 
 ## 3. Deployment topologies
 
-Two shapes, one engine:
+One engine, three shapes. A and B are the two product modes; C is the headless form used by B without a
+window and by batch jobs.
 
 ```
- A. Desktop (primary)
- ┌──────────────────────────────────────┐
- │ arcline  (arc-app)                   │
- │  ├── UI thread: egui layout + paint  │
- │  ├── engine thread (single writer)   │
- │  ├── render thread (wgpu compositor) │
- │  ├── decode threads (in-process)     │
- │  ├── audio thread (cpal callback)    │
+ A. Standalone Editor                         B. Embedded Editor (live attach)
+ ┌──────────────────────────────────────┐     ┌──────────────┐  MCP stdio  ┌─────────────────────────┐
+ │ arcline  (arc-app)                   │     │ agent client │◄───────────►│ arcline-cli mcp --attach│
+ │  ├── UI thread: egui layout + paint  │     │ (Claude      │             │ (bridge, no document)   │
+ │  ├── Agent panel worker (optional)   │     │  Desktop,    │             └────────────┬────────────┘
+ │  ├── session server + IPC listener ◄─┼─────┼──VS Code, …) │  MCP Apps view            │ named pipe
+ │  ├── engine thread (single writer)   │     │  ui://arcline│  (in host iframe)         │ (per-user ACL)
+ │  ├── render thread (wgpu compositor) │     └──────────────┘                           │
+ │  ├── decode threads (in-process)     │◄──────────────────────────────────────────────┘
+ │  ├── audio thread (cpal callback)    │     same arcline process, companion layout
  │  └── journal writer thread           │
  └───────┬──────────────────────────────┘
          │ spawns (argument vectors, no shell)
          ├── ffprobe / ffmpeg      import check, proxies, thumbnails, waveforms
          └── arcline-cli render    exports
 
- B. Headless (agents, batch)
+ C. Headless (batch, CI, agents without a window)
  ┌──────────────┐   JSON-RPC / MCP    ┌──────────────────────────────┐
  │ agent / MCP  │◄── stdio (NDJSON) ─►│ arcline-cli mcp --project …  │
  │ host         │                     │  session, commands, render   │
  └──────────────┘                     └──────────────────────────────┘
 ```
 
-Topology B is how agents work in v1: a process that opens a project file, applies commands, and renders.
-Attaching an agent to a *live GUI session* (a control socket) is a post-1.0 feature, not scheduled
-([06 §2](06-agent-interface.md)). This removes an entire IPC surface and trust model from the first
-release while keeping the protocol that will make it possible later.
+In B, every command runs in the GUI's engine, so the human sees each edit as it lands and can take over at
+any time. Local IPC, consent, control and takeover, state synchronization, and the embedding feasibility
+analysis (native in-window embedding is not available from current agent hosts) are defined in
+[13](13-product-modes-and-live-sessions.md).
 
 **No decode worker process in v1.** Preview decode runs FFmpeg in-process behind a `Decoder` trait. Error
 codes and Rust panics are recovered per clip, but a native fault inside FFmpeg (segfault, `abort`) ends the
@@ -81,19 +86,17 @@ process remains an additive upgrade ([ADR-0003](adr/0003-ffmpeg-for-media-io.md)
 Six crates, with enforced dependency rules (checked in CI from `cargo metadata`):
 
 ```
-              ┌───────────┐        ┌───────────┐
-   clients    │  arc-app  │        │  arc-cli  │
-              │  (egui)   │        │ (headless)│
-              └─────┬─────┘        └─────┬─────┘
-                    │                    │
-        ┌───────────┼────────┬───────────┼─────────┐
-        ▼           ▼        ▼           ▼         ▼
-   ┌─────────┐ ┌─────────┐ ┌────────┐ ┌────────┐ ┌─────────┐
-   │arc-render│ │arc-audio│ │arc-media│ │arc-cli │ │arc-core │
-   │ (wgpu)  │ │ (cpal)  │ │(FFmpeg) │ │ uses   │ │(no GPU, │
-   └────┬────┘ └────┬────┘ └───┬────┘ │ all    │ │ no FFmpeg)│
-        └───────────┴───────────┴──────┴────────┴─► arc-core │
-   └─────────────────────────────────────────────────────────┘
+   arc-app (egui GUI, Agent panel, IPC listener)
+      │
+      ▼
+   arc-cli (library: session server, JSON-RPC, MCP, tool registry, jobs  +  arcline-cli binary)
+      │
+      ├──────────────┬──────────────┬──────────────┐
+      ▼              ▼              ▼              │
+   arc-render     arc-audio      arc-media         │
+   (wgpu)         (cpal)         (FFmpeg)          │
+      │              │              │              │
+      └──────────────┴──────────────┴──────────────┴──► arc-core (no GPU, no FFmpeg, no UI)
 ```
 
 | Crate | Owns | May depend on | Must not depend on |
@@ -102,8 +105,8 @@ Six crates, with enforced dependency rules (checked in CI from `cargo metadata`)
 | `arc-media` | probe, decode, encode, mux, proxy/thumbnail/waveform jobs | core, FFmpeg | render, UI |
 | `arc-render` | `wgpu` device, compositor, effects, text, frame cache | core, `wgpu` | FFmpeg, UI |
 | `arc-audio` | device output, mixer, offline render | core, `cpal` | render, UI |
-| `arc-app` | `egui` shell, timeline canvas, viewer, app binary | all of the above | — |
-| `arc-cli` | headless render, interchange export jobs (packaging, baking, reports), JSON-RPC/MCP server, utilities | core, media, render, audio | `egui` |
+| `arc-app` | `egui` shell, timeline canvas, viewer, Agent panel, IPC listener, consent prompts, app binary | all of the above, including the `arc-cli` library | — |
+| `arc-cli` | library: session server, JSON-RPC/MCP, tool registry, MCP Apps resource, attach bridge, jobs; binary: headless render, interchange export, utilities | core, media, render, audio | `egui`, `arc-app` |
 
 Why this shape:
 
@@ -163,12 +166,13 @@ network requirement appears.
 
 ## 6. The protocol
 
-JSON-RPC 2.0, newline-delimited, over **stdio** in v1. Named pipes and WebSocket are later transports, not
-new implementations.
+JSON-RPC 2.0, newline-delimited, over **stdio** and **local IPC** (per-user named pipe on Windows,
+[13 §3](13-product-modes-and-live-sessions.md)) in v1, plus an in-process transport for the Agent panel.
+WebSocket is a later transport, not a new implementation.
 
 ### 6.1 Methods
 
-Thirteen methods in four groups. Full signatures are defined once, in [06 §4.1](06-agent-interface.md):
+Fifteen methods in five groups, plus four notifications. Full signatures are defined once, in [06 §4.1](06-agent-interface.md):
 
 | Group | Methods |
 |---|---|
@@ -176,6 +180,7 @@ Thirteen methods in four groups. Full signatures are defined once, in [06 §4.1]
 | History | `history.undo`, `history.redo`, `history.list` |
 | Inspect | `effect.list`, `inspect.timeline`, `inspect.frame` |
 | Jobs | `job.submit`, `job.status`, `job.cancel` |
+| Control | `control.request`, `control.release` |
 
 Every edit goes through `project.apply`; `history.undo`/`history.redo` produce new revisions from stored
 inverses; the remaining methods read state, save, or run jobs ([02 §4](02-domain-model-and-project-format.md)).
@@ -195,10 +200,11 @@ inverses; the remaining methods read state, save, or run jobs ([02 §4](02-domai
 
 ### 6.3 Trust model (v1)
 
-Local, single-user, no authentication: the process runs with the user's privileges. `arcline-cli` takes
-`--root` (media allow-list) and `--output-root` (render destinations) and rejects paths outside them before
-any syscall. Capability tokens, remote access, and multi-tenant isolation are deliberately deferred; see
-[06 §8](06-agent-interface.md).
+Local, same user: every process runs with the user's privileges. `arcline-cli` takes `--root` (media
+allow-list) and `--output-root` (render destinations) and rejects paths outside them before any syscall.
+Live sessions add a user-only pipe ACL, a discovery token, a per-client consent prompt, and human takeover
+([13 §3–5](13-product-modes-and-live-sessions.md)). Capability tokens, remote access, and multi-tenant
+isolation are deferred; see [06 §8](06-agent-interface.md).
 
 ## 7. Data flow: one edit, end to end
 
@@ -256,7 +262,9 @@ faults and is never relied on for them.
 | Point | Mechanism | Status |
 |---|---|---|
 | New built-in effect | WGSL pass + JSON manifest registered in `arc-render` | v1 |
-| Automation | JSON-RPC / MCP | v1 |
+| Automation | JSON-RPC / MCP / CLI, headless or live-attached | v1 |
+| In-client view | MCP Apps resource `ui://arcline/workspace` | v1 ([13 §8](13-product-modes-and-live-sessions.md)) |
+| Native in-window embedding in agent hosts | not offered by current hosts | Post-1.0, if a host supplies a native parent handle |
 | Third-party effect plugins | OFX / WASM | Post-1.0 ([09](09-effects-and-extensions.md)) |
 | Interchange export | FCPXML / FCP7 XML / OTIO writers in `arc-core::interchange`, export job in `arc-cli` | v1.0 ([12](12-project-interchange.md)) |
 | Interchange import | OTIO first | Post-1.0 |

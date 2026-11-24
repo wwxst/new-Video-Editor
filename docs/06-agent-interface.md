@@ -3,8 +3,9 @@
 This document specifies how an AI agent edits video in Arcline with the same authority as a human, and why
 that is safe. It is the product differentiator; the rest of the architecture exists to make it possible.
 
-v2 scope: local trust (single-user process, path allow-lists), stdio transport only, no live GUI attach,
-13 JSON-RPC methods, and 21 MCP tools. The command model, revisions, dry-run, typed errors, and rendered-frame
+v1 scope: local trust (same-user processes, path allow-lists, per-client consent for live sessions), stdio and
+local-IPC transports, live attach to a running GUI, 15 JSON-RPC methods, and 23 MCP tools. Product modes,
+live attach, control/takeover, and state sync are defined in [13](13-product-modes-and-live-sessions.md). The command model, revisions, dry-run, typed errors, and rendered-frame
 inspection — the parts that make agents effective — are unchanged.
 
 This document is the **single normative definition** of the JSON-RPC methods (§4.1) and the MCP tools
@@ -26,29 +27,37 @@ This document is the **single normative definition** of the JSON-RPC methods (§
 
 | Surface | Entry point | Transport |
 |---|---|---|
-| **JSON-RPC 2.0** | `arcline-cli rpc [--project <path>]` | stdio, newline-delimited JSON |
-| **MCP server** | `arcline-cli mcp [--project <path>]` | stdio (MCP) |
-| **CLI** | `arcline-cli new \| describe \| apply \| probe \| render \| diag` | process (one-shot) |
+| **JSON-RPC 2.0** | `arcline-cli rpc [--project <path>] [--attach]` | stdio, newline-delimited JSON |
+| **JSON-RPC 2.0 (local IPC)** | session server inside the running GUI | per-user named pipe ([13 §3](13-product-modes-and-live-sessions.md)) |
+| **MCP server** | `arcline-cli mcp [--project <path>] [--attach [--launch]]` | stdio (MCP); bridges to local IPC when attached |
+| **CLI** | `arcline-cli new \| describe \| apply \| probe \| render \| export \| diag` | process (one-shot) |
+| **Agent panel** | built into the GUI | in-process ([13 §7](13-product-modes-and-live-sessions.md)) |
 
-All three are views over the same command engine. `arcline-cli render` uses the same `arc-render`
+All are views over the same command engine and the same session server code. `arcline-cli render` uses the same `arc-render`
 compositor as the GUI, and the GUI itself exports by spawning `arcline-cli render`
 ([04 §1.2](04-media-pipeline.md)), so headless output cannot diverge from preview.
 
-**Deferred (post-1.0, unscheduled):** attaching to a live GUI session via a control socket. Agents operate
-on project files ([§9](#9-future-topologies)).
+**Headless vs attached.** Without `--attach`, `arcline-cli` opens the project file itself (headless). With
+`--attach`, it holds no document and forwards every call to the running GUI, so the human sees each edit
+live ([13 §4](13-product-modes-and-live-sessions.md)).
 
 ## 3. Session model
 
-- One process, one open project, one session in v1. `session.lock` in the project's sidecar directory
-  (PID + start time, stale detection) prevents two processes from writing the same project
-  ([08 §4.1](08-performance-reliability.md)).
+- One open project per session; the process that opened it (GUI or headless CLI) holds `session.lock`
+  ([08 §4.1](08-performance-reliability.md)). A headless open of a project a GUI has open fails with
+  `project_locked`.
+- A GUI session accepts up to 4 attached clients; each has a `client_id` used in history and audit. Edits
+  from all clients are serialized by the single engine thread; write access follows the control state
+  (`shared` / `human` / `agent:<id>`, [13 §5](13-product-modes-and-live-sessions.md)).
+- On an attached connection, `project.open` joins the GUI's session (`path` omitted or equal to the open
+  project); `create` is rejected.
 - Long-lived sessions are normal: the process keeps the document in memory and applies command sequences
   with optimistic concurrency (`base_revision`).
 - Read-only use is the same session; the client simply sends no writes.
 
 ## 4. JSON-RPC API
 
-### 4.1 Methods (13)
+### 4.1 Methods (15)
 
 All time values follow [02 §2.1/§2.3](02-domain-model-and-project-format.md): exact rational
 `{"num","den"}` seconds, or a timecode at the sequence frame rate — NDF `"HH:MM:SS:FF"`, or DF
@@ -69,6 +78,12 @@ All time values follow [02 §2.1/§2.3](02-domain-model-and-project-format.md): 
 | `job.submit` | `session`, `kind: "render" \| "interchange"`, `spec` (render: `{range?, preset, output}`; interchange: [12 §9](12-project-interchange.md)) | `job_id` |
 | `job.status` | `job_id` | `state` (`queued \| running \| done \| failed \| cancelled`), `progress`, `report?` (`export_report.json` or `interchange_report.json`), `error?` |
 | `job.cancel` | `job_id` | `state` |
+| `control.request` | `session`, `reason?` | `control` (granted after the human approves, else `not_in_control`) |
+| `control.release` | `session` | `control` |
+
+**Notifications** (server → client, no response): `session.changed`, `control.changed`, `selection.changed`,
+`job.progress` — payloads in [13 §6](13-product-modes-and-live-sessions.md). Headless sessions emit
+`session.changed` and `job.progress` only.
 
 Rules:
 
@@ -84,7 +99,8 @@ Rules:
 - **Errors** are `{code, kind, message, path?, details?}` with stable `kind` strings, including
   `stale_revision` (with the current revision), `off_frame_boundary`, `invalid_timecode`,
   `drop_frame_not_allowed`, `unsupported_frame_rate`, `inexact_frame_rate`, `overlap`, `unknown_clip`,
-  `duplicate_id`, `path_denied`, `media_quarantined`, `journal_unavailable`, `unsupported_method`.
+  `duplicate_id`, `path_denied`, `media_quarantined`, `journal_unavailable`, `unsupported_method`,
+  `not_in_control`, `consent_denied`, `project_locked`, `session_ended`, `rate_limited`.
 - Batch semantics (atomicity, whole-batch validation, dry-run, idempotency) are in
   [01 §6.2](01-system-architecture.md).
 
@@ -161,7 +177,7 @@ MARK
 injects `session`; for single-intent tools `base_revision` is optional and defaults to the current revision
 (the process has one client). `edit_apply` accepts an explicit `base_revision`.
 
-### 6.1 Tools (21) and their JSON-RPC mapping
+### 6.1 Tools (23) and their JSON-RPC mapping
 
 | # | Tool | JSON-RPC | Notes |
 |---|---|---|---|
@@ -186,10 +202,17 @@ injects `session`; for single-intent tools `base_revision` is optional and defau
 | 19 | `render_submit` | `job.submit` (`kind: "render"`) | |
 | 20 | `render_status` | `job.status` | status of any job; includes the export or interchange report when done |
 | 21 | `interchange_export` | `job.submit` (`kind: "interchange"`) | FCPXML / FCP7 XML / OTIO + package + compatibility report ([12](12-project-interchange.md)) |
+| 22 | `control_request` | `control.request` | asks the human for exclusive control; live sessions only |
+| 23 | `control_release` | `control.release` | hands control back |
 
 Design notes:
 
 - Every mutating tool (4–11, 13–15) accepts `dry_run` and returns the diff it would make.
+- In live sessions every tool result carries a `state` field (`revision`, `control`, `playhead`) so the agent
+  notices human edits and takeovers without polling; mutating tools fail with `not_in_control` after a
+  takeover.
+- Where the host supports MCP Apps, `project_describe`, `inspect_frame`, and `render_status` link the
+  `ui://arcline/workspace` view ([13 §8](13-product-modes-and-live-sessions.md)).
 - Schemas are generated from the Rust command types, so tool docs cannot drift from behavior.
 - Anything not covered by a dedicated tool is reachable through `edit_apply` (e.g. `track.add`,
   `audio.set_gain`, `audio.set_fades`, `subtitle.import`). Methods without a tool (`history.redo`,
@@ -202,7 +225,11 @@ arcline://project/timeline.txt      text view (same as inspect.timeline, full ra
 arcline://project/document.json     canonical document (large; use sparingly)
 arcline://project/schema.json       JSON schema for commands
 arcline://effects/catalog.json      effect manifests (same as effect.list)
+ui://arcline/workspace              MCP Apps view (only when the host negotiates io.modelcontextprotocol/ui)
 ```
+
+`arcline://project/timeline.txt` supports subscriptions; `session.changed` is delivered as
+`notifications/resources/updated`.
 
 ## 7. Jobs
 
@@ -222,19 +249,25 @@ telling a user that a project is ready to open in another editor ([12 §6](12-pr
 | File access | `--root` media allow-list and `--output-root` for renders; canonicalized paths; symlink escapes rejected before any syscall |
 | Untrusted media | subprocess import check, quarantine, crash breadcrumbs, out-of-process render ([04 §1.2](04-media-pipeline.md)); child processes get argument vectors, never shell strings |
 | Resource abuse | per-session caps: batch size, concurrent jobs, total render minutes (configurable) |
-| Audit | every committed batch is journaled and listed by `history.list` |
+| Live sessions | per-user named pipe ACL, discovery token, GUI consent prompt per client, control/takeover, max 4 clients, per-client rate limits ([13 §3–5](13-product-modes-and-live-sessions.md)) |
+| Agent panel | off until configured; API key in the OS credential store; tool results treated as data; confirmation for renders, exports, and new save paths ([13 §7](13-product-modes-and-live-sessions.md)) |
+| Audit | every committed batch is journaled with its `client_id` and listed by `history.list` |
 | Data safety | acknowledged batches survive process crashes; `durable: true` extends this to power loss ([08 §4.7](08-performance-reliability.md)) |
 
-No authentication, capability tokens, or multi-tenant isolation: the process runs as the user, locally.
-Remote transports and tokens arrive with the remote topology, and the threat model grows with them.
+No capability tokens or multi-tenant isolation: everything runs as the same local user, and the human's
+consent and takeover are the controls on live sessions. Remote transports and scoped tokens arrive with the
+remote topology, and the threat model grows with them.
 
 ## 9. Future topologies
 
 Post-1.0 and unscheduled. When added, the protocol does not change; only transport and authorization do:
 
-1. Local named pipe to a running GUI: per-user socket path in a discovery file.
-2. Remote WebSocket: TLS required for non-loopback binds; a scoped capability token per session.
-3. Multi-session daemon: sessions become addressable and isolated.
+1. Remote WebSocket: TLS required for non-loopback binds; a scoped capability token per session.
+2. Multi-session daemon: sessions become addressable and isolated.
+3. Native in-window embedding, if an agent host offers a native parent handle
+   ([13 §2](13-product-modes-and-live-sessions.md)).
+
+(The local named-pipe topology moved into v1.0 — [ADR-0013](adr/0013-product-modes-and-live-sessions.md).)
 
 ## 10. Worked example: agent produces a 24-second cut
 

@@ -37,7 +37,8 @@ Details: [12 — Cross-Editor Project Export](../12-project-interchange.md).
 
 ## Consequences
 
-- v1.0 grows by one phase (~5 weeks), moving the Windows release from ~week 27 to ~week 32.
+- v1.0 grows by one phase (~5 weeks). (Calendar weeks in the original text were superseded by the sequential
+  roadmap recalculation of 2026-11-24; see [10](../10-roadmap.md).)
 - Agents can hand a rough cut to a human in another editor with an honest account of what survived.
 - Lab work is recurring: target editors change, so profiles are re-verified when versions change.
 - Final Cut Pro verification needs access to a Mac even though v1.0 ships on Windows only.

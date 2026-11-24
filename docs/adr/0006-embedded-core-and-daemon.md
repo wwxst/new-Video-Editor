@@ -1,6 +1,8 @@
 # ADR-0006 — Embedded core + headless CLI, one protocol
 
-**Status:** Accepted, revised 2026-11-24 after architecture review.
+**Status:** Accepted, revised 2026-11-24 after architecture review. **Superseded in part by
+[ADR-0013](0013-product-modes-and-live-sessions.md)** (2026-11-24): live GUI attach and the local named-pipe
+transport are now in v1.0; the rest of this decision stands.
 
 ## Context
 

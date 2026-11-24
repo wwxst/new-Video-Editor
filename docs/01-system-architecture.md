@@ -18,12 +18,12 @@ assistance: six crates, two deployment shapes, and no machinery that does not se
 6. **Simplicity before robustness theater.** In-process decode, single-process export, one fallback quality
    level. Process isolation and parallel export are documented upgrade paths, not v1 work.
 7. **Budgets, not vibes.** Every subsystem has numbers with CI gates ([08](08-performance-reliability.md)).
-8. **Windows first.** Windows is the primary target through v1.0; macOS follows; Linux is post-1.0
-   ([ADR-0011](adr/0011-windows-first.md)).
+8. **Windows first.** v1.0 ships on Windows only; macOS ships in v1.1; Linux is post-1.0 with no date
+   commitment ([ADR-0011](adr/0011-windows-first.md)).
 
 ## 2. Platform matrix
 
-| Concern | Windows (v1.0) | macOS (follow-up) | Linux (post-1.0) |
+| Concern | Windows (v1.0) | macOS (v1.1) | Linux (post-1.0, unscheduled) |
 |---|---|---|---|
 | Graphics API | D3D12 (Vulkan fallback) | Metal | Vulkan |
 | GPU abstraction | `wgpu` | `wgpu` | `wgpu` |
@@ -33,8 +33,9 @@ assistance: six crates, two deployment shapes, and no machinery that does not se
 | Windowing | `winit` (via `eframe`) | `winit` | `winit` |
 | Packaging | Portable zip + MSIX, signed | DMG, notarized, universal | Flatpak (community) |
 
-Minimums: Windows 10 21H2; macOS 13; Ubuntu 22.04 when Linux support starts. Code stays portable from day
-one, and CI compiles on all three OSes to prevent bit-rot, but only Windows is a shipping target in v1.
+Minimums: Windows 10 21H2 (x64) for v1.0; macOS 13 for v1.1; Ubuntu 22.04 when Linux support starts. Code
+stays portable from day one and CI compiles on all three OSes, but only Windows is a shipping target in
+v1.0. The release plan and per-platform CI tiers are defined once in [ADR-0011](adr/0011-windows-first.md).
 
 ## 3. Deployment topologies
 
@@ -48,8 +49,12 @@ Two shapes, one engine:
  │  ├── engine thread (single writer)   │
  │  ├── render thread (wgpu compositor) │
  │  ├── decode threads (in-process)     │
- │  └── audio thread (cpal callback)    │
- └──────────────────────────────────────┘
+ │  ├── audio thread (cpal callback)    │
+ │  └── journal writer thread           │
+ └───────┬──────────────────────────────┘
+         │ spawns (argument vectors, no shell)
+         ├── ffprobe / ffmpeg      import check, proxies, thumbnails, waveforms
+         └── arcline-cli render    exports
 
  B. Headless (agents, batch)
  ┌──────────────┐   JSON-RPC / MCP    ┌──────────────────────────────┐
@@ -59,14 +64,17 @@ Two shapes, one engine:
 ```
 
 Topology B is how agents work in v1: a process that opens a project file, applies commands, and renders.
-Attaching an agent to a *live GUI session* (a control socket) is a v1.1+ feature; it is explicitly not in
-v1 ([06 §2](06-agent-interface.md)). This removes an entire IPC surface and trust model from the first
+Attaching an agent to a *live GUI session* (a control socket) is a post-1.0 feature, not scheduled
+([06 §2](06-agent-interface.md)). This removes an entire IPC surface and trust model from the first
 release while keeping the protocol that will make it possible later.
 
-**No decode subprocess in v1.** FFmpeg runs in-process behind a `Decoder` trait, with panics caught at the
-call boundary and autosave limiting blast radius. The trait shape permits moving decode into a worker
-process later without changing callers. This is the largest deliberate robustness trade in v1, and it is
-recorded in [ADR-0003](adr/0003-ffmpeg-for-media-io.md).
+**No decode worker process in v1.** Preview decode runs FFmpeg in-process behind a `Decoder` trait. Error
+codes and Rust panics are recovered per clip, but a native fault inside FFmpeg (segfault, `abort`) ends the
+process — `catch_unwind` cannot prevent that. v1 contains the risk instead: untested media is checked in a
+child process before it is decoded in-process, crash breadcrumbs quarantine any file implicated in a crash,
+exports run in a child `arcline-cli render` process, and the journal guarantees no acknowledged edit is lost
+([04 §1](04-media-pipeline.md), [08 §4](08-performance-reliability.md)). Moving preview decode into a worker
+process remains an additive upgrade ([ADR-0003](adr/0003-ffmpeg-for-media-io.md)).
 
 ## 4. Crate graph
 
@@ -137,8 +145,10 @@ boundaries inside `arc-core` (e.g. `model` vs `command`) carry the discipline th
 
 Rules:
 
-- The **engine thread** owns the document and never blocks on I/O. Persistence is an append-only journal
-  written by a background task.
+- The **engine thread** owns the document and never blocks on I/O. Each committed batch is handed to the
+  **journal writer thread**; protocol responses wait for that write, the GUI does not
+  ([08 §4.3](08-performance-reliability.md)). Commands that reference files (`asset.import`,
+  `subtitle.import`, LUTs) are read/probed by the session layer *before* they reach the engine.
 - The **UI thread** never waits on decode. A missing frame shows the nearest cached frame with a stale
   indicator.
 - The **audio callback** allocates nothing and takes no locks; it drains a pre-filled SPSC ring.
@@ -157,17 +167,17 @@ new implementations.
 
 ### 6.1 Methods
 
-```
-project.open      {path, create?}        → session, schema, renderer, revision, project summary
-project.describe  {session, exact?}      → compact summary (tracks, clips, issues)
-project.apply     {session, base_revision, commands[], dry_run?, idempotency_key?}
-                  → {revision, applied, resulting[], warnings[]}
-project.save      {session}              → {path}
-job.submit        {session, kind: "render", spec} → {job_id}
-job.status        {job_id}               → {state, progress, report?, error?}
-job.cancel        {job_id}
-history.undo/redo {session}              → {revision}
-```
+Thirteen methods in four groups. Full signatures are defined once, in [06 §4.1](06-agent-interface.md):
+
+| Group | Methods |
+|---|---|
+| Project | `project.open`, `project.describe`, `project.apply`, `project.save` |
+| History | `history.undo`, `history.redo`, `history.list` |
+| Inspect | `effect.list`, `inspect.timeline`, `inspect.frame` |
+| Jobs | `job.submit`, `job.status`, `job.cancel` |
+
+Every edit goes through `project.apply`; `history.undo`/`history.redo` produce new revisions from stored
+inverses; the remaining methods read state, save, or run jobs ([02 §4](02-domain-model-and-project-format.md)).
 
 ### 6.2 Semantics
 
@@ -200,15 +210,16 @@ GUI drag of a clip:
                     track kind matches, no overlap after the explicit ripple policy,
                     times are exact rationals on frame boundaries
 4. Engine thread  applies → new immutable snapshot (structural sharing)
-                  appends to the journal, bumps revision, publishes via arc-swap
-5. Render thread  sees the new snapshot; invalidates cache keys for the affected range
-6. UI thread      receives ApplyResult; the optimistic ghost is reconciled
-7. Autosave task  enqueues a periodic snapshot write
+                  bumps revision, publishes via arc-swap, hands the record to the journal writer
+5. Journal writer write()s the record → batch committed (survives process crash)
+6. Render thread  sees the new snapshot; invalidates cache keys for the affected range
+7. UI thread      receives ApplyResult; the optimistic ghost is reconciled
+8. Autosave       snapshot every 30 batches / 60 s; group fsync per 08 §4.4
 ```
 
 The UI moves a **ghost** optimistically during drag; authoritative state always comes from the engine. If
 validation fails, the ghost animates back and the typed error is shown. An agent experiences the same flow
-without the ghost.
+without the ghost, except that its `project.apply` response is sent only after step 5.
 
 ## 8. Startup and project open
 
@@ -231,11 +242,12 @@ background. Shader pipelines are cached per driver to avoid first-frame hitches.
 | Layer | Example | Handling |
 |---|---|---|
 | **Domain error** | overlap, unknown clip, unsupported codec | Typed `CommandError`, returned to the client, no log noise |
-| **Operational error** | decoder panic, GPU device lost, disk full | Caught and recovered: restart decoder, recreate device, pause and warn |
-| **Defect** | invariant violation | Engine thread catches panics per batch, marks the session degraded, keeps the last good snapshot exportable, writes a crash bundle |
+| **Operational error** | FFmpeg error code, Rust panic in decoder wrapper, GPU device lost, journal write failure | Recovered: per-clip `MediaError`, recreate device, read-only degraded session on journal failure |
+| **Defect** | invariant violation in the engine | Engine thread catches panics per batch, marks the session degraded, keeps the last good snapshot exportable, writes a crash bundle |
+| **Fatal** | native fault in FFmpeg or a driver (segfault, `abort`) | Process ends. Next launch recovers from journal and quarantines the implicated asset ([04 §1.2](04-media-pipeline.md)) |
 
-No panic crosses into the UI thread. A decoder panic is converted into a `MediaError` for that clip; other
-clips continue to decode.
+No Rust panic crosses into the UI thread. `catch_unwind` only handles Rust panics; it never handles native
+faults and is never relied on for them.
 
 ## 10. Extension points
 

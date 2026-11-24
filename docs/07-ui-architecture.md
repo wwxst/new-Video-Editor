@@ -115,7 +115,14 @@ Budget: 60 fps scroll and drag with 8 tracks and 2,000 visible clip-seconds; 8 m
 ## 8. Failure UX
 
 - **GPU device loss**: "Restoring GPU…" overlay ≤ 2 s; session continues.
-- **Decoder error/panic**: the clip shows a damaged-media hatch; retry is one click; other clips continue.
+- **Decoder error** (error code or wrapper panic): the clip shows a damaged-media hatch; retry is one click;
+  other clips continue.
+- **Quarantined media** (failed import check, or implicated in a previous crash): badge on the asset;
+  preview uses its proxy; the reason is shown in the inspector ([04 §1.2](04-media-pipeline.md)).
+- **After an unclean exit**: the recovery dialog reports the recovered revision, any discarded journal
+  records, and any newly quarantined asset ([08 §4.6](08-performance-reliability.md)).
+- **Export failure**: exports run in a child process, so a crash fails the job with a report; the session
+  continues.
 - **Engine degraded**: banner with "Export last good state" and "View crash report".
 - **Missing media**: placeholders with asset names; relink is one click; the timeline stays fully editable.
 - **Long operations**: jobs show progress in the status bar with cancel; nothing modal except file dialogs

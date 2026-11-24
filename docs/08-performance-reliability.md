@@ -28,7 +28,7 @@ v2 scales both to a single developer: fewer gates, one reference machine, and te
 | Memory, 4K project + caches | ≤ 6 GB RSS | memory manager enforces |
 | Audio callback | ≤ 3 ms worst case at 128 frames | p99.9 |
 | Determinism | bit-exact, same machine | asserted in CI |
-| Forced-kill recovery | zero lost edits, 100 trials | autosave + journal |
+| Forced-kill recovery | zero lost *acknowledged* edits, 100 trials | journal ack rule, §4 |
 
 ## 3. Memory policy
 
@@ -48,18 +48,95 @@ crash bundle, not a user-facing event.
 
 ## 4. Persistence and crash recovery
 
-1. **Journal**: every applied batch, append-only with a CRC per record, fsync every second or 100 batches.
-2. **Autosave**: every 30 commands and every 60 s; write temp → fsync → rename.
-3. **Explicit save**: snapshot + journal truncation into the container, checksums, atomic rename.
-4. **Recovery**: if the journal is newer than the snapshot, replay it; if replay fails at record N, offer
-   recovery to N−1 with a diff of what is lost. Never silently discard.
+This section is the single normative definition of persistence. Other documents link here.
 
-Forced-kill testing (`TerminateProcess`/`SIGKILL` at random points) is part of CI: 100 trials per run, zero
-unrecoverable sessions required.
+### 4.1 On-disk layout
 
-In-process decode raises the stakes on malicious media. Mitigations: decoder panics are caught per clip,
-the journal limits loss to the last second of edits, and the media path never executes shell interpolation.
-A decode worker process is the documented next step if crash rates justify it ([ADR-0003](adr/0003-ffmpeg-for-media-io.md)).
+```
+Demo.arcline                     # container (ZIP): last explicit save, replaced atomically
+Demo.arcline.autosave/           # sidecar directory, same parent folder
+├── snapshot-<rev>.json          # latest autosave snapshot (canonical project.json at revision <rev>)
+├── journal-<rev>.bin            # batches committed after snapshot <rev>, append-only
+├── session.lock                 # PID + start time; stale-lock detection
+└── crash-breadcrumb             # assets being decoded in-process (see 04 §1.2)
+```
+
+### 4.2 Journal records
+
+Each record: `magic | length (u32) | revision (u64) | payload (resolved forward commands, CBOR) | CRC32C`.
+Records are appended with a single `write` call each. A torn or corrupt tail is detected by length/CRC and
+truncated during recovery; nothing after the first invalid record is trusted.
+
+### 4.3 Commit point and acknowledgement
+
+1. The engine validates and applies a batch, then publishes the new snapshot immediately (UI stays
+   responsive; the engine thread never waits on disk).
+2. The batch's record is handed to the **journal writer thread**, which `write`s it to the file.
+3. A batch is **committed** when that `write` returns: the bytes are in the OS page cache and survive any
+   *process* crash or kill.
+4. **Protocol clients** (`project.apply` responses) are acknowledged only after step 3. An acknowledged
+   batch is never lost to a process crash.
+5. **The GUI** does not wait. Batches queued to the writer but not yet written when the process dies (in
+   practice the last few milliseconds of interaction) can be lost. The UI never shows a "saved" state for
+   them.
+6. If a journal `write` fails (disk full, permission, device removed), the session enters **read-only
+   degraded mode**: further commands are rejected with `journal_unavailable`, the user is warned, and the
+   last committed state can still be exported or saved elsewhere. Edits are never accumulated without a
+   journal.
+
+### 4.4 `fsync` policy
+
+`write` protects against process crashes only. Protection against OS crash or power loss requires `fsync`
+(`FlushFileBuffers` on Windows):
+
+| Mode | Journal flush | Use |
+|---|---|---|
+| **Default** | group `fsync` at most 1 s after the oldest unflushed record, and on save, on window focus loss, and on clean exit | GUI and most agent sessions |
+| **Durable** (`--durable`, or `durable: true` at `project.open`) | `fsync` before acknowledging each batch | pipelines that cannot tolerate any loss; adds a few ms per batch |
+
+### 4.5 Snapshots and saves
+
+- **Autosave** (every 30 committed batches or 60 s, whichever comes first, if anything changed): write
+  `snapshot-<rev>.json.tmp` → `fsync` file → rename to `snapshot-<rev>.json` → start `journal-<rev>.bin` →
+  delete the previous snapshot and journal. On Windows the rename uses `MoveFileExW` with
+  `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`; on macOS/Linux the parent directory is `fsync`ed
+  after rename.
+- **Explicit save**: write `Demo.arcline.tmp` (ZIP with checksums) → `fsync` → atomic replace of
+  `Demo.arcline` (same rename rules) → write an autosave snapshot at the saved revision and rotate the
+  journal. An interrupted save leaves the previous container intact.
+- A clean exit after an explicit save removes the sidecar directory.
+
+### 4.6 Recovery algorithm
+
+On open, if the sidecar directory exists and is newer than the container:
+
+1. Load the newest valid base: `snapshot-<rev>.json` if its checksum verifies, else the container.
+2. Replay `journal-<rev>.bin` records in order, verifying CRC and that each `revision` is exactly one more
+   than the last. Each record is re-validated through the normal command path.
+3. Stop at the first invalid record or failed validation. Report the recovered revision, the number of
+   records discarded, and offer: open recovered state (default), open last explicit save, or keep both.
+4. Never silently discard: the unrecovered tail is preserved as `journal-<rev>.bin.rejected` for support.
+
+### 4.7 Data-loss guarantees (summary)
+
+| Event | Default mode | Durable mode |
+|---|---|---|
+| App crash, panic, `TerminateProcess`/`SIGKILL` | no acknowledged batch lost; GUI may lose writer-queued batches (milliseconds) | same |
+| OS crash, power loss | at most ~1 s of committed batches | no acknowledged batch lost |
+| Disk full / journal write failure | no silent loss; session becomes read-only | same |
+| Corrupt container on disk | recover from sidecar snapshot + journal if present | same |
+| Storage device that ignores flush requests | not guaranteed (hardware limitation) | not guaranteed |
+
+Forced-kill testing (`TerminateProcess`/`SIGKILL` at random points during edits, autosaves, and saves) runs
+in CI: 100 trials per run; required result is zero lost acknowledged batches and zero unopenable projects.
+Power-loss behavior is verified manually with a VM hard-reset test before each release.
+
+### 4.8 Media crash isolation
+
+In-process FFmpeg decode can terminate the whole process; `catch_unwind` does not prevent that. The
+isolation strategy (subprocess import check, crash breadcrumbs, quarantine, out-of-process export) is
+defined in [04 §1](04-media-pipeline.md). Persistence guarantees above are what bound the cost of such a
+crash: the user loses no acknowledged edits and reopens into the recovered state.
 
 ## 5. Telemetry and crash reporting
 
@@ -91,10 +168,14 @@ A decode worker process is the documented next step if crash rates justify it ([
   Goldens are regenerated deliberately, with the change reviewed.
 - **Pipeline integration**: generated fixture media (color bars, motion patterns, tone sweeps) → import →
   edit → export → decode → compare. No third-party media in CI.
-- **Fuzzing**: project JSON and text-timeline parsers; a mutated-media corpus fed through the decoder path,
-  asserting the app survives.
-- **Compile matrix**: Windows is the release target; macOS and Linux `cargo check` run on every PR to
-  prevent bit-rot.
+- **Fuzzing**: project JSON and text-timeline parsers in-process. A mutated-media corpus is fed through the
+  **subprocess import check** ([04 §1.2](04-media-pipeline.md)), asserting the parent survives and every
+  crashing/hanging file ends up quarantined. The same corpus runs through the in-process decoder in a
+  separate harness process, where crashes are expected to be possible and are triaged as FFmpeg or wrapper
+  defects.
+- **CI matrix**: per the release plan in [ADR-0011](adr/0011-windows-first.md) — Windows: build, full test
+  suite, packaging. macOS: `cargo check` on every PR until v1.1 work starts, then full tests. Linux:
+  `cargo check` plus `arc-core` tests on every PR (core is platform-independent).
 
 ## 7. Profiling
 

@@ -12,7 +12,9 @@ must be validated exactly.
 ## Decision
 
 Represent all timing as **exact rationals** (`Time { num: i64, den: u32 }`, normalized) with an explicit
-project **timebase** (frame duration as a rational). All arithmetic uses checked `i128` intermediates.
+project **timebase** stored as the frame duration (e.g. `1001/30000`); the frame rate (`30000/1001`) is its
+exact reciprocal and is the form shown to users and agents. The two are never interchanged or mislabeled
+([02 §2.1](../02-domain-model-and-project-format.md)). All arithmetic uses checked `i128` intermediates.
 Floating point is forbidden in timing paths; conversions to frames require an explicit rounding mode.
 Serialization uses `{"num","den"}` objects.
 

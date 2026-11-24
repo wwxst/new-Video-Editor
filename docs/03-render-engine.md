@@ -133,7 +133,8 @@ quality:         if p95 frame time exceeds budget for 500 ms → drop to half re
 
 ## 7. Export pipeline
 
-Single process, sequential frames, hardware encoder — simpler and fast enough:
+One export process (`arcline-cli render`, spawned as a child by the GUI or by `job.submit` —
+[04 §1.2](04-media-pipeline.md)), sequential frames, hardware encoder — simpler and fast enough:
 
 ```
 render frames in range → GPU readback ring (2–3 frames) → encoder → mux

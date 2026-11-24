@@ -34,14 +34,37 @@ The single most important type in the system.
 /// Exact rational seconds. Normalized: den > 0, gcd(num, den) == 1.
 pub struct Time { num: i64, den: u32 }   // e.g. 1001/30000 = one NTSC frame
 
-/// A project timebase is a frame duration as a rational.
+/// A sequence timebase. Stored as the frame duration; the frame rate is its exact reciprocal.
 pub struct Timebase { frame_duration: Time }
+impl Timebase { pub fn frame_rate(&self) -> Rational; }   // 1 / frame_duration
 
 pub fn frame_at(time: Time, tb: Timebase, mode: Round) -> i64;
 pub fn time_of_frame(frame: i64, tb: Timebase) -> Time;
 ```
 
+### 2.1 Frame rate vs frame duration (canonical terminology)
+
+Two quantities, never interchanged, used identically in every document, schema, and example:
+
+| Term | Meaning | Unit | NTSC 29.97 example | Where it appears |
+|---|---|---|---|---|
+| `frame_rate` | frames per second | frames/s | `30000/1001` | agent-facing summaries, `project.open` create params, asset probe, text timeline (`fps=`) |
+| `frame_duration` | seconds per frame | s | `1001/30000` | stored sequence timebase (`timebase.frame_duration`), internal `Time` math |
+
 Rules:
+
+- `frame_rate × frame_duration = 1`, exactly. Conversion is a rational reciprocal, never a float.
+- The word **timebase** names the stored `{frame_duration}` object only. A rate is never labeled "timebase".
+- In JSON, the stored form is `{"num": …, "den": …}`; agent-facing summaries may use the string form
+  `"30000/1001"`, always under the key `frame_rate`.
+- **Assets** report a nominal `frame_rate` from the container. Variable-frame-rate sources (common on
+  phones) set `"vfr": true`; their frames are mapped to the sequence timebase by presentation timestamp,
+  with the nominal rate used only for display.
+- **Time inputs on the wire** are either an exact rational `{"num","den"}` (seconds) or a timecode string
+  `"HH:MM:SS:FF"` interpreted at the sequence `frame_rate`. Both are normalized to `Time` before validation;
+  a rational that is not on a frame boundary fails with `off_frame_boundary`.
+
+### 2.2 Time rules
 
 1. **No floats in the timing path.** `f64` seconds appear only for display and in effect parameters, never
    in clip boundaries or timing serialization.
@@ -67,8 +90,8 @@ Rules:
   "probe": {                               // cached, nullable, refreshed async
     "duration": {"num": 7502, "den": 1001},
     "streams": [ { "index": 0, "type": "video", "codec": "h264",
-                   "width": 3840, "height": 2160, "fps": {"num": 30000, "den": 1001},
-                   "pix_fmt": "yuv420p10le", "rotation": 0 } ]
+                   "width": 3840, "height": 2160, "frame_rate": {"num": 30000, "den": 1001},
+                   "vfr": false, "pix_fmt": "yuv420p10le", "rotation": 0 } ]
   },
   "proxy": "cache/proxies/as_01J8Z…/half.mp4",
   "waveform": "cache/wave/as_01J8Z….peak",
@@ -85,7 +108,7 @@ not fail the open; they become **offline assets** that render as placeholders an
 {
   "id": "sq_01J8Z…",
   "name": "Main",
-  "timebase": {"frame_duration": {"num": 1001, "den": 30000}},
+  "timebase": {"frame_duration": {"num": 1, "den": 30}},     // frame_rate 30/1
   "resolution": {"w": 1920, "h": 1080},
   "working_space": "rec709",
   "sample_rate": 48000,
@@ -102,6 +125,9 @@ composites on top); deleting a track deletes its clips atomically; commands addr
 position.
 
 ### 3.3 Clip
+
+All times below sit on frame boundaries of the 30 fps sequence in §3.2. Audio fades are sample-grained
+(1/4 s = 12,000 samples at 48 kHz) and are exempt from the frame-boundary rule.
 
 ```jsonc
 {
@@ -200,7 +226,7 @@ The v1 command set. Every command is a JSON object with `op` and typed fields, v
 
 | Group | Commands |
 |---|---|
-| Project | `project.rename`, `project.set_settings`, `project.save` |
+| Project | `project.rename`, `project.set_settings` |
 | Asset | `asset.import`, `asset.relink`, `asset.remove`, `asset.generate_proxy` |
 | Track | `track.add`, `track.remove`, `track.reorder`, `track.set_properties` |
 | Clip | `timeline.add_clip`, `timeline.remove_clip`, `timeline.move_clip`, `timeline.trim_clip`, `timeline.split_clip`, `timeline.set_speed`, `timeline.set_transform`, `timeline.set_enabled`, `timeline.set_label` |
@@ -210,20 +236,32 @@ The v1 command set. Every command is a JSON object with `op` and typed fields, v
 | Subtitle | `subtitle.add_cue`, `subtitle.set_cue`, `subtitle.remove_cue`, `subtitle.import` |
 | Title | `title.add`, `title.set_text`, `title.set_style` |
 | Markers | `marker.add`, `marker.remove` |
-| History | `history.undo`, `history.redo` |
+
+Saving, undo/redo, inspection, and rendering are **not** document commands: they do not go through
+`project.apply` and are not journaled as edits. They are protocol methods (`project.save`, `history.undo`,
+`history.redo`, `inspect.*`, `job.*`) defined in [06 §4](06-agent-interface.md).
 
 **Command shape rule:** commands name entities by ID and express intent (`move_clip`), not mechanism.
+
+**Client-assigned IDs.** Creation commands (`track.add`, `asset.import`, `timeline.add_clip`, `effect.add`,
+`title.add`, `timeline.add_transition`, `marker.add`) accept an optional `id` with the correct prefix
+(e.g. `"tr_music"`). This lets one atomic batch create an entity and reference it in later commands. If
+omitted, the engine assigns a ULID; either way the final IDs are returned in `resulting`. Duplicate IDs fail
+with `duplicate_id`.
 Ripple semantics are explicit: `trim_clip { ripple: "none" | "track" | "all" }`, default `none`. The GUI's
 magnetic behaviors expand into explicit commands before sending, so human and agent edits are recorded
 identically.
 
 ## 5. Undo, redo, journal
 
-- During apply the engine derives `InverseCommand` values; undo applies inverses in reverse.
-- The **journal** (`journal.bin`, append-only, length-prefixed records with CRC) records every applied
-  batch with its inverse. Recovery replays the journal onto the last snapshot.
-- Journal compaction happens on save. Undo history is not persisted across sessions; the last 5,000 batches
+- During apply the engine derives `InverseCommand` values and keeps them in memory; `history.undo` applies
+  them in reverse as a new revision. Undo history is not persisted across sessions; the last 5,000 batches
   are available as an edit-history panel.
+- The **journal** records every committed batch as its **resolved forward commands** (all IDs and times
+  normalized), so replay is deterministic. Undo and redo are journaled as the batches they produce.
+- The journal lives in a sidecar directory next to the container, never inside the ZIP (a ZIP cannot be
+  appended safely). Record format, write/fsync policy, recovery algorithm, and data-loss guarantees are
+  specified once, in [08 §4](08-performance-reliability.md).
 
 ## 6. File format: `.arcline`
 
@@ -247,7 +285,8 @@ Rules:
   triggers the recovery UI.
 - **Save modes:** *link* (default; media stays in place) and *collect* (media copied into `media/`, relative
   paths only).
-- **Autosave** writes to `.arcline.autosave/`; explicit save writes temp → fsync → atomic rename.
+- **Autosave and journal** live in the sidecar directory `<name>.arcline.autosave/`; explicit save replaces
+  the container atomically. Procedures are in [08 §4](08-performance-reliability.md).
 - Target document size ≤ 5 MB for a 2-hour, 2,000-clip project.
 
 ## 7. Schema versioning and migration

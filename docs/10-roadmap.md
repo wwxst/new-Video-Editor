@@ -4,7 +4,8 @@ Sized for **one developer with AI assistance**. Estimates assume focused full-ti
 typing and boilerplate, not integration debugging, codec build matrices, or UI polish. Phases are vertical
 slices: each one ends with something runnable.
 
-Windows is the release target through v1.0 ([ADR-0011](adr/0011-windows-first.md)).
+This roadmap delivers **v1.0 on Windows**. **v1.1** is the macOS port (no new features); **Linux** is
+post-1.0 with no date. The release plan and CI tiers are defined in [ADR-0011](adr/0011-windows-first.md).
 
 ## 1. Phase overview
 
@@ -48,16 +49,19 @@ Deliverables
 
 Deliverables
 
-- `arc-media`: FFmpeg in-process probe/decode/encode, hardware-first, panic isolation at the clip boundary.
+- `arc-media`: FFmpeg in-process decode/encode, hardware-first; error codes and wrapper panics mapped to
+  per-clip `MediaError`; subprocess import check (`ffprobe` + test decode, timeout) and quarantine
+  ([04 §1.2](04-media-pipeline.md)).
 - `arc-render`: offscreen device + minimal compositor (single track, transform, color convert).
 - `arcline-cli render`: range, resolution, preset; `export_report.json`.
-- Windows FFmpeg LGPL build pipeline pinned in the repo; macOS/Linux `cargo check`.
+- Windows FFmpeg LGPL build pipeline pinned in the repo; macOS/Linux CI per ADR-0011.
 
 **Exit criteria**
 
 - `arcline-cli render in.mov out.mp4 --range …` is frame-accurate against a reference decode.
 - Hardware H.264/HEVC and AV1 (SVT) encode paths work on the reference machine.
-- A corrupt file produces a clean per-clip error, not a process crash.
+- A corrupt file produces a clean per-clip error; a file that crashes or hangs `ffprobe`/`ffmpeg` in the
+  import check is quarantined and the parent process survives (mutated-media corpus).
 
 ## 4. Phase C — Compositor and shell (weeks 6–12)
 
@@ -99,13 +103,20 @@ Deliverables
 
 Deliverables
 
-- Autosave, journal compaction, crash recovery UI, atomic saves.
+- Persistence per [08 §4](08-performance-reliability.md): sidecar directory, journal writer thread,
+  commit/ack rule, group `fsync` and durable mode, autosave snapshots, atomic container replace, recovery
+  dialog, read-only degraded mode on journal failure.
+- Crash breadcrumbs, automatic quarantine after an unclean exit, decode hang watchdog.
 - Offline media and relink; proxy generation via `ffmpeg` CLI as a background job.
-- Export presets, save modes (link/collect), project settings UI.
+- GUI export through a child `arcline-cli render` process; export presets, save modes (link/collect),
+  project settings UI.
 
 **Exit criteria**
 
-- 100 forced kills during editing and saving: zero lost edits.
+- 100 forced kills during editing, autosave, and save: zero lost acknowledged batches, zero unopenable
+  projects.
+- VM hard-reset test: default mode loses at most ~1 s of edits; durable mode loses none.
+- A forced native crash during preview decode reopens into the recovered state with the asset quarantined.
 - A project with moved media opens with placeholders and relinks by path or hash.
 
 ## 7. Phase F — Agent surface (weeks 15–19)
@@ -114,8 +125,10 @@ Deliverables
 
 Deliverables
 
-- `arc-cli`: JSON-RPC session over stdio, `project.apply`, revisions, dry-run, idempotency, typed errors.
-- MCP server (`arcline-cli mcp`) with the 20 tools, resources, and rendered-frame inspection.
+- `arc-cli`: `arcline-cli rpc` with the 13 JSON-RPC methods of [06 §4.1](06-agent-interface.md),
+  revisions, dry-run, idempotency, typed errors, acknowledgement after journal write.
+- `arcline-cli mcp` with the 20 tools of [06 §6.1](06-agent-interface.md), resources, and rendered-frame
+  inspection.
 - Text timeline (`inspect.timeline`), read-only.
 - Render jobs with progress and reports.
 - Reference agent script and integration guide.
@@ -145,7 +158,7 @@ Deliverables
 
 ## 9. Phase H — Harden (weeks 23–27)
 
-**Goal:** ship Windows v1.
+**Goal:** ship v1.0 on Windows.
 
 Deliverables
 
@@ -156,12 +169,15 @@ Deliverables
 
 **Exit criteria**
 
-- 30-day dogfood with real projects; zero lost-edit incidents.
+- 30-day dogfood with real projects; zero lost acknowledged edits.
 - Clean-VM install → open sample → export in under 5 minutes.
 - Legal sign-off on codec posture.
 
-**macOS** follows with +3–4 weeks (FFmpeg build, Metal validation, notarization, packaging). **Linux** is
-post-1.0, community-assisted.
+**After v1.0** ([ADR-0011](adr/0011-windows-first.md)):
+
+- **v1.1 — macOS port**, +3–4 weeks: FFmpeg build, VideoToolbox paths, CoreAudio, Metal validation, full CI,
+  notarized universal DMG. Same features as v1.0.
+- **Linux** — post-1.0, no date commitment; Flatpak, started on demonstrated demand.
 
 ## 10. Explicit v1 cut list
 
@@ -183,7 +199,7 @@ These are not failures. They are the difference between shipping and not.
 | F | 5 | protocol + MCP; well-scoped |
 | G | 7 | broad surface; cut aggressively if late |
 | H | 4 | packaging + hardening |
-| **Total** | **~27** | +3–4 for macOS |
+| **Total** | **~27** | v1.0 (Windows); v1.1 macOS port +3–4 |
 
 If a phase slips beyond its estimate by more than 30%, cut from Phase G's list before extending the
 schedule — the v1 promise is a working editor with an agent surface, not a feature checklist.
@@ -198,4 +214,4 @@ schedule — the v1 promise is a working editor with an agent surface, not a fea
 | p95 seek latency (proxy) | ≤ 300 ms |
 | Export throughput (1080p H.264) | ≥ 2× real time |
 | Golden-test pass rate on CI | 100% (tolerance-bounded) |
-| Forced-kill recovery | zero lost edits over 100 trials |
+| Forced-kill recovery | zero lost acknowledged batches over 100 trials |

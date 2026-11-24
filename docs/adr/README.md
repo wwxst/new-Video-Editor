@@ -9,7 +9,7 @@ a new ADR references the old one, and the old file's status changes to `Supersed
 |---|---|---|
 | [0001](0001-rust-for-core-and-ui.md) | Rust for core and UI | Accepted (revised 2026-11-24) |
 | [0002](0002-wgpu-gpu-abstraction.md) | `wgpu` as the GPU abstraction | Accepted (revised 2026-11-24) |
-| [0003](0003-ffmpeg-for-media-io.md) | FFmpeg for media I/O, in-process in v1 | Accepted (revised 2026-11-24) |
+| [0003](0003-ffmpeg-for-media-io.md) | FFmpeg for media I/O, in-process preview decode in v1 | Accepted (revised 2026-11-24) |
 | [0004](0004-rational-time-model.md) | Exact rational time model | Accepted |
 | [0005](0005-command-driven-document.md) | Command-driven document, single writer | Accepted |
 | [0006](0006-embedded-core-and-daemon.md) | Embedded core + headless CLI, one protocol | Accepted (revised 2026-11-24) |
@@ -17,4 +17,4 @@ a new ADR references the old one, and the old file's status changes to `Supersed
 | [0008](0008-plugin-strategy.md) | Built-in effects now; plugin tiers deferred | Accepted (revised 2026-11-24) |
 | [0009](0009-determinism-contract.md) | Same-machine determinism, tolerance goldens | Accepted (revised 2026-11-24) |
 | [0010](0010-text-timeline-for-agents.md) | Read-only text timeline for agents | Accepted (revised 2026-11-24) |
-| [0011](0011-windows-first.md) | Windows-first delivery strategy | Accepted 2026-11-24 |
+| [0011](0011-windows-first.md) | Windows-first release strategy (v1.0 Windows, v1.1 macOS, Linux post-1.0) | Accepted 2026-11-24 |

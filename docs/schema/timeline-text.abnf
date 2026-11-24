@@ -3,24 +3,26 @@
 ; timeline.apply_text (parsing a rewritten timeline into commands) is deferred to v1.1; the grammar is
 ; published now so readers and future writers share one definition.
 ; Lines terminate with LF or CRLF. A line beginning with '#' (after optional WSP) is a comment.
-; Times are HH:MM:SS:FF at the sequence timebase (drop-frame notation HH:MM:SS;FF is display-only
+; Times are HH:MM:SS:FF at the sequence frame rate (drop-frame notation HH:MM:SS;FF is display-only
 ; and MUST NOT appear on the wire). The version line MUST be the first line.
+; Terminology follows docs/02 §2.1: "fps=" carries the frame RATE (frames per second, e.g. 30000/1001);
+; the stored frame DURATION (1001/30000) never appears in this format.
 ; This grammar is frozen at v1; additions require a new format version.
 
 timeline        = version-line sequence-line *WSP
                   *( track / marker-block / comment-line / blank-line )
 
 version-line    = "# arcline timeline v1" endl
-sequence-line   = "SEQ" 1*WSP quoted-name 1*WSP resolution 1*WSP timebase
+sequence-line   = "SEQ" 1*WSP quoted-name 1*WSP resolution 1*WSP "fps=" frame-rate
                   1*WSP "dur=" timecode endl
 
 resolution      = 1*DIGIT "x" 1*DIGIT          ; 1920x1080
-timebase        = 1*DIGIT "/" 1*DIGIT          ; frame duration, e.g. 30000/1001
+frame-rate      = 1*DIGIT "/" 1*DIGIT          ; frames per second, e.g. 30000/1001 or 25/1
 timecode        = 1*2DIGIT ":" 2DIGIT ":" 2DIGIT ":" 2DIGIT
 number          = ["-"] 1*DIGIT ["." 1*DIGIT]
 boolean         = "true" / "false"
 
-track           = "TRK" 1*WSP track-kind 1*DIGIT *WSP *( track-attr 1*WSP ) endl
+track           = "TRK" 1*WSP track-kind 1*DIGIT *( 1*WSP track-attr ) *WSP endl
                   *( clip / blank-line )
 track-kind      = "V" / "A" / "S"              ; video / audio / subtitle (kind is fixed per track)
 track-attr      = "name=" quoted-name
@@ -33,7 +35,7 @@ db              = number "dB"                   ; e.g. -6.0dB (may also be writt
 
 clip            = 2*WSP "[" clip-id "]" 1*WSP source 1*WSP
                   "in=" timecode 1*WSP "len=" timecode 1*WSP "@" timecode
-                  *WSP *( clip-attr 1*WSP ) endl
+                  *( 1*WSP clip-attr ) *WSP endl
 
 clip-id         = 1*( ALPHA / DIGIT / "_" )
 source          = quoted-name                   ; asset file name as shown in the media bin

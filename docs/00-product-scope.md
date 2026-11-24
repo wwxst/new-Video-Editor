@@ -27,7 +27,7 @@ produce user-visible capability in the first six months is deferred.
 
 | Requirement | Design section | Milestone |
 |---|---|---|
-| Windows, macOS, Linux | [01 §2](01-system-architecture.md), [04 §6](04-media-pipeline.md), [11 §3](11-risks-and-legal.md) | Windows at H; macOS after; Linux post-1.0 |
+| Windows, macOS, Linux | [01 §2](01-system-architecture.md), [04 §6](04-media-pipeline.md), [11 §3](11-risks-and-legal.md) | v1.0 Windows (Phase H); v1.1 macOS; Linux post-1.0 ([ADR-0011](adr/0011-windows-first.md)) |
 | Native cross-platform architecture | [01](01-system-architecture.md), ADR-0001/0002/0011 | A–C |
 | Multi-track timeline | [02 §3](02-domain-model-and-project-format.md), [07 §4](07-ui-architecture.md) | C |
 | GPU rendering | [03](03-render-engine.md) | C |
@@ -48,11 +48,12 @@ Explicit and binding. Each item removed here is weeks returned to the core produ
 - **No HDR, ACES, or OCIO.** Rec.709 SDR with LUT support is the v1 color story.
 - **No collaboration or multi-user.** Command logs remain mergeable in principle; live sync is post-1.0.
 - **No live GUI agent attach.** Agents run headless against project files; attaching to an open GUI session
-  is a v1.1+ feature.
+  is post-1.0 and unscheduled.
 - **No interchange formats** (EDL/FCPXML/OTIO) in v1.
 - **No multicam, cloud rendering, render farms, multi-GPU, or mobile.**
 - **No screen-reader certification** in v1; keyboard completeness is required instead.
-- **No three-OS installer matrix.** Windows ships first; macOS packaging follows; Linux is post-1.0.
+- **No macOS or Linux in v1.0.** v1.0 is Windows-only; v1.1 is the macOS port; Linux is post-1.0 with no date
+  ([ADR-0011](adr/0011-windows-first.md)).
 - **No motion-graphics compositor** (masks/tracking/node graphs are post-1.0).
 
 ## 5. What "professional" means here
@@ -84,5 +85,6 @@ by one person with AI.
 - An agent, given footage and a brief, produces a reviewable 60-second cut with captions, music, and a title
   through MCP only — and a human can open the same project and finish it.
 - A 10-minute 1080p30 project with 4 video tracks and 8 effects previews at ≥ 30 fps on mid-tier hardware.
-- Zero lost-edit incidents across a 30-day soak with forced-kill testing.
+- Zero lost acknowledged edits across a 30-day soak with forced-kill testing
+  ([08 §4.7](08-performance-reliability.md)).
 - A non-developer completes import → cut → export without reading documentation.

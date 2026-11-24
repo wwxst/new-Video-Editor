@@ -27,7 +27,7 @@ and the MCP server are consequences of that one decision.
 
 What changed in v2, after review: a solo-calibrated scope, `egui` instead of a custom widget toolkit, six
 crates instead of eighteen, a direct compositor instead of a generic render graph, in-process decode, a
-simplified agent surface, and a 27-week roadmap to a Windows v1.
+simplified agent surface, and a 27-week roadmap to v1.0 on Windows.
 
 ---
 
@@ -59,12 +59,12 @@ simplified agent surface, and a 27-week roadmap to a Windows v1.
 | Language | Rust 2024, single workspace, no GC, no FFI boundary in the hot path | [0001](docs/adr/0001-rust-for-core-and-ui.md) |
 | GPU | `wgpu` (Vulkan / Metal / D3D12) via `egui-wgpu`; one device, CPU uploads for video | [0002](docs/adr/0002-wgpu-gpu-abstraction.md) |
 | UI | `egui` + `egui_dock` shell; timeline and viewer are custom-painted canvases | [0007](docs/adr/0007-native-wgpu-ui.md) |
-| Codecs | FFmpeg `libav*` in-process (LGPL build); `ffmpeg` CLI for proxies/thumbs/waveforms | [0003](docs/adr/0003-ffmpeg-for-media-io.md) |
+| Codecs | FFmpeg `libav*` (LGPL build): preview decode in-process; import check, proxies, and exports in child processes | [0003](docs/adr/0003-ffmpeg-for-media-io.md) |
 | Document | Immutable snapshots + single-writer command engine; all mutation via typed commands | [0005](docs/adr/0005-command-driven-document.md) |
 | Time | Exact rational time; frame boundaries derived per project timebase | [0004](docs/adr/0004-rational-time-model.md) |
 | Deployment | Embedded core in the app + headless CLI/MCP process; one JSON-RPC protocol | [0006](docs/adr/0006-embedded-core-and-daemon.md) |
 | Crates | Six: `core`, `media`, `render`, `audio`, `app`, `cli` | [0001](docs/adr/0001-rust-for-core-and-ui.md) |
-| Platform order | Windows-first; macOS second; Linux after 1.0 | [0011](docs/adr/0011-windows-first.md) |
+| Release plan | v1.0 Windows; v1.1 macOS port; Linux post-1.0, unscheduled | [0011](docs/adr/0011-windows-first.md) |
 | Plugins | None in v1; internal effect manifests only; OFX/WASM/VST3 deferred | [0008](docs/adr/0008-plugin-strategy.md) |
 | Determinism | Bit-exact per machine; tolerance-bounded golden tests; no cross-device contract in v1 | [0009](docs/adr/0009-determinism-contract.md) |
 | Agent text | Read-only EDL-like text view; writes go through JSON commands | [0010](docs/adr/0010-text-timeline-for-agents.md) |
@@ -84,7 +84,7 @@ simplified agent surface, and a 27-week roadmap to a Windows v1.
 | **G Finish** | 18–24 | A non-developer edits and exports a 10-minute project |
 | **H Harden** | 23–27 | Budgets met; Windows installer; beta with external users |
 
-Windows v1: **week 27**. macOS: +3–4 weeks. Linux: post-1.0 (Flatpak/community).
+**v1.0 (Windows): week 27.** v1.1 (macOS port, no new features): +3–4 weeks. Linux: post-1.0, no date.
 
 ---
 

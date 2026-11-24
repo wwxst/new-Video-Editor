@@ -11,7 +11,7 @@ specified a round-tripping `apply_text` path (parse text → diff → commands).
 ## Decision
 
 Provide a **versioned, read-only text projection** (`inspect.timeline`) with a published ABNF grammar.
-Writes go through typed JSON commands; `timeline.apply_text` is deferred to v1.1.
+Writes go through typed JSON commands; `timeline.apply_text` is deferred to post-1.0.
 
 - The view carries structure, timing, and top-level effect parameters; full fidelity stays in JSON.
 - `inspect.timeline` accepts a time range so large projects are consumable in chunks.

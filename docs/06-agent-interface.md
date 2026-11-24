@@ -3,10 +3,12 @@
 This document specifies how an AI agent edits video in Arcline with the same authority as a human, and why
 that is safe. It is the product differentiator; the rest of the architecture exists to make it possible.
 
-v2 changes: the trust model is local and unauthenticated (single-user process, path allow-lists), the live
-GUI-attach topology is deferred, transport is stdio only, and the tool surface is a compact 20 tools. The
-command model, revisions, dry-run, typed errors, and image inspection — the parts that make agents effective
-— are unchanged.
+v2 scope: local trust (single-user process, path allow-lists), stdio transport only, no live GUI attach,
+13 JSON-RPC methods, and 20 MCP tools. The command model, revisions, dry-run, typed errors, and rendered-frame
+inspection — the parts that make agents effective — are unchanged.
+
+This document is the **single normative definition** of the JSON-RPC methods (§4.1) and the MCP tools
+(§6.1). Other documents reference it.
 
 ## 1. Principles
 
@@ -22,211 +24,254 @@ command model, revisions, dry-run, typed errors, and image inspection — the pa
 
 ## 2. Surfaces
 
-| Surface | Purpose | Transport |
+| Surface | Entry point | Transport |
 |---|---|---|
-| **JSON-RPC 2.0** | Sessions, commands, jobs | stdio (NDJSON) in v1 |
-| **MCP server** (`arcline-cli mcp`) | Standard agent integration | stdio |
-| **CLI** (`arcline-cli`) | Stateless operations: `probe`, `render`, `convert`, `mcp` | process |
+| **JSON-RPC 2.0** | `arcline-cli rpc [--project <path>]` | stdio, newline-delimited JSON |
+| **MCP server** | `arcline-cli mcp [--project <path>]` | stdio (MCP) |
+| **CLI** | `arcline-cli new \| describe \| apply \| probe \| render \| diag` | process (one-shot) |
 
-All three are views over the same command engine. The CLI's `render` path uses the same `arc-render`
-compositor as the GUI, so headless output cannot diverge from preview.
+All three are views over the same command engine. `arcline-cli render` uses the same `arc-render`
+compositor as the GUI, and the GUI itself exports by spawning `arcline-cli render`
+([04 §1.2](04-media-pipeline.md)), so headless output cannot diverge from preview.
 
-**Deferred:** attaching to a live GUI session via a control socket. Agents operate on project files. This
-removes an IPC surface and a trust model from v1; the protocol is designed so the topology can be added
-without changing semantics ([§9](#9-future-topologies)).
+**Deferred (post-1.0, unscheduled):** attaching to a live GUI session via a control socket. Agents operate
+on project files ([§9](#9-future-topologies)).
 
 ## 3. Session model
 
-```
-project.open {path, create?} → {session, protocol, schema, renderer, revision, summary}
-```
-
-- One process, one open project in v1. The project file is locked (`project.lock` with PID + stale
-  detection) so two processes cannot write the same file.
-- Sessions are cheap: opening a project with read-only intent is the same call; the client simply does not
-  send writes.
+- One process, one open project, one session in v1. `session.lock` in the project's sidecar directory
+  (PID + start time, stale detection) prevents two processes from writing the same project
+  ([08 §4.1](08-performance-reliability.md)).
 - Long-lived sessions are normal: the process keeps the document in memory and applies command sequences
-  with optimistic concurrency.
+  with optimistic concurrency (`base_revision`).
+- Read-only use is the same session; the client simply sends no writes.
 
-## 4. Command API
+## 4. JSON-RPC API
 
-The command set is [02 §4](02-domain-model-and-project-format.md). Wire form:
+### 4.1 Methods (13)
+
+All time values follow [02 §2.1](02-domain-model-and-project-format.md): exact rational `{"num","den"}`
+seconds, or a `"HH:MM:SS:FF"` timecode at the sequence `frame_rate`.
+
+| Method | Params | Result |
+|---|---|---|
+| `project.open` | `path`, `create?: {name, resolution: [w,h], frame_rate: "30000/1001", sample_rate?: 48000}`, `durable?: bool` | `session`, `protocol`, `schema`, `renderer`, `revision`, `summary` (= `project.describe`), `recovered?` |
+| `project.describe` | `session`, `exact?: bool` | compact summary (§4.3) |
+| `project.apply` | `session`, `base_revision`, `commands[]`, `dry_run?`, `idempotency_key?`, `comment?` | `revision`, `applied`, `resulting[]`, `warnings[]`, `diff?` |
+| `project.save` | `session`, `path?` | `path`, `revision` |
+| `history.undo` | `session`, `base_revision?` | `revision`, `undone` (batch summary) |
+| `history.redo` | `session`, `base_revision?` | `revision`, `redone` |
+| `history.list` | `session`, `limit?` | audit entries: `revision`, time, command types, comment, diff hash |
+| `effect.list` | `session` | effect manifests ([02 §3.4](02-domain-model-and-project-format.md)) |
+| `inspect.timeline` | `session`, `range?: {from, to}` | text view (§5) |
+| `inspect.frame` | `session`, one of `at` (sequence time) · `clip` + `at_local` · `asset` + `at`, `max_px?: 1600` | PNG (base64) of the **composited** output (source frame for `asset`) |
+| `job.submit` | `session`, `kind: "render"`, `spec: {range?, preset, output}` | `job_id` |
+| `job.status` | `job_id` | `state` (`queued \| running \| done \| failed \| cancelled`), `progress: {frames_done, frames_total}`, `report?`, `error?` |
+| `job.cancel` | `job_id` | `state` |
+
+Rules:
+
+- **Edits only through `project.apply`.** Save, undo/redo, inspection, and jobs are methods, not commands
+  ([02 §4](02-domain-model-and-project-format.md)).
+- **Commit and acknowledgement.** A `project.apply` (or undo/redo) response is sent only after the batch's
+  journal record has been written; with `durable: true` also after `fsync`
+  ([08 §4.3–4.4](08-performance-reliability.md)).
+- **File-referencing commands** (`asset.import`, `subtitle.import`, LUT assets) are resolved by the session
+  layer before the engine sees them: paths are checked against `--root`, media runs the subprocess import
+  check and probe ([04 §1.2](04-media-pipeline.md)), subtitle files are parsed. The engine thread never does
+  file I/O. The per-asset outcome (`ok`, `quarantined`, `offline`) is returned in `resulting`.
+- **Errors** are `{code, kind, message, path?, details?}` with stable `kind` strings, including
+  `stale_revision` (with the current revision), `off_frame_boundary`, `overlap`, `unknown_clip`,
+  `duplicate_id`, `path_denied`, `media_quarantined`, `journal_unavailable`, `unsupported_method`.
+- Batch semantics (atomicity, whole-batch validation, dry-run, idempotency) are in
+  [01 §6.2](01-system-architecture.md).
+
+### 4.2 Example request
 
 ```json
 {
   "jsonrpc": "2.0", "id": "1", "method": "project.apply",
   "params": {
-    "session": "s_…",
+    "session": "s_01J9…",
     "base_revision": 88,
     "commands": [
-      {"op": "timeline.split_clip", "clip": "cl_…", "at": {"num": 125, "den": 30}},
-      {"op": "effect.add", "clip": "cl_…", "effect": "core.color.correct"}
+      {"op": "timeline.split_clip", "clip": "cl_a91f", "at": "00:00:04:05"},
+      {"op": "effect.add", "id": "fx_grade", "clip": "cl_a91f", "effect": "core.color.correct"}
     ],
     "comment": "split at the eye-line change, then grade"
   }
 }
 ```
 
-Semantics ([01 §6](01-system-architecture.md)): atomic batches, whole-batch validation, dry-run,
-idempotency keys, one revision increment per commit.
+### 4.3 Read side
 
-**Read side.** `project.describe` returns a compact summary, not the full document:
+`project.describe` returns a compact summary, not the full document:
 
 ```json
 {
   "revision": 88,
-  "sequence": {"name": "Main", "duration": "00:01:30:12", "timebase": "30000/1001",
+  "sequence": {"name": "Main", "duration": "00:01:30:12", "frame_rate": "30000/1001",
                "resolution": [1920, 1080]},
-  "tracks": [{"id": "tr_V1", "kind": "video", "clips": 3},
-             {"id": "tr_A1", "kind": "audio", "clips": 2}],
-  "clips": [{"id": "cl_…", "track": "tr_V1", "asset": "interview_a.mov",
+  "tracks": [{"id": "tr_v1", "kind": "video", "clips": 3},
+             {"id": "tr_a1", "kind": "audio", "clips": 2}],
+  "clips": [{"id": "cl_a91f", "track": "tr_v1", "asset": "interview_a.mov",
              "start": "00:00:00:00", "end": "00:00:12:14", "source_in": "00:00:04:02",
              "effects": ["core.color.correct"], "enabled": true}],
+  "assets": [{"id": "as_a", "path": "interview_a.mov", "status": "ok",
+              "duration": "00:03:12:00", "frame_rate": "30000/1001", "vfr": false}],
   "issues": [], "missing": []
 }
 ```
 
-Timecodes are `HH:MM:SS:FF` at the project timebase for legibility; exact rationals are available with
-`exact: true`. Timecodes render rationals — they never replace them.
+Timecodes are `HH:MM:SS:FF` at the sequence `frame_rate`; `exact: true` adds rationals. Timecodes render
+rationals — they never replace them.
 
 ## 5. Text timeline (read view)
 
-LLMs reason better over linear text than nested JSON. `inspect.timeline` returns a dense EDL-like view:
+LLMs reason better over linear text than nested JSON. `inspect.timeline` returns a dense EDL-like view
+([grammar](schema/timeline-text.abnf)):
 
 ```
 # arcline timeline v1
-SEQ "Main" 1920x1080 30000/1001 dur=00:01:30:12
+SEQ "Main" 1920x1080 fps=30000/1001 dur=00:01:30:12
 TRK V1 name="A-Roll" op=1.0
-  [cl_a91f] interview_a.mov  in=00:00:04:02 len=00:00:12:14 @00:00:00:00 fx=color.correct(exposure=0.15,contrast=1.1)
-  [cl_b00e] broll_city.mov    in=00:00:00:00 len=00:00:04:00  @00:00:12:14 fx=scale(1.2)
+  [cl_a91f] "interview_a.mov" in=00:00:04:02 len=00:00:12:14 @00:00:00:00 fx=core.color.correct(exposure=0.15,contrast=1.1)
+  [cl_b00e] "broll_city.mov" in=00:00:00:00 len=00:00:04:00 @00:00:12:14
 TRK V2 name="Titles"
-  [cl_c41d] <<TITLE "Chapter One">> len=00:00:05:00 @00:00:02:00 style=lower_third
+  [cl_c41d] << TITLE "Chapter One" >> in=00:00:00:00 len=00:00:05:00 @00:00:02:00 style=lower_third
 TRK A1 name="Music" gain=-6dB
-  [cl_d7e2] music_main.wav in=00:00:00:00 len=00:01:30:00 @00:00:00:00 fade=in:0.5s,out:2s
+  [cl_d7e2] "music_main.wav" in=00:00:00:00 len=00:01:30:00 @00:00:00:00 fade=in:500ms,out:2s
 MARK
   00:00:12:14 "cut point"
 ```
 
-- **Read-only in v1.** `timeline.apply_text` (diff a rewritten timeline into a command batch) is deferred
-  to v1.1. Writes go through JSON commands, which are typed, validated, and unambiguous.
-- **Stable and parseable.** One clip per line, fixed field order, quoting for spaces. The grammar ships in
-  [schema/timeline-text.abnf](schema/timeline-text.abnf).
-- **Partial reads.** `inspect.timeline` accepts a time range so a 2,000-clip project is consumable in
-  chunks.
-- **Lossless for structure, lossy for depth.** Full parameter and keyframe detail stays in JSON
-  (`inspect.clip <id> --json`).
-
-Both `inspect.timeline` and `inspect.clip` are MCP resources so an agent can re-read state after edits.
+- **Read-only in v1.** Writes go through JSON commands. Round-trip text editing (`timeline.apply_text`) is
+  post-1.0 ([ADR-0010](adr/0010-text-timeline-for-agents.md)).
+- **Stable and parseable.** One clip per line, fixed field order, quoted names. `fps=` is the frame rate.
+- **Partial reads.** `range` makes a 2,000-clip project consumable in chunks.
+- **Lossless for structure, lossy for depth.** Full parameters and keyframes stay in the JSON document
+  resource.
 
 ## 6. MCP surface
 
-`arcline-cli mcp --project <path>` speaks MCP over stdio, wrapping the JSON-RPC session.
+`arcline-cli mcp [--project <path>]` speaks MCP over stdio and wraps one JSON-RPC session. The facade
+injects `session`; for single-intent tools `base_revision` is optional and defaults to the current revision
+(the process has one client). `edit_apply` accepts an explicit `base_revision`.
 
-### 6.1 Tools (20)
+### 6.1 Tools (20) and their JSON-RPC mapping
 
-| Group | Tools |
-|---|---|
-| Project | `project_open` (creates if missing), `project_describe`, `project_save` |
-| Media | `media_import` (returns probe summary) |
-| Edit | `timeline_add_clip`, `timeline_move_clip`, `timeline_trim_clip`, `timeline_split_clip`, `timeline_remove_clip`, `timeline_add_transition` |
-| Effects | `effect_list` (returns manifests), `effect_add`, `effect_set_params` |
-| Audio | `audio_set_gain` |
-| Text | `title_add`, `subtitle_import` |
-| Inspect | `inspect_timeline`, `inspect_frame` |
-| Render | `render_submit`, `render_status` |
+| # | Tool | JSON-RPC | Notes |
+|---|---|---|---|
+| 1 | `project_open` | `project.open` | `create` makes a new project; `durable` optional |
+| 2 | `project_describe` | `project.describe` | |
+| 3 | `project_save` | `project.save` | |
+| 4 | `media_import` | `project.apply` → `asset.import` ×N | `files: [{path, id?}]`; returns per-asset `ok \| quarantined \| offline` |
+| 5 | `edit_apply` | `project.apply` | any command batch from [02 §4](02-domain-model-and-project-format.md): tracks, audio, subtitles, markers, transforms… |
+| 6 | `timeline_add_clip` | `project.apply` → `timeline.add_clip` | |
+| 7 | `timeline_move_clip` | `project.apply` → `timeline.move_clip` | |
+| 8 | `timeline_trim_clip` | `project.apply` → `timeline.trim_clip` | `ripple` explicit |
+| 9 | `timeline_split_clip` | `project.apply` → `timeline.split_clip` | |
+| 10 | `timeline_remove_clip` | `project.apply` → `timeline.remove_clip` | |
+| 11 | `timeline_add_transition` | `project.apply` → `timeline.add_transition` | adjacent clips on the same track |
+| 12 | `effect_list` | `effect.list` | manifests: parameters, ranges, defaults |
+| 13 | `effect_add` | `project.apply` → `effect.add` | |
+| 14 | `effect_set_params` | `project.apply` → `effect.set_params` | |
+| 15 | `title_add` | `project.apply` → `title.add` | title is a clip on a video track |
+| 16 | `inspect_timeline` | `inspect.timeline` | text view |
+| 17 | `inspect_frame` | `inspect.frame` | image content block |
+| 18 | `history_undo` | `history.undo` | |
+| 19 | `render_submit` | `job.submit` (`kind: "render"`) | |
+| 20 | `render_status` | `job.status` | includes `export_report.json` when done |
 
 Design notes:
 
-- **One tool per intent**, narrow parameters, no flag strings. Schemas are generated from the Rust command
-  types so tool docs cannot drift from behavior.
-- `inspect_frame` returns an image content block (PNG, ≤ 1600 px) **of the composited output**, not the raw
-  source frame. This is how an agent checks its grade, transition, or title placement.
-- `effect_list` returns manifests, so agents discover parameters and ranges instead of guessing.
-- Every mutating tool accepts `dry_run` and returns the diff it would make.
-- The full command set remains available through the JSON-RPC `project.apply` method (batch, undo/redo,
-  relinking, markers). MCP exposes the common path; power users drop to JSON-RPC rather than growing the
-  tool surface.
+- Every mutating tool (4–11, 13–15) accepts `dry_run` and returns the diff it would make.
+- Schemas are generated from the Rust command types, so tool docs cannot drift from behavior.
+- Anything not covered by a dedicated tool is reachable through `edit_apply` (e.g. `track.add`,
+  `audio.set_gain`, `audio.set_fades`, `subtitle.import`). Methods without a tool (`history.redo`,
+  `history.list`, `job.cancel`) are available over JSON-RPC. The tool count stays at 20 on purpose.
 
 ### 6.2 Resources
 
 ```
-arcline://project/timeline.txt    text projection (re-readable after each edit)
-arcline://project/document.json   full canonical document (large; use sparingly)
-arcline://project/schema.json     JSON schema for commands
-arcline://effects/catalog.json    installed effect manifests
-arcline://media/{asset}/wave.png  waveform image
+arcline://project/timeline.txt      text view (same as inspect.timeline, full range)
+arcline://project/document.json     canonical document (large; use sparingly)
+arcline://project/schema.json       JSON schema for commands
+arcline://effects/catalog.json      effect manifests (same as effect.list)
 ```
 
 ## 7. Jobs
 
-Rendering is a job, decoupled from command calls:
-
-```
-render_submit {sequence, range, preset, output} → {job_id}
-render_status {job_id} → {state: queued|running|done|failed|cancelled,
-                          progress: {frames_done, frames_total},
-                          report: {…} | null, error?}
-```
-
-Jobs survive client disconnect because they belong to the process, not the connection. Cancellation is
-cooperative and checked per frame. Results include `export_report.json` inline so the agent can verify
-rather than trust.
+Rendering is a job, decoupled from edits. `job.submit` snapshots the document at the current revision and
+spawns `arcline-cli render` as a child process, so later edits do not affect a running render and a render
+crash cannot end the session. Jobs belong to the process, not the connection; cancellation is checked per
+frame; `job.status` returns `export_report.json` inline when done, so the agent verifies rather than trusts.
 
 ## 8. Trust and safety (v1)
 
 | Concern | Control |
 |---|---|
-| File access | `--root` media allow-list and `--output-root` for renders; canonicalized paths; symlink escapes rejected before syscalls |
-| Untrusted media | decode panics caught per clip; no shell interpolation of paths (`Command` args only) |
+| File access | `--root` media allow-list and `--output-root` for renders; canonicalized paths; symlink escapes rejected before any syscall |
+| Untrusted media | subprocess import check, quarantine, crash breadcrumbs, out-of-process render ([04 §1.2](04-media-pipeline.md)); child processes get argument vectors, never shell strings |
 | Resource abuse | per-session caps: batch size, concurrent jobs, total render minutes (configurable) |
-| Audit | every applied batch logged with timestamp, command types, and diff hash; queryable via `history.list` |
-| Destructive writes | `project.save` writes atomically; an optional `--snapshot-before-save` keeps the previous container |
+| Audit | every committed batch is journaled and listed by `history.list` |
+| Data safety | acknowledged batches survive process crashes; `durable: true` extends this to power loss ([08 §4.7](08-performance-reliability.md)) |
 
 No authentication, capability tokens, or multi-tenant isolation: the process runs as the user, locally.
-Remote transports and tokens are added with the remote topology, and the threat model grows with them.
+Remote transports and tokens arrive with the remote topology, and the threat model grows with them.
 
 ## 9. Future topologies
 
-When a live-attach or remote mode is added (v1.1+), the protocol does not change; only transport and
-authorization change:
+Post-1.0 and unscheduled. When added, the protocol does not change; only transport and authorization do:
 
-1. Local named pipe to a running GUI: a per-user socket path in a discovery file.
+1. Local named pipe to a running GUI: per-user socket path in a discovery file.
 2. Remote WebSocket: TLS required for non-loopback binds; a scoped capability token per session.
 3. Multi-session daemon: sessions become addressable and isolated.
 
-The design deliberately keeps these additive. Nothing in the command semantics depends on how the client
-connected.
+## 10. Worked example: agent produces a 24-second cut
 
-## 10. Worked example: agent produces a 45-second cut
+Sequence at `frame_rate` 30000/1001; all times are timecodes at that rate. Agent-chosen IDs are used so
+one batch can create and reference entities ([02 §4](02-domain-model-and-project-format.md)).
 
 ```
-1  project_create {name:"Launch Teaser", res:[1920,1080], timebase:"30000/1001"}
-2  media_import {files:["a_roll.mov","b_roll.mov","music.flac"]}
-   → [{asset:"as_a", duration:"00:03:12:00"}, {asset:"as_b", …}, {asset:"as_m", …}]
-3  project_describe → assets, durations, fps, issues
-4  inspect_frame {asset:"as_b", at:"00:00:41:02"} → image  (the agent looks at the footage)
-5  edit_apply {base_revision:0, commands:[
-     {op:"track.add", kind:"video", name:"A-Roll"},
-     {op:"track.add", kind:"video", name:"B-Roll"},
-     {op:"track.add", kind:"audio", name:"Music"},
-     {op:"timeline.add_clip", track:"tr_V1", asset:"as_a",
-        start:T(0), source_in:T(12.5), duration:T(18)},
-     {op:"timeline.add_clip", track:"tr_V2", asset:"as_b",
-        start:T(18), source_in:T(41), duration:T(6)},
-     {op:"timeline.add_clip", track:"tr_A1", asset:"as_m",
-        start:T(0), duration:T(45), audio:{gain_db:-9, fade_out:T(2)}},
+1  project_open {path:"launch_teaser.arcline",
+                 create:{name:"Launch Teaser", resolution:[1920,1080], frame_rate:"30000/1001"}}
+   → revision 0
+2  media_import {files:[{path:"a_roll.mov", id:"as_a"}, {path:"b_roll.mov", id:"as_b"},
+                        {path:"music.flac", id:"as_m"}]}
+   → revision 1; resulting: [{id:"as_a", status:"ok", duration:"00:03:12:00", frame_rate:"30000/1001"}, …]
+3  inspect_frame {asset:"as_b", at:"00:00:41:00"} → image          (look at the source footage)
+4  edit_apply {base_revision:1, commands:[
+     {op:"track.add", id:"tr_v1", kind:"video", name:"Main"},
+     {op:"track.add", id:"tr_v2", kind:"video", name:"Titles"},
+     {op:"track.add", id:"tr_a1", kind:"audio", name:"Music"},
+     {op:"timeline.add_clip", id:"cl_a", track:"tr_v1", asset:"as_a",
+        start:"00:00:00:00", source_in:"00:00:12:15", duration:"00:00:18:00"},
+     {op:"timeline.add_clip", id:"cl_b", track:"tr_v1", asset:"as_b",
+        start:"00:00:18:00", source_in:"00:00:41:00", duration:"00:00:06:00"},
+     {op:"timeline.add_clip", id:"cl_m", track:"tr_a1", asset:"as_m",
+        start:"00:00:00:00", source_in:"00:00:00:00", duration:"00:00:24:00"},
+     {op:"audio.set_gain",  clip:"cl_m", gain_db:-9},
+     {op:"audio.set_fades", clip:"cl_m", fade_out:{num:2, den:1}}
    ]}
-6  timeline_add_transition {a:"cl_1", b:"cl_2", kind:"cross_dissolve", duration:T(0.5)}
-7  effect_add {clip:"cl_1", effect:"core.color.correct"}
-   effect_set_params {clip:"cl_1", effect:"fx_1", params:{exposure:0.2, contrast:1.08}}
-8  inspect_frame {clip:"cl_1", at_local:T(3)} → image   (verify the grade)
-9  render_submit {preset:"web_1080p", output:"launch_teaser.mp4"}
-10 render_status → done; report {frames:1350, encoder:"nvenc", …}
-11 project_describe → confirm final state; project_save
+   → revision 2
+5  timeline_add_transition {a:"cl_a", b:"cl_b", kind:"cross_dissolve", duration:"00:00:00:15"}
+   → revision 3                                                        (same track, adjacent)
+6  effect_add {clip:"cl_a", id:"fx_grade", effect:"core.color.correct"} → revision 4
+7  effect_set_params {clip:"cl_a", effect:"fx_grade", params:{exposure:0.2, contrast:1.08},
+                      dry_run:true} → diff
+   effect_set_params {…same, dry_run:false} → revision 5
+8  inspect_frame {clip:"cl_a", at_local:"00:00:03:00"} → composited image   (verify the grade)
+9  title_add {id:"cl_t", track:"tr_v2", text:"Launch Day", style:"lower_third",
+              start:"00:00:02:00", duration:"00:00:04:00"} → revision 6
+10 render_submit {preset:"web_1080p", output:"launch_teaser.mp4"} → {job_id:"j_1"}
+11 render_status {job_id:"j_1"} → running … done; report {frames:720, encoder:"h264_nvenc", …}
+12 project_describe → confirm final state; project_save
 ```
 
-Every step is typed, inspectable, and reversible. Step 8 is the essential loop: the agent verifies visually
-instead of assuming success.
+Every step is typed, inspectable, and reversible (`history_undo`). Step 8 is the essential loop: the agent
+verifies visually instead of assuming success. Step 11's frame count is exact: 540 + 180 frames; the
+transition uses source handles and does not change the sequence length.
 
 ## 11. Versioning
 

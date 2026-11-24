@@ -34,8 +34,8 @@ Master: gain, meters
 Device
 ```
 
-This is the whole v1 graph. Equalization, compression, limiting, and loudness normalization are scheduled
-for v1.1 ([§6](#6-deferred-dsp)); shipping a correct small graph beats a wide half-tested one.
+This is the whole v1 graph. Equalization, compression, limiting, and loudness normalization are deferred to
+post-1.0 ([§6](#6-dsp-and-analysis)); shipping a correct small graph beats a wide half-tested one.
 
 ## 4. Playback and the clock
 
@@ -68,7 +68,7 @@ The audio device clock is the **master clock** ([03 §6](03-render-engine.md)).
 
 **Deferred:**
 
-- 4-band EQ, compressor, limiter, EBU R128 loudness normalization and true-peak limiting (v1.1).
+- 4-band EQ, compressor, limiter, EBU R128 loudness normalization and true-peak limiting (post-1.0; v1.1 is the macOS port only — see [ADR-0011](adr/0011-windows-first.md)).
 - VST3 hosting (post-1.0, subprocess-isolated). Not part of the v1 architecture.
 
 ## 7. Preview/export parity

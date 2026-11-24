@@ -61,7 +61,7 @@ Rules:
   phones) set `"vfr": true`; their frames are mapped to the sequence timebase by presentation timestamp,
   with the nominal rate used only for display.
 - **Time inputs on the wire** are either an exact rational `{"num","den"}` (seconds) or a timecode string
-  `"HH:MM:SS:FF"` interpreted at the sequence `frame_rate`. Both are normalized to `Time` before validation;
+  interpreted at the sequence `frame_rate` per §2.3. Both are normalized to `Time` before validation;
   a rational that is not on a frame boundary fails with `off_frame_boundary`.
 
 ### 2.2 Time rules
@@ -73,9 +73,64 @@ Rules:
 3. **Speed changes are rational.** `speed: {num, den}` with `num/den ∈ (0, 16]`. `duration` is timeline
    duration; source in/out are source time; `timeline_duration × speed == source_range` is checked with
    i128 intermediates.
-4. **NTSC drop-frame** is a display concern (`HH:MM:SS;FF`), never a storage concern.
+4. **Timecode is a label, never storage.** Drop-frame and non-drop-frame are rules for converting frame
+   numbers to and from labels (§2.3); stored times are always rationals.
 5. **Time is non-negative**, except keyframe times relative to clip start (pre-roll). Sequence length is
    capped at 24 h as a sanity limit.
+
+### 2.3 Frame rates and timecode (canonical rules)
+
+**Sequence frame rates (v1).** Exactly these exact rationals; anything else is rejected at `project.open`
+with `unsupported_frame_rate`:
+
+| Label | `frame_rate` | Nominal rate | Drop-frame allowed |
+|---|---|---|---|
+| 23.976 | `24000/1001` | 24 | no |
+| 24 | `24/1` | 24 | no |
+| 25 | `25/1` | 25 | no |
+| 29.97 | `30000/1001` | 30 | yes (drops 2 labels/min) |
+| 30 | `30/1` | 30 | no |
+| 50 | `50/1` | 50 | no |
+| 59.94 | `60000/1001` | 60 | yes (drops 4 labels/min) |
+| 60 | `60/1` | 60 | no |
+
+- **Labels are not values.** "29.97" is a display label for `30000/1001` (= 29.970029…). The decimal labels
+  `23.976`, `29.97`, `59.94` are accepted as input aliases and mapped to the exact rationals; any other
+  decimal (e.g. `29.976`, `30.0`) is rejected with `inexact_frame_rate`. Output always uses the rational.
+- **Nominal rate** is the integer frame count per timecode second: `ceil(frame_rate)` for the 1001 rates,
+  the rate itself otherwise. Timecode arithmetic uses the nominal rate; wall-clock time uses the exact rate.
+- **Asset rates** may be any rational (or VFR, §2.1). Asset rates never change how sequence timecode is
+  interpreted.
+
+**Non-drop-frame (NDF)** — `HH:MM:SS:FF` (colons):
+
+- `frame = ((HH × 3600 + MM × 60 + SS) × nominal) + FF`, with `0 ≤ FF < nominal`, `MM, SS < 60`.
+- Time = `frame × frame_duration`. For 1001 rates NDF labels run slower than the wall clock: at 29.97,
+  `01:00:00:00` NDF = frame 108,000 = 3603.6 s.
+- **NDF is the canonical wire format.** Every timecode Arcline emits (`project.describe`, text timeline,
+  reports, errors) is NDF with colons.
+
+**Drop-frame (DF)** — `HH:MM:SS;FF` (semicolon before frames):
+
+- Valid only at 29.97 and 59.94. Labels `;00`–`;01` (29.97) or `;00`–`;03` (59.94) are skipped at the start
+  of every minute except minutes divisible by 10. No frames are dropped — only labels.
+- At 29.97, `01:00:00;00` DF = frame 107,892 = 3599.9964 s (within 3.6 ms of the wall clock).
+- DF is accepted **as input** in commands and tool arguments, distinguished by the `;`. A skipped label
+  (e.g. `00:01:00;00` at 29.97) fails with `invalid_timecode`; `;` at any other rate fails with
+  `drop_frame_not_allowed`.
+- DF is a **display option** per sequence (`timecode_display: "ndf" | "df"`, default `df` at 29.97/59.94 in
+  the GUI). It affects GUI display and interchange metadata ([12 §4.1](12-project-interchange.md)) only.
+
+**Other rules:**
+
+- Timecode starts at `00:00:00:00` = frame 0 = time 0 in every sequence. Embedded source timecode (e.g. a
+  camera's `01:00:00:00` start) is metadata (`probe.start_timecode`) shown in the UI and written to
+  interchange files; `source_in` is always an offset from the first frame of the media.
+- `source_in` given as timecode is interpreted at the **sequence** frame rate and must land on a sequence
+  frame boundary.
+- Maximum label is `23:59:59:FF` within the 24 h sequence cap.
+
+Required boundary tests: [08 §6](08-performance-reliability.md).
 
 ## 3. Entity detail
 
@@ -109,6 +164,7 @@ not fail the open; they become **offline assets** that render as placeholders an
   "id": "sq_01J8Z…",
   "name": "Main",
   "timebase": {"frame_duration": {"num": 1, "den": 30}},     // frame_rate 30/1
+  "timecode_display": "ndf",                                 // "df" only allowed at 29.97 / 59.94
   "resolution": {"w": 1920, "h": 1080},
   "working_space": "rec709",
   "sample_rate": 48000,

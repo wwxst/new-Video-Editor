@@ -9,7 +9,7 @@ with exports. The rules below exist to make those impossible, with a deliberatel
 |---|---|
 | A/V sync | ≤ 1 frame drift over 10-minute playback (NTSC included) |
 | Sample accuracy | clip boundaries and fades land on exact samples |
-| Preview vs export parity | same DSP graph, same parameters, hash-equal in CI |
+| Preview vs export parity | master-bus output hash-equal between real-time (at 1× transport) and offline render, per §7 |
 | Click-free editing | no discontinuities at edits, seeks, or parameter changes |
 | Real-time safety | audio callback: no allocation, no locking, no syscalls |
 
@@ -25,7 +25,7 @@ with exports. The rules below exist to make those impossible, with a deliberatel
 
 ```
 Clip readers (audio from arc-media, or generator)
-   │  per-clip: gain, pan, fades, speed-aware resampling
+   │  per-clip: gain, pan, fades, clip-speed resampling (varispeed, §5)
    ▼
 Track strips: gain, pan, mute/solo
    ▼
@@ -55,8 +55,13 @@ The audio device clock is the **master clock** ([03 §6](03-render-engine.md)).
 - **Seek** invalidates the ring and pre-fills it before resuming; the callback only sees contiguous,
   pre-computed data — hence no clicks.
 - **Edits during playback** apply at the next block boundary from an atomically swapped parameter block.
-- **Playback speed** (0.25×–4×) uses a WSOLA-class stretcher for preview only; export speed changes are
-  source-mapping, not the stretcher.
+- **Two different speed concepts, never mixed:**
+  - **Clip speed** (`timeline.set_speed`, part of the document) changes the edit. Audio is produced by
+    deterministic source-time mapping plus resampling (**varispeed**: pitch follows speed). This runs inside
+    the mix graph and is identical in preview and export. Pitch-preserving clip speed is post-1.0.
+  - **Transport speed** (J/K/L shuttle, 0.25×–4×) changes only how fast the user monitors the timeline. It is
+    applied by a WSOLA-class stretcher in the **monitoring stage**, after the master bus, and never reaches
+    an export. Scrub grains are also produced in the monitoring stage.
 
 ## 6. DSP and analysis
 
@@ -73,17 +78,38 @@ The audio device clock is the **master clock** ([03 §6](03-render-engine.md)).
 
 ## 7. Preview/export parity
 
-Parity is structural, not tested-in:
+The signal chain has two parts with a defined **parity tap** between them:
 
-- `Graph::render_offline(range)` and the real-time path call the same `process(block)` methods.
-- CI renders a mixed fixture project offline and through the real-time path (null device) and compares
-  hashes at sample precision.
-- Any node that cannot run offline is bypassed by an explicit mode flag, never by a separate
-  implementation.
+```
+clip readers → clip DSP (gain, pan, fades, clip-speed varispeed) → tracks → master bus
+                                                                              │
+                                                                     ── parity tap ──
+                                                                              │
+             monitoring stage (real-time only): transport WSOLA, scrub grains,
+             monitor volume, device sample-rate conversion → device
+```
+
+Parity contract:
+
+- **What is compared:** the master-bus output at the parity tap, as f32 samples, hashed.
+- **When it must match:** real-time playback at **1× transport speed** versus `Graph::render_offline(range)`
+  for the same range. Both call the same `process(block)` methods; clip speed is part of both.
+- **What is excluded:** everything in the monitoring stage (transport WSOLA, scrub, monitor volume, device
+  resampling). These are real-time-only by definition and never appear in an export, so they are not hashed.
+- **Block alignment:** the offline renderer uses the same block boundaries relative to the range start as
+  the real-time path in the test (fixed block size, null device), so parameter-change timing is identical.
+- Any node that cannot run offline is bypassed by an explicit mode flag, never by a separate implementation.
+
+CI renders a mixed fixture project (including clips at 0.5× and 2× clip speed) offline and through the
+real-time path on a null device at 1× transport, and compares the hashes. The transport stretcher has its own
+tests (§8) without a hash requirement.
 
 ## 8. Testing
 
 - **Sample-exact golden audio**: fades, pan laws, gain ramps, solo logic, speed mapping.
-- **Parity test**: real-time capture vs offline render hash equality on every PR.
+- **Parity test**: real-time capture at the parity tap (1× transport) vs offline render, hash equality on
+  every PR (§7).
+- **Transport stretcher**: duration accuracy and no discontinuities at 0.25×–4× (listening tests plus
+  automated click detection); no hash comparison.
 - **Soak**: multi-hour playback with random edits under allocation/lock detection on the callback.
 - **Device matrix**: null device in CI; one real device per shipping OS before release.

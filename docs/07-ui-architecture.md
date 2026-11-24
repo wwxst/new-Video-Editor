@@ -119,6 +119,8 @@ Budget: 60 fps scroll and drag with 8 tracks and 2,000 visible clip-seconds; 8 m
   other clips continue.
 - **Quarantined media** (failed import check, or implicated in a previous crash): badge on the asset;
   preview uses its proxy; the reason is shown in the inspector ([04 §1.2](04-media-pipeline.md)).
+- **Decode-safe mode** (stuck-decoder limit reached, [04 §1.2](04-media-pipeline.md)): persistent banner;
+  preview runs on proxies; restart restores normal decoding.
 - **After an unclean exit**: the recovery dialog reports the recovered revision, any discarded journal
   records, and any newly quarantined asset ([08 §4.6](08-performance-reliability.md)).
 - **Interchange export**: *File → Export Project for…* picks a target editor and packaging mode, then shows

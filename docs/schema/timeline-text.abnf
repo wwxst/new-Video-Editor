@@ -1,10 +1,11 @@
 ; arcline timeline text format — version 1
 ; Normative grammar for the read-only inspect.timeline view (docs/06-agent-interface.md §5).
-; timeline.apply_text (parsing a rewritten timeline into commands) is deferred to v1.1; the grammar is
+; timeline.apply_text (parsing a rewritten timeline into commands) is deferred to post-1.0; the grammar is
 ; published now so readers and future writers share one definition.
 ; Lines terminate with LF or CRLF. A line beginning with '#' (after optional WSP) is a comment.
-; Times are HH:MM:SS:FF at the sequence frame rate (drop-frame notation HH:MM:SS;FF is display-only
-; and MUST NOT appear on the wire). The version line MUST be the first line.
+; Times are non-drop-frame HH:MM:SS:FF at the sequence nominal rate (docs/02 §2.3). Drop-frame notation
+; HH:MM:SS;FF MUST NOT appear in this format, regardless of the sequence's timecode_display setting.
+; The version line MUST be the first line.
 ; Terminology follows docs/02 §2.1: "fps=" carries the frame RATE (frames per second, e.g. 30000/1001);
 ; the stored frame DURATION (1001/30000) never appears in this format.
 ; This grammar is frozen at v1; additions require a new format version.

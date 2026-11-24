@@ -87,6 +87,10 @@ Design rules:
 | FCP7 XML | integer frames, `<timebase>30</timebase><ntsc>TRUE</ntsc>` for 30000/1001 | exact for frame-aligned times |
 | OTIO | `RationalTime{value, rate}` with float `rate` | values written as frame counts at `rate = num/den`; CI verifies zero-frame drift over 24 h |
 
+Timecode display (DF/NDF, [02 §2.3](02-domain-model-and-project-format.md)) is written as metadata only — FCPXML
+`tcFormat="DF"|"NDF"`, FCP7 XML `<displayformat>`, OTIO `metadata.arcline` — and never changes timing.
+Embedded source timecode is written where the format supports it.
+
 Sub-frame audio boundaries (`allow_subframe`) are exact in FCPXML and rounded to the nearest frame in
 FCP7 XML and OTIO; each rounding is listed in the report.
 

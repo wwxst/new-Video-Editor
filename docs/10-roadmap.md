@@ -42,7 +42,8 @@ Deliverables
 **Exit criteria**
 
 - 10,000 randomized command sequences pass the invariant suite.
-- NTSC/PAL boundary tests pass; no floats in timing types.
+- Frame-rate and timecode boundary tests of [08 §6](08-performance-reliability.md) pass (DF/NDF, all
+  supported rates); no floats in timing types.
 - `arcline-cli new demo.arcline && arcline-cli apply` produces a valid container.
 
 ## 3. Phase B — Headless pipeline (weeks 3–7)
@@ -92,12 +93,14 @@ Deliverables
 
 - `arc-audio`: `cpal` output, mixer (gain, pan, fades, mute/solo), sample-accurate clip reads.
 - Audio-master clock; A/V sync; device-change handling; meters.
-- Offline mix path for export with hash parity to real-time.
+- Offline mix path for export with hash parity to real-time at the parity tap ([05 §7](05-audio-engine.md));
+  transport-speed WSOLA in the monitoring stage only.
 
 **Exit criteria**
 
 - 10-minute playback drifts ≤ 1 frame and produces no clicks at edits or seeks.
-- Preview mix and offline export mix are hash-identical on the fixture project.
+- Master-bus output at 1× transport and the offline export mix are hash-identical on the fixture project,
+  including clips with non-1× clip speed.
 
 ## 6. Phase E — Project lifecycle (weeks 13–16)
 
@@ -108,7 +111,8 @@ Deliverables
 - Persistence per [08 §4](08-performance-reliability.md): sidecar directory, journal writer thread,
   commit/ack rule, group `fsync` and durable mode, autosave snapshots, atomic container replace, recovery
   dialog, read-only degraded mode on journal failure.
-- Crash breadcrumbs, automatic quarantine after an unclean exit, decode hang watchdog.
+- Crash breadcrumbs, automatic quarantine after an unclean exit, decode hang watchdog with the 2-thread
+  limit and decode-safe mode.
 - Offline media and relink; proxy generation via `ffmpeg` CLI as a background job.
 - GUI export through a child `arcline-cli render` process; export presets, save modes (link/collect),
   project settings UI.
@@ -118,6 +122,8 @@ Deliverables
 - 100 forced kills during editing, autosave, and save: zero lost acknowledged batches, zero unopenable
   projects.
 - VM hard-reset test: default mode loses at most ~1 s of edits; durable mode loses none.
+- Journal fault-injection suite passes: no acknowledgement before a complete write; failed and speculative
+  batches rolled back; read-only mode entered.
 - A forced native crash during preview decode reopens into the recovered state with the asset quarantined.
 - A project with moved media opens with placeholders and relinks by path or hash.
 

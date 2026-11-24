@@ -50,8 +50,9 @@ on project files ([§9](#9-future-topologies)).
 
 ### 4.1 Methods (13)
 
-All time values follow [02 §2.1](02-domain-model-and-project-format.md): exact rational `{"num","den"}`
-seconds, or a `"HH:MM:SS:FF"` timecode at the sequence `frame_rate`.
+All time values follow [02 §2.1/§2.3](02-domain-model-and-project-format.md): exact rational
+`{"num","den"}` seconds, or a timecode at the sequence frame rate — NDF `"HH:MM:SS:FF"`, or DF
+`"HH:MM:SS;FF"` at 29.97/59.94. Arcline always emits NDF.
 
 | Method | Params | Result |
 |---|---|---|
@@ -74,14 +75,15 @@ Rules:
 - **Edits only through `project.apply`.** Save, undo/redo, inspection, and jobs are methods, not commands
   ([02 §4](02-domain-model-and-project-format.md)).
 - **Commit and acknowledgement.** A `project.apply` (or undo/redo) response is sent only after the batch's
-  journal record has been written; with `durable: true` also after `fsync`
-  ([08 §4.3–4.4](08-performance-reliability.md)).
+  journal record has been **completely written** (and, with `durable: true`, `fsync`ed). If the write fails,
+  the batch is rolled back and the response is `journal_unavailable` ([08 §4.3–4.4](08-performance-reliability.md)).
 - **File-referencing commands** (`asset.import`, `subtitle.import`, LUT assets) are resolved by the session
   layer before the engine sees them: paths are checked against `--root`, media runs the subprocess import
   check and probe ([04 §1.2](04-media-pipeline.md)), subtitle files are parsed. The engine thread never does
   file I/O. The per-asset outcome (`ok`, `quarantined`, `offline`) is returned in `resulting`.
 - **Errors** are `{code, kind, message, path?, details?}` with stable `kind` strings, including
-  `stale_revision` (with the current revision), `off_frame_boundary`, `overlap`, `unknown_clip`,
+  `stale_revision` (with the current revision), `off_frame_boundary`, `invalid_timecode`,
+  `drop_frame_not_allowed`, `unsupported_frame_rate`, `inexact_frame_rate`, `overlap`, `unknown_clip`,
   `duplicate_id`, `path_denied`, `media_quarantined`, `journal_unavailable`, `unsupported_method`.
 - Batch semantics (atomicity, whole-batch validation, dry-run, idempotency) are in
   [01 §6.2](01-system-architecture.md).
@@ -123,7 +125,8 @@ Rules:
 }
 ```
 
-Timecodes are `HH:MM:SS:FF` at the sequence `frame_rate`; `exact: true` adds rationals. Timecodes render
+Timecodes are NDF `HH:MM:SS:FF` at the sequence frame rate ([02 §2.3](02-domain-model-and-project-format.md));
+`exact: true` adds rationals. Timecodes render
 rationals — they never replace them.
 
 ## 5. Text timeline (read view)

@@ -28,7 +28,8 @@ Use **FFmpeg `libav*`** behind an owned `arc-media` abstraction with an LGPL-onl
   - proxies, thumbnails, waveform PCM (`ffmpeg` CLI);
   - exports (`arcline-cli render`, spawned by the GUI and by `job.submit`).
 - **Containment of the remaining risk:** crash breadcrumbs quarantine any asset being decoded when the
-  process died; a hang watchdog moves stuck assets to the proxy path; the journal guarantees no
+  process died; a hang watchdog moves stuck assets to the proxy path, with at most 2 abandoned decode threads per process
+  before the session switches to proxy-only "decode-safe mode"; the journal guarantees no
   acknowledged edit is lost ([08 §4](../08-performance-reliability.md)).
 
 Full strategy: [04 §1](../04-media-pipeline.md).

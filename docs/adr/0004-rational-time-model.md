@@ -21,14 +21,15 @@ Serialization uses `{"num","den"}` objects.
 ## Consequences
 
 - Zero drift: `sum of clip durations == sequence duration` is an exact assertion, testable in CI.
-- NTSC rates are first-class; 23.976/29.97/59.94 and PAL rates need no special cases.
+- NTSC rates are first-class; 23.976/29.97/59.94 and PAL rates need no special cases in storage or
+  arithmetic. Drop-frame is purely a labeling rule for timecode ([02 §2.3](../02-domain-model-and-project-format.md)).
 - Frame boundaries are reasoned about explicitly (`frame_at(t, tb, mode)`), which surfaces rounding policy
   in code review instead of hiding it.
 - Costs: more verbose arithmetic than `f64`, overflow handling everywhere (`TimeOverflow`), and a learning
   curve for contributors used to seconds-as-float. Mitigated by a tiny, heavily tested API (`arc-core::time`) and
   ergonomic constructors (`T::secs(4)`, `tb.frame(120)`).
 - Audio addresses samples by exact rational mapping to sample index, so sub-frame audio edits are possible
-  when explicitly allowed ([02 §2](02-domain-model-and-project-format.md)).
+  when explicitly allowed ([02 §2](../02-domain-model-and-project-format.md)).
 
 ## Alternatives considered
 

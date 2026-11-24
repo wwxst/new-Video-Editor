@@ -63,26 +63,49 @@ Demo.arcline.autosave/           # sidecar directory, same parent folder
 
 ### 4.2 Journal records
 
-Each record: `magic | length (u32) | revision (u64) | payload (resolved forward commands, CBOR) | CRC32C`.
-Records are appended with a single `write` call each. A torn or corrupt tail is detected by length/CRC and
-truncated during recovery; nothing after the first invalid record is trusted.
+Each record: `magic (u32) | length (u32) | revision (u64) | payload (resolved forward commands, CBOR) |
+CRC32C (over all preceding fields)`. `length` covers the whole record, so a record whose declared length runs
+past end-of-file is a torn record by definition.
 
-### 4.3 Commit point and acknowledgement
+### 4.3 Write states, commit point, and acknowledgement
 
-1. The engine validates and applies a batch, then publishes the new snapshot immediately (UI stays
-   responsive; the engine thread never waits on disk).
-2. The batch's record is handed to the **journal writer thread**, which `write`s it to the file.
-3. A batch is **committed** when that `write` returns: the bytes are in the OS page cache and survive any
-   *process* crash or kill.
-4. **Protocol clients** (`project.apply` responses) are acknowledged only after step 3. An acknowledged
-   batch is never lost to a process crash.
-5. **The GUI** does not wait. Batches queued to the writer but not yet written when the process dies (in
-   practice the last few milliseconds of interaction) can be lost. The UI never shows a "saved" state for
-   them.
-6. If a journal `write` fails (disk full, permission, device removed), the session enters **read-only
-   degraded mode**: further commands are rejected with `journal_unavailable`, the user is warned, and the
-   last committed state can still be exported or saved elsewhere. Edits are never accumulated without a
-   journal.
+The journal writer thread appends each record at the current end offset `E` and classifies the outcome:
+
+| State | Definition | Handling |
+|---|---|---|
+| **Complete write** | every byte of the record has been accepted by the OS (`write` calls returned a total equal to `length`), and in durable mode the following `fsync` succeeded | the batch is **committed**; its acknowledgement is released |
+| **Partial write** | a `write` call returned fewer bytes than requested, without an error | not a failure: the writer continues writing the remaining bytes. The batch stays uncommitted and unacknowledged until the total reaches `length` |
+| **Write failure** | a `write` returns an error (disk full, permission, device removed, I/O error), or `fsync` fails in durable mode | the batch is **not** committed: see failure handling below |
+| **Torn record on disk** | the process died during a partial write | detected at recovery by length/CRC and truncated (§4.6); it was never acknowledged |
+
+**The acknowledgement rule (all clients).** A batch's `ApplyResult` — the `project.apply`/`history.*` response
+for protocol clients, and the result delivered to the UI thread for the GUI — is sent **only after a complete
+write** of its journal record. Nothing is acknowledged earlier.
+
+Sequence for one batch:
+
+1. The engine validates and applies the batch and publishes the new snapshot **speculatively**, so the
+   viewer and timeline update without waiting for disk. Speculative revisions are marked pending in the UI.
+2. The record is queued to the journal writer thread. Records are written strictly in revision order.
+3. On complete write the revision becomes committed and its `ApplyResult` is released. Committed bytes are in
+   the OS page cache and survive any *process* crash or kill; power-loss durability follows §4.4.
+
+**Write-failure handling:**
+
+1. The writer truncates the journal back to `E` (removing any bytes of the failed record) and verifies the
+   file length. If truncation also fails, the torn tail is left for recovery to discard; this is safe because
+   recovery trusts nothing after the last valid record.
+2. The engine **rolls back** every speculative revision after the last committed revision `C`, applying the
+   stored inverses, and publishes the snapshot for `C`. Each rolled-back batch receives the error
+   `journal_unavailable` instead of an acknowledgement.
+3. The session enters **read-only degraded mode**: new batches are rejected with `journal_unavailable`; the
+   user is warned. *Save As* to another location writes a full container and starts a new sidecar journal
+   there, which returns the session to normal mode. Export remains available.
+4. A **group `fsync` failure in default mode** cannot un-acknowledge batches that were already completely
+   written: the session enters read-only degraded mode immediately and warns that batches since the last
+   successful `fsync` may not survive power loss, recommending *Save As*.
+
+Edits are never accumulated without a journal, and no acknowledged batch is ever rolled back.
 
 ### 4.4 `fsync` policy
 
@@ -121,9 +144,9 @@ On open, if the sidecar directory exists and is newer than the container:
 
 | Event | Default mode | Durable mode |
 |---|---|---|
-| App crash, panic, `TerminateProcess`/`SIGKILL` | no acknowledged batch lost; GUI may lose writer-queued batches (milliseconds) | same |
+| App crash, panic, `TerminateProcess`/`SIGKILL` | no acknowledged batch lost; speculative (not yet acknowledged) batches — typically the last few milliseconds — are lost | same |
 | OS crash, power loss | at most ~1 s of committed batches | no acknowledged batch lost |
-| Disk full / journal write failure | no silent loss; session becomes read-only | same |
+| Disk full / journal write failure | failed and later speculative batches rolled back and reported; session becomes read-only (§4.3) | same |
 | Corrupt container on disk | recover from sidecar snapshot + journal if present | same |
 | Storage device that ignores flush requests | not guaranteed (hardware limitation) | not guaranteed |
 
@@ -160,7 +183,28 @@ crash: the user loses no acknowledged edits and reopens into the recovered state
 └───────────────────────────────┘
 ```
 
-- **Unit**: time math (NTSC/PAL boundary cases), keyframe evaluation, command validation, migrations.
+- **Unit**: time math, keyframe evaluation, command validation, migrations.
+- **Frame-rate and timecode boundary tests** (rules in [02 §2.3](02-domain-model-and-project-format.md)),
+  required before Phase A exits:
+  - exhaustive round trip frame → NDF → frame and frame → DF → frame for every frame of 24 h at 29.97 and
+    59.94, and frame → NDF → frame at every other supported rate;
+  - fixed vectors at 29.97 DF: frame 1799 = `00:00:59;29`, 1800 = `00:01:00;02`, 17982 = `00:10:00;00`,
+    107892 = `01:00:00;00`; at 59.94 DF: 3599 = `00:00:59;59`, 3600 = `00:01:00;04`; at 29.97 NDF:
+    `01:00:00:00` = frame 108000 = 3603.6 s exactly (`108000 × 1001/30000`);
+  - rejections: skipped DF labels (`00:01:00;00`, `00:01:00;01` at 29.97; `;00`–`;03` at 59.94),
+    `;` at non-drop rates, `FF ≥ nominal`, `MM`/`SS ≥ 60`, labels past the 24 h cap, decimal rates other
+    than the three aliases, rationals off a frame boundary (e.g. 1 s at 29.97);
+  - `frame_at` for each rounding mode at exact boundaries and one tick either side;
+  - frame-boundary → sample-index mapping at 44.1/48/96 kHz for all supported rates (e.g. one 29.97 frame
+    = 1601.6 samples at 48 kHz), checked against [05 §2](05-audio-engine.md);
+  - text-timeline and `project.describe` output is always NDF regardless of `timecode_display`.
+- **Journal fault injection** ([§4.3](#43-write-states-commit-point-and-acknowledgement)): a test file layer
+  that returns short writes, fails mid-record (ENOSPC/EIO), and fails `fsync`; asserts no `ApplyResult`
+  before a complete write, rollback of speculative batches, truncation to the record start, read-only mode,
+  and clean recovery of torn tails.
+- **Decode-safe mode**: a test decoder that blocks forever; asserts abandonment after the deadline, pool
+  replacement, decode-safe mode on the second abandonment ([04 §1.2](04-media-pipeline.md)), and exit
+  without joining.
 - **Property tests** (`proptest`): random command sequences over random documents; all invariants of
   [02 §9](02-domain-model-and-project-format.md), especially apply→inverse→identical hash.
 - **Golden frames**: a 40-clip fixture corpus (cuts, transitions, keyframes, color, text, chroma key,

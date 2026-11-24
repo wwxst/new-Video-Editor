@@ -48,9 +48,21 @@ file.
    updated without allocation. On the next launch after an unclean exit, those assets are quarantined
    automatically and the user is told which file was implicated. Hardware-decode crashes instead record
    a `hw_broken` verdict for `(codec, profile, driver)` and fall back to software decode.
-4. **Hang watchdog.** A decode call exceeding its deadline (default 5 s) marks the asset suspect, stops
-   scheduling work for it, and switches it to the proxy path; the stuck thread is abandoned (threads cannot
-   be killed safely) and the asset is quarantined for future sessions.
+4. **Hang watchdog and stuck-thread limit.** A decode call exceeding its deadline (default 5 s) marks the
+   asset suspect, stops scheduling work for it, and switches it to the proxy path. The stuck thread is
+   **abandoned** (threads cannot be killed safely), a replacement thread keeps the pool at full size, and the
+   asset is quarantined for future sessions. Abandoned threads may keep spinning a CPU core and holding
+   memory, so their number is capped:
+   - **Limit: 2 abandoned decode threads per process.**
+   - **When the limit is reached** (second abandonment), the session enters **decode-safe mode**: all
+     in-process libav decoding stops for the rest of the session. Every asset previews through its proxy;
+     assets without a proxy show a placeholder while proxies are generated in child `ffmpeg` processes
+     (which can be killed on timeout). Editing, saving, and exports (already out-of-process) are unaffected.
+     A banner recommends restarting.
+   - **On restart** the abandoned threads are gone, the implicated assets remain quarantined, and normal
+     in-process decoding resumes for the others.
+   - **On exit** with abandoned threads, the app flushes the journal and terminates the process without
+     joining them.
 5. **Out-of-process export.** The GUI exports by writing a snapshot at the current revision and spawning
    `arcline-cli render` as a child process that streams progress over stdout. An export crash fails the
    job, the session continues, and long exports do not compete with the UI thread. The headless agent path

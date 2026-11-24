@@ -145,9 +145,10 @@ boundaries inside `arc-core` (e.g. `model` vs `command`) carry the discipline th
 
 Rules:
 
-- The **engine thread** owns the document and never blocks on I/O. Each committed batch is handed to the
-  **journal writer thread**; protocol responses wait for that write, the GUI does not
-  ([08 §4.3](08-performance-reliability.md)). Commands that reference files (`asset.import`,
+- The **engine thread** owns the document and never blocks on I/O. It publishes each applied batch
+  speculatively and hands its record to the **journal writer thread**; every client — GUI and protocol —
+  receives the `ApplyResult` only after the record is completely written ([08 §4.3](08-performance-reliability.md)).
+  On a journal write failure, speculative batches are rolled back. Commands that reference files (`asset.import`,
   `subtitle.import`, LUTs) are read/probed by the session layer *before* they reach the engine.
 - The **UI thread** never waits on decode. A missing frame shows the nearest cached frame with a stale
   indicator.
@@ -210,16 +211,17 @@ GUI drag of a clip:
                     track kind matches, no overlap after the explicit ripple policy,
                     times are exact rationals on frame boundaries
 4. Engine thread  applies → new immutable snapshot (structural sharing)
-                  bumps revision, publishes via arc-swap, hands the record to the journal writer
-5. Journal writer write()s the record → batch committed (survives process crash)
-6. Render thread  sees the new snapshot; invalidates cache keys for the affected range
-7. UI thread      receives ApplyResult; the optimistic ghost is reconciled
+                  bumps revision, publishes speculatively via arc-swap, queues the journal record
+5. Render thread  sees the new snapshot; invalidates cache keys for the affected range
+6. Journal writer completes the write of the record → batch committed (survives process crash)
+7. UI thread      receives ApplyResult (only now); the pending marker and optimistic ghost are reconciled
 8. Autosave       snapshot every 30 batches / 60 s; group fsync per 08 §4.4
 ```
 
 The UI moves a **ghost** optimistically during drag; authoritative state always comes from the engine. If
 validation fails, the ghost animates back and the typed error is shown. An agent experiences the same flow
-without the ghost, except that its `project.apply` response is sent only after step 5.
+without the ghost: its `project.apply` response is the same `ApplyResult`, sent at step 7. If step 6 fails,
+the batch is rolled back and the client receives `journal_unavailable`.
 
 ## 8. Startup and project open
 
@@ -242,7 +244,7 @@ background. Shader pipelines are cached per driver to avoid first-frame hitches.
 | Layer | Example | Handling |
 |---|---|---|
 | **Domain error** | overlap, unknown clip, unsupported codec | Typed `CommandError`, returned to the client, no log noise |
-| **Operational error** | FFmpeg error code, Rust panic in decoder wrapper, GPU device lost, journal write failure | Recovered: per-clip `MediaError`, recreate device, read-only degraded session on journal failure |
+| **Operational error** | FFmpeg error code, Rust panic in decoder wrapper, GPU device lost, journal write failure | Recovered: per-clip `MediaError`, recreate device; on journal failure roll back unacknowledged batches and enter read-only degraded mode |
 | **Defect** | invariant violation in the engine | Engine thread catches panics per batch, marks the session degraded, keeps the last good snapshot exportable, writes a crash bundle |
 | **Fatal** | native fault in FFmpeg or a driver (segfault, `abort`) | Process ends. Next launch recovers from journal and quarantines the implicated asset ([04 §1.2](04-media-pipeline.md)) |
 

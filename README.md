@@ -80,7 +80,7 @@ simplified agent surface, cross-editor project export, and a ~32-week roadmap to
 | **A Spine** | 1–3 | `arcline-cli render` transcode is frame-accurate; command property tests pass 10k sequences |
 | **B Headless pipeline** | 3–7 | Import → trim → export works end-to-end from the CLI with hardware encode |
 | **C Compositor + shell** | 6–12 | 1080p preview ≥ 30 fps with 4 tracks and 8 effects; move/trim/split in the GUI |
-| **D Audio** | 11–14 | 10-minute playback drifts ≤ 1 frame; preview/export mix hashes match |
+| **D Audio** | 11–14 | 10-minute playback drifts ≤ 1 frame; preview (1×) and export master-bus hashes match |
 | **E Lifecycle** | 13–16 | 100 forced kills during edit/save lose zero acknowledged edits |
 | **F Agent surface** | 15–19 | An agent builds a captioned three-shot cut through MCP |
 | **G Finish** | 18–24 | A non-developer edits and exports a 10-minute project |

@@ -23,7 +23,7 @@ The inverse of each command is derived during apply and stored for undo and jour
   transient drag preview) need client-side ghost state, and some bulk operations need well-designed batch
   commands (e.g., `trim_clip { ripple: "all" }`) rather than loops of small ones.
 - Apply performance becomes a first-class concern; persistent data structures keep it O(log n) and
-  benchmarks gate it ([08 §2](08-performance-reliability.md)).
+  benchmarks gate it ([08 §2](../08-performance-reliability.md)).
 - Collaboration becomes a tractable problem later: command logs merge, state does not.
 
 ## Alternatives considered

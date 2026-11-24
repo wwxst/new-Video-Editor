@@ -1,19 +1,20 @@
 # Architecture Decision Records
 
-ADRs are immutable once accepted. A superseding decision gets a new ADR that references the old one; the old
-file's status changes to `Superseded by ADR-XXXX` and nothing else is edited.
-
-Format: **Status · Context · Decision · Consequences · Alternatives considered.**
+ADRs record load-bearing decisions with their alternatives. This set was revised on **2026-11-24** after
+the [architecture review](../../reports/architecture-review.md) reframed the project for solo development;
+affected records carry a revision note. From this point on, decisions are superseded rather than rewritten:
+a new ADR references the old one, and the old file's status changes to `Superseded by ADR-XXXX`.
 
 | ADR | Title | Status |
 |---|---|---|
-| [0001](0001-rust-for-core-and-ui.md) | Rust for core and UI | Accepted |
-| [0002](0002-wgpu-gpu-abstraction.md) | `wgpu` as the GPU abstraction | Accepted |
-| [0003](0003-ffmpeg-for-media-io.md) | FFmpeg for media I/O, out of process | Accepted |
+| [0001](0001-rust-for-core-and-ui.md) | Rust for core and UI | Accepted (revised 2026-11-24) |
+| [0002](0002-wgpu-gpu-abstraction.md) | `wgpu` as the GPU abstraction | Accepted (revised 2026-11-24) |
+| [0003](0003-ffmpeg-for-media-io.md) | FFmpeg for media I/O, in-process in v1 | Accepted (revised 2026-11-24) |
 | [0004](0004-rational-time-model.md) | Exact rational time model | Accepted |
 | [0005](0005-command-driven-document.md) | Command-driven document, single writer | Accepted |
-| [0006](0006-embedded-core-and-daemon.md) | Embedded core + optional daemon, one protocol | Accepted |
-| [0007](0007-native-wgpu-ui.md) | Native retained-mode UI on `wgpu` | Accepted (with fallback) |
-| [0008](0008-plugin-strategy.md) | Three-tier plugin strategy | Accepted |
-| [0009](0009-determinism-contract.md) | Tiered determinism contract | Accepted |
-| [0010](0010-text-timeline-for-agents.md) | Text timeline projection for agents | Accepted |
+| [0006](0006-embedded-core-and-daemon.md) | Embedded core + headless CLI, one protocol | Accepted (revised 2026-11-24) |
+| [0007](0007-native-wgpu-ui.md) | `egui` shell with custom GPU canvases | Accepted (replaces custom toolkit, 2026-11-24) |
+| [0008](0008-plugin-strategy.md) | Built-in effects now; plugin tiers deferred | Accepted (revised 2026-11-24) |
+| [0009](0009-determinism-contract.md) | Same-machine determinism, tolerance goldens | Accepted (revised 2026-11-24) |
+| [0010](0010-text-timeline-for-agents.md) | Read-only text timeline for agents | Accepted (revised 2026-11-24) |
+| [0011](0011-windows-first.md) | Windows-first delivery strategy | Accepted 2026-11-24 |

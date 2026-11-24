@@ -2,26 +2,32 @@
 
 > Codename **Arcline**. A native, cross-platform non-linear editor built around a deterministic,
 > command-driven core that both humans and AI agents drive through the same interface.
+>
+> Built by a single developer with AI assistance. Windows-first, portable by design.
 
-**Status:** Architecture proposal — pre-implementation (Phase 0 not started).
-**Authored:** 2026-11-24.
+**Status:** Architecture v2 (post-review) — pre-implementation. No source code yet.
+**Base:** [architecture review](reports/architecture-review.md), 2026-11-24.
 
 ---
 
 ## What this is
 
 Arcline is a professional NLE (non-linear editor) for Windows, macOS, and Linux, written in Rust with a
-`wgpu` rendering core. It is designed from the first commit for two classes of user:
+`wgpu` rendering core and an `egui` application shell. It is designed from the first commit for two classes
+of user:
 
 1. **Humans** editing on a multi-track timeline with real-time GPU preview, effects, titles, audio, and
-   broadcast-grade export.
-2. **Agents** (LLMs, automation scripts, pipeline orchestrators) that manipulate the same project through a
-   typed command protocol, exposed as a local JSON-RPC service and as an MCP server.
+   reliable export.
+2. **Agents** (LLMs, automation scripts) manipulating the same project through a typed command protocol,
+   exposed as a local JSON-RPC service and as an MCP server.
 
-The central architectural claim is that these are not two products bolted together. An edit is a
-**sequence of validated commands applied to an immutable document snapshot**. The GUI emits commands;
-agents emit commands; the undo stack, the crash journal, the collaboration layer, and the MCP server are
-all consequences of that one decision.
+The central architectural claim is unchanged: an edit is a **sequence of validated commands applied to an
+immutable document snapshot**. The GUI emits commands; agents emit commands; undo, crash recovery, audit,
+and the MCP server are consequences of that one decision.
+
+What changed in v2, after review: a solo-calibrated scope, `egui` instead of a custom widget toolkit, six
+crates instead of eighteen, a direct compositor instead of a generic render graph, in-process decode, a
+simplified agent surface, and a 27-week roadmap to a Windows v1.
 
 ---
 
@@ -29,19 +35,20 @@ all consequences of that one decision.
 
 | # | Document | What it settles |
 |---|----------|-----------------|
-| 00 | [Product Scope](docs/00-product-scope.md) | Vision, personas, requirement traceability, non-goals, positioning |
-| 01 | [System Architecture](docs/01-system-architecture.md) | Process model, crate graph, threading, protocol, data flow |
+| 00 | [Product Scope](docs/00-product-scope.md) | Vision, users, requirement traceability, v1 non-goals, success criteria |
+| 01 | [System Architecture](docs/01-system-architecture.md) | Process model, six-crate graph, threading, protocol, data flow |
 | 02 | [Domain Model & Project Format](docs/02-domain-model-and-project-format.md) | Entities, rational time, commands, `.arcline` container, migrations |
-| 03 | [Render Engine](docs/03-render-engine.md) | Render graph, GPU abstraction, color, preview scheduler, export, determinism |
-| 04 | [Media Pipeline](docs/04-media-pipeline.md) | Demux/decode, hardware acceleration, proxies, caching, encode/mux |
-| 05 | [Audio Engine](docs/05-audio-engine.md) | Sample-accurate graph, device I/O, A/V sync, loudness |
-| 06 | [Agent Interface](docs/06-agent-interface.md) | Command API, MCP surface, text timeline DSL, security, worked example |
-| 07 | [UI Architecture](docs/07-ui-architecture.md) | Widget layer, docking, timeline renderer, inspector, input |
+| 03 | [Render Engine](docs/03-render-engine.md) | Direct compositor, effects, color, preview scheduler, export, determinism |
+| 04 | [Media Pipeline](docs/04-media-pipeline.md) | Probe/decode/encode, hardware acceleration, proxies, caching |
+| 05 | [Audio Engine](docs/05-audio-engine.md) | Sample-accurate mixing, device I/O, A/V sync |
+| 06 | [Agent Interface](docs/06-agent-interface.md) | Command API, MCP tools, text timeline, local trust model, worked example |
+| 07 | [UI Architecture](docs/07-ui-architecture.md) | `egui` shell, custom timeline/viewer canvases, inspector, input |
 | 08 | [Performance & Reliability](docs/08-performance-reliability.md) | Budgets, memory policy, crash recovery, testing strategy |
-| 09 | [Plugin System](docs/09-plugin-system.md) | OFX bridge, WASM sandbox, native ABI, permissions |
-| 10 | [Development Roadmap](docs/10-roadmap.md) | Phases, exit criteria, staffing, schedule, KPIs |
+| 09 | [Effects & Extensions](docs/09-effects-and-extensions.md) | Built-in effect manifests; deferred plugin tiers |
+| 10 | [Development Roadmap](docs/10-roadmap.md) | Phases A–H, exit criteria, scope cut list, KPIs |
 | 11 | [Risks & Legal](docs/11-risks-and-legal.md) | Risk register, codec/FFmpeg licensing, platform compliance |
-| ADR | [Decision Records](docs/adr/README.md) | Ten load-bearing decisions with alternatives considered |
+| ADR | [Decision Records](docs/adr/README.md) | Decisions with alternatives; revised after review |
+| — | [Architecture Review](reports/architecture-review.md) | Independent review that motivates v2 |
 
 ---
 
@@ -49,16 +56,18 @@ all consequences of that one decision.
 
 | Area | Decision | ADR |
 |------|----------|-----|
-| Language | Rust 2024, single workspace, no GC pauses, no FFI boundary for the hot path | [0001](docs/adr/0001-rust-for-core-and-ui.md) |
-| GPU | `wgpu` (Vulkan / Metal / D3D12) with a thin capability-tiered device layer | [0002](docs/adr/0002-wgpu-gpu-abstraction.md) |
-| Codecs | FFmpeg `libav*` behind an owned decode/encode abstraction, hardware-first | [0003](docs/adr/0003-ffmpeg-for-media-io.md) |
+| Language | Rust 2024, single workspace, no GC, no FFI boundary in the hot path | [0001](docs/adr/0001-rust-for-core-and-ui.md) |
+| GPU | `wgpu` (Vulkan / Metal / D3D12) via `egui-wgpu`; one device, CPU uploads for video | [0002](docs/adr/0002-wgpu-gpu-abstraction.md) |
+| UI | `egui` + `egui_dock` shell; timeline and viewer are custom-painted canvases | [0007](docs/adr/0007-native-wgpu-ui.md) |
+| Codecs | FFmpeg `libav*` in-process (LGPL build); `ffmpeg` CLI for proxies/thumbs/waveforms | [0003](docs/adr/0003-ffmpeg-for-media-io.md) |
 | Document | Immutable snapshots + single-writer command engine; all mutation via typed commands | [0005](docs/adr/0005-command-driven-document.md) |
 | Time | Exact rational time; frame boundaries derived per project timebase | [0004](docs/adr/0004-rational-time-model.md) |
-| Deployment | Embedded core + optional headless daemon speaking one JSON-RPC protocol | [0006](docs/adr/0006-embedded-core-and-daemon.md) |
-| UI | Own retained-mode widget layer on `wgpu`; no Electron, no Qt | [0007](docs/adr/0007-native-wgpu-ui.md) |
-| Plugins | OFX-compatible host + WASM sandbox for untrusted/agent-authored effects | [0008](docs/adr/0008-plugin-strategy.md) |
-| Determinism | Bit-exact per device; tolerance-bounded across devices; reference mode for goldens | [0009](docs/adr/0009-determinism-contract.md) |
-| Agent text | Round-trippable EDL-like text projection of the timeline as a first-class resource | [0010](docs/adr/0010-text-timeline-for-agents.md) |
+| Deployment | Embedded core in the app + headless CLI/MCP process; one JSON-RPC protocol | [0006](docs/adr/0006-embedded-core-and-daemon.md) |
+| Crates | Six: `core`, `media`, `render`, `audio`, `app`, `cli` | [0001](docs/adr/0001-rust-for-core-and-ui.md) |
+| Platform order | Windows-first; macOS second; Linux after 1.0 | [0011](docs/adr/0011-windows-first.md) |
+| Plugins | None in v1; internal effect manifests only; OFX/WASM/VST3 deferred | [0008](docs/adr/0008-plugin-strategy.md) |
+| Determinism | Bit-exact per machine; tolerance-bounded golden tests; no cross-device contract in v1 | [0009](docs/adr/0009-determinism-contract.md) |
+| Agent text | Read-only EDL-like text view; writes go through JSON commands | [0010](docs/adr/0010-text-timeline-for-agents.md) |
 
 ---
 
@@ -66,13 +75,16 @@ all consequences of that one decision.
 
 | Phase | Weeks | Exit criterion |
 |-------|-------|----------------|
-| **P0 Kernel** | 1–6 | `arcline render clip.mp4 -o out.mp4` produces a frame-accurate transcode |
-| **P1 Pipeline** | 5–14 | 1080p30 timeline with 8 tracks and 20 effects previews in real time |
-| **P2 Editing** | 10–24 | A human edits and exports a 10-minute project without touching a config file |
-| **P3 Agent Surface** | 18–30 | An agent produces a captioned 3-shot edit end-to-end through MCP |
-| **P4 Finishing** | 25–40 | Broadcast deliverables: HDR, loudness-normalized, subtitle burn-in, ProRes |
-| **P5 Ecosystem** | 36–52 | Third-party OFX plugin runs unmodified; WASM effect authored by an agent ships |
-| **P6 1.0** | 50–60 | Signed installers on 3 OSes, crash-free-session ≥ 99.5%, docs complete |
+| **A Spine** | 1–3 | `arcline-cli render` transcode is frame-accurate; command property tests pass 10k sequences |
+| **B Headless pipeline** | 3–7 | Import → trim → export works end-to-end from the CLI with hardware encode |
+| **C Compositor + shell** | 6–12 | 1080p preview ≥ 30 fps with 4 tracks and 8 effects; move/trim/split in the GUI |
+| **D Audio** | 11–14 | 10-minute playback drifts ≤ 1 frame; preview/export mix hashes match |
+| **E Lifecycle** | 13–16 | 100 forced kills during edit/save lose zero edits |
+| **F Agent surface** | 15–19 | An agent builds a captioned three-shot cut through MCP |
+| **G Finish** | 18–24 | A non-developer edits and exports a 10-minute project |
+| **H Harden** | 23–27 | Budgets met; Windows installer; beta with external users |
+
+Windows v1: **week 27**. macOS: +3–4 weeks. Linux: post-1.0 (Flatpak/community).
 
 ---
 
@@ -80,35 +92,22 @@ all consequences of that one decision.
 
 ```
 Arcline/
-├── Cargo.toml              # workspace
 ├── crates/
-│   ├── arc-time/           # rational time, timebase, frame math
-│   ├── arc-model/          # document entities, schema, migrations
-│   ├── arc-command/        # command types, validation, apply engine, undo
-│   ├── arc-media/          # probe, demux/decode, hardware accel
-│   ├── arc-cache/          # frame/proxy/waveform caches
-│   ├── arc-render/         # render graph, wgpu device layer, passes
-│   ├── arc-effects/        # built-in effects + parameter schemas
-│   ├── arc-audio/          # audio graph, resampling, devices, metering
-│   ├── arc-text/           # shaping, titles, subtitles
-│   ├── arc-encode/         # muxing, presets, encoder orchestration
-│   ├── arc-protocol/       # JSON-RPC types, capability tokens, versioning
-│   ├── arc-server/         # daemon, transports, MCP facade
-│   ├── arc-cli/            # `arcline` binary (render/probe/serve)
-│   ├── arc-ui/             # widget tree, docking, theme, input
-│   ├── arc-app/            # desktop shell binary
-│   ├── arc-plugin-host/    # OFX + WASM + C ABI
-│   └── arc-testkit/        # golden-frame harness, generators, fixtures
+│   ├── arc-core/           # time, model, commands, project file, schema
+│   ├── arc-media/          # probe, decode, encode, mux, proxy jobs (FFmpeg)
+│   ├── arc-render/         # wgpu compositor, effects, text, frame cache
+│   ├── arc-audio/          # cpal output, mixer, offline render
+│   ├── arc-app/            # egui shell, timeline/viewer canvases, app binary
+│   └── arc-cli/            # headless render, JSON-RPC/MCP server, utilities
 ├── docs/                   # this proposal
-└── assets/                 # icons, default lut, fonts (licensed)
+├── reports/                # architecture review
+└── assets/                 # icons, default LUT, fonts (licensed)
 ```
 
 ---
 
 ## How to read this proposal
 
-If you read one thing, read [01 System Architecture](docs/01-system-architecture.md) — it is the spine.
-If you are the agent-integration stakeholder, read [06 Agent Interface](docs/06-agent-interface.md) first;
-it is the differentiator and it constrains the document model. If you are scheduling, read
-[10 Roadmap](docs/10-roadmap.md) and [11 Risks & Legal](docs/11-risks-and-legal.md) together; the legal
-posture around codecs affects what Phase 1 can ship.
+Read [01 System Architecture](docs/01-system-architecture.md) first — it is the spine. For the product
+differentiator, read [06 Agent Interface](docs/06-agent-interface.md). For scheduling and scope, read
+[10 Roadmap](docs/10-roadmap.md); the cut list there is part of the design, not an afterthought.

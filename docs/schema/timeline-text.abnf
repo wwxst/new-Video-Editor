@@ -1,5 +1,7 @@
 ; arcline timeline text format — version 1
-; Normative grammar for inspect.timeline / timeline.apply_text (docs/06-agent-interface.md §5)
+; Normative grammar for the read-only inspect.timeline view (docs/06-agent-interface.md §5).
+; timeline.apply_text (parsing a rewritten timeline into commands) is deferred to v1.1; the grammar is
+; published now so readers and future writers share one definition.
 ; Lines terminate with LF or CRLF. A line beginning with '#' (after optional WSP) is a comment.
 ; Times are HH:MM:SS:FF at the sequence timebase (drop-frame notation HH:MM:SS;FF is display-only
 ; and MUST NOT appear on the wire). The version line MUST be the first line.

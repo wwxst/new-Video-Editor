@@ -1,213 +1,201 @@
 # 10 — Development Roadmap
 
-Sequenced so that every phase produces something demonstrable, and so that the riskiest assumptions are
-tested earliest. Durations assume the staffing in §7 and calendar weeks from project start.
+Sized for **one developer with AI assistance**. Estimates assume focused full-time work; AI compresses
+typing and boilerplate, not integration debugging, codec build matrices, or UI polish. Phases are vertical
+slices: each one ends with something runnable.
+
+Windows is the release target through v1.0 ([ADR-0011](adr/0011-windows-first.md)).
 
 ## 1. Phase overview
 
 ```
-Weeks  1    6    12   18   24   30   36   42   48   54   60
-       |----|----|----|----|----|----|----|----|----|----|
-P0 Kernel      ██████
-P1 Pipeline        ███████████
-P2 Editing                ███████████████
-P3 Agent Surface               ████████████
-P4 Finishing                         ████████████████
-P5 Ecosystem                                   ████████████
-P6 1.0                                               ██████████
+Weeks  1    4    8    12   16   20   24   27
+       |----|----|----|----|----|----|----|
+A Spine     ███
+B Pipeline     ███████
+C Compositor        ████████████
+D Audio                  ██████
+E Lifecycle                 ████
+F Agent                        █████
+G Finish                          ████████
+H Harden                              ██████
 ```
 
-Critical path: P0 → P1 → P2 → P4 (finishing) → P6. P3 (agent surface) depends on P2's command set being
-stable and can start as soon as P2's model freezes (week 18), running parallel to late P2.
+Critical path: A → B → C → G → H. F depends on C's command surface and can run in parallel with late C/D.
+D is independent of F. E depends on C and D.
 
-## 2. Phase 0 — Kernel (weeks 1–6)
+## 2. Phase A — Spine (weeks 1–3)
 
-**Goal:** prove the pipeline end-to-end with the minimum surface: decode → GPU color convert → encode.
-
-Deliverables
-
-- Cargo workspace, crate skeleton, CI on 3 OSes, dependency layering check.
-- `arc-time` complete with exhaustive tests (this is deliberately first; every later bug is caught here).
-- `arcline-decode` subprocess + IPC + shared memory; software + hardware decode for H.264/ProRes.
-- `arc-render` device layer + `Source → Resolve → Output` graph; preview of one clip at a time.
-- `arcline` CLI: `probe`, `render` (trim/scale/transcode), `diag`.
-- `arc-encode` with hardware probe; NVENC/VideoToolbox/VA-API paths.
-
-**Exit criteria**
-
-- `arcline render in.mov -o out.mp4 --range 00:00:10:00-00:00:20:00` is frame-accurate (verified by
-  frame hash against a reference decode of the same range).
-- A 4K HEVC corrupt file crashes the decode worker; the CLI reports a clean error and exits 0/1 correctly.
-- CI green on Windows/macOS/Linux; determinism test passes on lavapipe.
-
-## 3. Phase 1 — Media pipeline (weeks 5–14)
-
-**Goal:** real-time multi-source compositing with effects; the render engine earns its architecture.
+**Goal:** exact time, the document, and commands, provable without a GPU.
 
 Deliverables
 
-- Render graph with tracks, transforms, effect chain, transitions, blend modes.
-- Frame cache L0/L1; proxy generation; thumbnail and waveform caches.
-- 12 built-in effects with manifests and golden tests; text/title renderer.
-- Preview scheduler + audio master clock + quality governor (audio in preview = silent mixdown initially).
-- `arc-testkit` golden harness; 60 fixtures.
+- Cargo workspace with six crates and the dependency CI check.
+- `arc-core`: `Time`/`Timebase`, entities, command types, validation, undo/journal, project file read/write,
+  schema v7 baseline.
+- `arcline-cli` skeleton with `new`, `describe`, and `apply` (JSON commands).
+- Property tests: apply → inverse → identical canonical hash.
 
 **Exit criteria**
 
-- 1080p30 preview with 8 tracks + 20 effects ≥ 30 fps on Tier A/B reference hardware.
-- Seek p95 ≤ 250 ms uncached 4K proxy; ≤ 100 ms cached.
-- Golden suite green on hardware nightly; determinism green on lavapipe per PR.
-- Decoder fuzz corpus (500 mutated files) without parent-process crash.
+- 10,000 randomized command sequences pass the invariant suite.
+- NTSC/PAL boundary tests pass; no floats in timing types.
+- `arcline-cli new demo.arcline && arcline-cli apply` produces a valid container.
 
-## 4. Phase 2 — Editing (weeks 10–24)
+## 3. Phase B — Headless pipeline (weeks 3–7)
 
-**Goal:** a human can edit and export a real project. This is the longest phase; it is where the product
-becomes an editor.
+**Goal:** import → trim → export, end to end, without a UI.
 
 Deliverables
 
-- `arc-model` + `arc-command` complete: full command set, validation, undo/redo, journal, autosave,
-  crash recovery, migrations infra.
-- `.arcline` container format, link and collect modes, missing-media/relink flow.
-- UI shell: docking, tabs, theme, keyboard, command palette, file dialogs, IME; timeline renderer with
-  virtualized paint, LOD, snapping, trim/move/slip/slide/split; inspector generated from manifests;
-  keyframe editor.
-- Audio engine: playback, mixing, EQ, fades, mute/solo, meters; offline render parity.
-- Export pipeline: parallel segment workers, hw encoders, MP4/MOV/ProRes, WAV stems, `export_report.json`.
-- Open/save/autosave/recovery end-to-end.
+- `arc-media`: FFmpeg in-process probe/decode/encode, hardware-first, panic isolation at the clip boundary.
+- `arc-render`: offscreen device + minimal compositor (single track, transform, color convert).
+- `arcline-cli render`: range, resolution, preset; `export_report.json`.
+- Windows FFmpeg LGPL build pipeline pinned in the repo; macOS/Linux `cargo check`.
 
 **Exit criteria**
 
-- A 10-minute, 8-video-track/6-audio-track project with transitions, titles, and 20 effects is edited,
-  saved, reopened, and exported on all three OSes by a tester with no developer help.
-- Forced-kill test: 1,000 random kills during editing/saving → zero unrecoverable sessions.
-- Keyboard-only path completes "import → cut → export".
-- IME: CJK title entry works on Win/mac/Linux.
+- `arcline-cli render in.mov out.mp4 --range …` is frame-accurate against a reference decode.
+- Hardware H.264/HEVC and AV1 (SVT) encode paths work on the reference machine.
+- A corrupt file produces a clean per-clip error, not a process crash.
 
-## 5. Phase 3 — Agent surface (weeks 18–30)
+## 4. Phase C — Compositor and shell (weeks 6–12)
 
-**Goal:** agents edit with parity. This phase gates every "agent-native" claim in the pitch.
+**Goal:** the editor exists: timeline, preview, multi-track compositing.
 
 Deliverables
 
-- `arc-protocol` frozen at 1.0: sessions, revisions, capability tokens, typed errors, idempotency, dry-run.
-- `arc-server`: daemon with stdio/pipe/WebSocket transports; job queue; job persistence across disconnects.
-- MCP server: the tool catalog of [06 §6](06-agent-interface.md), resources, image-returning inspection tools.
-- Text timeline projection + round-trip apply + ABNF grammar + fuzz tests.
-- GUI control endpoint (topology C): agents act on a live human session.
-- Security: root allow-lists, token storage, audit log, rate limits; threat-model review + pen test.
-- Reference agent integration (a sample MCP client script + docs) that builds a captioned cut from a folder.
+- Direct compositor: tracks, transforms, effects chain, transitions, overlays.
+- Six built-in effects, text/title renderer, frame cache.
+- `arc-app`: `egui` shell, docking, media bin, inspector generated from manifests, viewer via `egui_wgpu`.
+- Timeline canvas: paint, virtualization, LOD, hit testing, move/trim/split, snapping.
+- Preview scheduler with audio-clock placeholder and two-level quality fallback.
+- Command palette, keymap, native dialogs, IME.
 
 **Exit criteria**
 
-- The worked example of [06 §9](06-agent-interface.md) runs end-to-end against the daemon and against a live
-  GUI session, producing a reviewable export.
-- An agent with `project:read` cannot write; with no `fs:*` capability cannot read outside root (verified by
-  tests attempting escapes, symlinks, and `..` traversal).
-- Protocol conformance suite: 200 request/response cases, including stale revisions, idempotent retries, and
-  malformed batches.
+- 1080p preview ≥ 30 fps with 4 tracks and 8 effects on both reference machines.
+- A user can import, arrange, trim, split, and scrub a project entirely in the GUI.
+- IME works for CJK title entry on Windows.
 
-## 6. Phase 4 — Finishing (weeks 25–40)
+## 5. Phase D — Audio (weeks 11–14)
 
-**Goal:** broadcast/streaming deliverables and the color/HDR story.
+**Goal:** playback and mixing that stay in sync.
 
 Deliverables
 
-- Color management: input transforms, working spaces (709/2020/ACEScg), output transforms, HDR10/HLG,
-  tone-mapping policies; 3D LUT support with space conversion.
-- Loudness: R128 measurement, two-pass normalization, true-peak limiting, strict targets in export.
-- Keyframe curves: bezier/ease editing UI + evaluation parity in preview/export.
-- Masks (shapes + tracked-lite), chroma key, glow, film grain, perspective/corner-pin.
-- Subtitles: SRT/VTT/ASS import, styling, burn-in + sidecar export; transcript→cues tool.
-- Interchange: EDL, FCPXML, OTIO import/export with a documented loss matrix.
-- Proxy workflow polish, optimized media management, media bin search/filter.
+- `arc-audio`: `cpal` output, mixer (gain, pan, fades, mute/solo), sample-accurate clip reads.
+- Audio-master clock; A/V sync; device-change handling; meters.
+- Offline mix path for export with hash parity to real-time.
 
 **Exit criteria**
 
-- HDR10 export passes a PQ round-trip test (decode → compare within tolerance) on all hardware runners.
-- A 60-second spot exported to -23 LUFS and -14 LUFS targets within ±0.1 LU measured, true peak ≤ -1 dBTP.
-- Round-trip Premiere ⇄ Arcline ⇄ Resolve via FCPXML/OTIO on a 20-clip project with transitions and audio,
-  with a documented list of lossy items (and no silent losses).
+- 10-minute playback drifts ≤ 1 frame and produces no clicks at edits or seeks.
+- Preview mix and offline export mix are hash-identical on the fixture project.
 
-## 7. Phase 5 — Ecosystem (weeks 36–52)
+## 6. Phase E — Project lifecycle (weeks 13–16)
 
-**Goal:** extensibility and the professional long tail.
+**Goal:** trust the app with real work.
 
 Deliverables
 
-- OFX host (subprocess) with a curated compatibility suite; WASM effect tier + `arcline effect` SDK.
-- VST3 audio plugin hosting in subprocess (Win/mac first).
-- Batch/pipeline mode: `arcline render --jobs file.json`, watch folders, template projects.
-- Multi-GPU export (one process per GPU), render farm submit hooks (generic command adapter).
-- Scripting convenience: a thin typed client library (Rust, Python) over the protocol.
-- Collaboration *groundwork*: command log export/import, deterministic merge tool for divergent logs
-  (research milestone; no live multi-user in 1.0).
+- Autosave, journal compaction, crash recovery UI, atomic saves.
+- Offline media and relink; proxy generation via `ffmpeg` CLI as a background job.
+- Export presets, save modes (link/collect), project settings UI.
 
 **Exit criteria**
 
-- Three third-party OFX plugins from two vendors render frame-accurate output in a reference project.
-- A WASM effect authored by an agent installs, renders, and is disabled cleanly when it exceeds fuel.
-- A batch job of 50 renders completes unattended with per-job reports and a machine-readable summary.
+- 100 forced kills during editing and saving: zero lost edits.
+- A project with moved media opens with placeholders and relinks by path or hash.
 
-## 8. Phase 6 — 1.0 (weeks 50–60)
+## 7. Phase F — Agent surface (weeks 15–19)
 
-**Goal:** ship it, signed, documented, stable.
+**Goal:** agents edit with parity.
 
 Deliverables
 
-- Installers: MSIX + portable (Win), notarized universal DMG (mac), Flatpak + AppImage (Linux); auto-update
-  channel with signature verification and staged rollout.
-- Accessibility audit and fixes (screen reader, high contrast, reduced motion); localization infrastructure.
-- Docs: user guide, command reference (generated from schemas), MCP integration guide, plugin SDK guide.
-- Performance hardening pass against [08 §2](08-performance-reliability.md) on all reference hardware.
-- Security: dependency audit, threat-model sign-off, FFmpeg CVE watch process, LGPL compliance package.
-- 30-day dogfood soak with real projects; crash-free-session SLO met.
+- `arc-cli`: JSON-RPC session over stdio, `project.apply`, revisions, dry-run, idempotency, typed errors.
+- MCP server (`arcline-cli mcp`) with the 20 tools, resources, and rendered-frame inspection.
+- Text timeline (`inspect.timeline`), read-only.
+- Render jobs with progress and reports.
+- Reference agent script and integration guide.
 
 **Exit criteria**
 
-- All §2 budgets met on all four reference configurations.
-- Crash-free sessions ≥ 99.5% over the soak; zero lost-edit incidents.
-- Installer on a clean VM: install → open sample project → export, ≤ 5 minutes, no admin rights on Windows
-  portable build.
-- Legal sign-off on codec and FFmpeg distribution posture ([11](11-risks-and-legal.md)).
+- The worked example in [06 §10](06-agent-interface.md) runs end-to-end and produces a reviewable export.
+- Path escapes (`..`, symlinks, absolute paths outside root) are rejected by tests.
+- Protocol conformance suite passes ~150 request/response cases.
 
-## 9. Dependencies and sequencing rationale
+## 8. Phase G — Finish (weeks 18–24)
 
-| Decision | Why this order |
-|---|---|
-| Time model first | every subsystem depends on exact time; retrofitting it is a rewrite |
-| Decode isolation in P0 | retrofitting process isolation later touches every media call site |
-| Command model before UI | the UI must be written against commands from day one, or it will grow private state |
-| Agent surface after P2 | freezing the protocol before the command set is exercised by real editing creates a bad API |
-| OFX late | it is a compatibility feature; it must not constrain the core effect model |
-| HDR/color in P4 | color management is cross-cutting; doing it before the graph is exercised invites rework |
+**Goal:** a project a non-developer can complete.
 
-## 10. KPIs (measured continuously after P3)
+Deliverables
+
+- Keyframe editing UI and evaluation parity.
+- Transitions polish; titles styling; subtitle import and burn-in.
+- LUT color workflow; chroma key; sharpen/vignette.
+- Timeline UX: slip/slide, selection box, markers, track controls.
+- Performance pass against [08 §2](08-performance-reliability.md).
+
+**Exit criteria**
+
+- A 10-minute, 4-track project with titles, music, and effects is edited and exported by a non-developer.
+- Budgets met on both reference machines.
+
+## 9. Phase H — Harden (weeks 23–27)
+
+**Goal:** ship Windows v1.
+
+Deliverables
+
+- Crash reporting, diagnostics, logging; fuzzing and forced-kill hardening.
+- Installer (portable zip + MSIX), code signing, auto-update channel.
+- User guide, command reference generated from schemas, MCP integration guide.
+- FFmpeg LGPL compliance package and codec licensing sign-off.
+
+**Exit criteria**
+
+- 30-day dogfood with real projects; zero lost-edit incidents.
+- Clean-VM install → open sample → export in under 5 minutes.
+- Legal sign-off on codec posture.
+
+**macOS** follows with +3–4 weeks (FFmpeg build, Metal validation, notarization, packaging). **Linux** is
+post-1.0, community-assisted.
+
+## 10. Explicit v1 cut list
+
+No plugins (OFX/WASM/VST3); no HDR/ACES/OCIO; no collaboration; no live GUI agent attach; no render
+farm/multi-GPU; no EDL/FCPXML/OTIO; no multicam; no screen-reader certification; no image sequences; no
+audio EQ/compressor/loudness; no three-OS installer matrix.
+
+These are not failures. They are the difference between shipping and not.
+
+## 11. Effort assumptions
+
+| Phase | Weeks | Notes |
+|---|---|---|
+| A | 3 | pure logic, very AI-friendly |
+| B | 5 | FFmpeg build matrix is the schedule risk |
+| C | 7 | UI work; the largest phase |
+| D | 4 | cpal + sync; mostly known |
+| E | 4 | persistence; test-heavy |
+| F | 5 | protocol + MCP; well-scoped |
+| G | 7 | broad surface; cut aggressively if late |
+| H | 4 | packaging + hardening |
+| **Total** | **~27** | +3–4 for macOS |
+
+If a phase slips beyond its estimate by more than 30%, cut from Phase G's list before extending the
+schedule — the v1 promise is a working editor with an agent surface, not a feature checklist.
+
+## 12. KPIs
 
 | KPI | Target at 1.0 |
 |---|---|
-| Time for reference agent to produce a 60 s captioned cut | ≤ 10 min wall clock |
-| Human time-to-first-export for a new user | ≤ 10 min (guided sample project) |
-| Crash-free sessions | ≥ 99.5% |
-| p95 seek latency (proxy) | ≤ 250 ms |
-| Export throughput vs real time (1080p H.264) | ≥ 4× |
-| Protocol error rate in agent sessions | ≤ 2% of calls (proxy for API clarity) |
-| Golden-test pass rate across hardware | 100% (tolerance-bounded) |
-
-## 11. Staffing
-
-| Role | P0–P1 | P2 | P3–P4 | P5–P6 |
-|---|---|---|---|---|
-| Architect / tech lead | 1 | 1 | 1 | 1 |
-| Render / GPU engineer | 1 | 2 | 2 | 2 |
-| Media / codec engineer | 1 | 1 | 1 | 1 |
-| Systems / backend (protocol, server) | 0.5 | 1 | 1.5 | 1 |
-| UI engineer | 0.5 | 2 | 2 | 2 |
-| Audio engineer | 0 | 1 | 1 | 1 |
-| QA / release engineer | 0 | 0.5 | 1 | 1.5 |
-| **Total (FTE)** | **4** | **8.5** | **9.5** | **9.5** |
-
-Schedule risk is carried in §11 of [11-risks-and-legal.md]; the two largest are codec licensing (affects
-P1 deliverables) and the widget layer ramp-up (affects P2). Both have explicit fallbacks:
-hardware-only encoders + open codecs (AV1) for the former; a license-friendly toolkit adoption as a
-contingency for the latter (ADR-0007 documents the reversal cost).
+| Reference agent produces a 60 s captioned cut | ≤ 10 min wall clock |
+| Human time-to-first-export (new user) | ≤ 10 min |
+| Crash-free sessions | ≥ 99% |
+| p95 seek latency (proxy) | ≤ 300 ms |
+| Export throughput (1080p H.264) | ≥ 2× real time |
+| Golden-test pass rate on CI | 100% (tolerance-bounded) |
+| Forced-kill recovery | zero lost edits over 100 trials |

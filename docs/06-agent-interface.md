@@ -1,47 +1,52 @@
 # 06 — Agent Interface
 
-This is the document the whole architecture exists to support. It specifies how an AI agent (or any
-automation) edits video in Arcline with the same authority as a human, and why that is safe.
+This document specifies how an AI agent edits video in Arcline with the same authority as a human, and why
+that is safe. It is the product differentiator; the rest of the architecture exists to make it possible.
+
+v2 changes: the trust model is local and unauthenticated (single-user process, path allow-lists), the live
+GUI-attach topology is deferred, transport is stdio only, and the tool surface is a compact 20 tools. The
+command model, revisions, dry-run, typed errors, and image inspection — the parts that make agents effective
+— are unchanged.
 
 ## 1. Principles
 
 1. **Parity, not a wrapper.** Every GUI action maps to a command; every command is available to agents.
    If a feature cannot be expressed as a command, it is not finished.
-2. **Intent, not pixels.** Agents address clips, tracks, and parameters by ID and value. They never
-   "click" or send keystrokes.
-3. **Read like a human, write like a compiler.** The document is exposed in a compact, stable text form
-   for reading and reasoning; writes are typed and validated.
-4. **Verify, don't hope.** Every write can be dry-run and diffed; every export produces a report; frames
-   can be inspected mid-edit.
-5. **Least privilege.** Capabilities are granted at session open; destructive and host-touching operations
-   are opt-in.
-6. **Fail loudly and specifically.** Stable error `kind` strings, no prose parsing.
+2. **Intent, not pixels.** Agents address clips, tracks, and parameters by ID and value.
+3. **Read like a human, write like a compiler.** A compact text view for reasoning; typed JSON for writes.
+4. **Verify, don't hope.** Writes can be dry-run and diffed; renders produce a report; frames can be
+   inspected mid-edit.
+5. **Fail loudly and specifically.** Stable error `kind` strings, no prose parsing.
+6. **Local trust.** v1 assumes a single local user; isolation machinery arrives with remote access, not
+   before.
 
 ## 2. Surfaces
 
 | Surface | Purpose | Transport |
 |---|---|---|
-| **JSON-RPC 2.0** | Full access to sessions, commands, jobs | stdio, named pipe/unix socket, WebSocket |
-| **MCP server** (`arcline mcp`) | Standard agent integration: tools, resources, prompts | stdio (spawned by the host) |
-| **CLI** (`arcline`) | Scripted, stateless operations: `probe`, `render`, `convert`, `serve` | process |
-| **Text timeline** | Read/write a human-style EDL projection | via RPC resource or file |
+| **JSON-RPC 2.0** | Sessions, commands, jobs | stdio (NDJSON) in v1 |
+| **MCP server** (`arcline-cli mcp`) | Standard agent integration | stdio |
+| **CLI** (`arcline-cli`) | Stateless operations: `probe`, `render`, `convert`, `mcp` | process |
 
-All four are thin views over the same command engine — none has a private path to state.
+All three are views over the same command engine. The CLI's `render` path uses the same `arc-render`
+compositor as the GUI, so headless output cannot diverge from preview.
+
+**Deferred:** attaching to a live GUI session via a control socket. Agents operate on project files. This
+removes an IPC surface and a trust model from v1; the protocol is designed so the topology can be added
+without changing semantics ([§9](#9-future-topologies)).
 
 ## 3. Session model
 
 ```
-session.open {capabilities, root, project?} → {session, protocol, schema, renderer, revision}
+project.open {path, create?} → {session, protocol, schema, renderer, revision, summary}
 ```
 
-- **One writer per session.** Multiple agent processes may connect; each gets its own session. Two sessions
-  editing the same project file are prevented by a lock file (`project.lock` with PID/session and stale
-  detection). Concurrent sessions on one *live* GUI session are allowed only as read-only inspectors.
-- **Sessions are cheap.** An agent that wants to inspect without editing opens with `project:read` and a
-  snapshot; no side effects.
-- **Long-lived sessions are the norm.** The daemon keeps the document in memory; agents issue sequences of
-  commands with optimistic concurrency (`base_revision`), retrying on `stale_revision` with the returned
-  diff.
+- One process, one open project in v1. The project file is locked (`project.lock` with PID + stale
+  detection) so two processes cannot write the same file.
+- Sessions are cheap: opening a project with read-only intent is the same call; the client simply does not
+  send writes.
+- Long-lived sessions are normal: the process keeps the document in memory and applies command sequences
+  with optimistic concurrency.
 
 ## 4. Command API
 
@@ -55,45 +60,38 @@ The command set is [02 §4](02-domain-model-and-project-format.md). Wire form:
     "base_revision": 88,
     "commands": [
       {"op": "timeline.split_clip", "clip": "cl_…", "at": {"num": 125, "den": 30}},
-      {"op": "effect.add", "clip": "cl_…", "effect": "core.color.correct", "after": "fx_…"}
+      {"op": "effect.add", "clip": "cl_…", "effect": "core.color.correct"}
     ],
     "comment": "split at the eye-line change, then grade"
   }
 }
 ```
 
-Batch rules ([01 §6](01-system-architecture.md)): atomic, validated as a whole, dry-runnable, idempotent by
-key, one revision increment per committed batch.
+Semantics ([01 §6](01-system-architecture.md)): atomic batches, whole-batch validation, dry-run,
+idempotency keys, one revision increment per commit.
 
-**Read side** — `project.describe` returns a compact, stable summary (not the full document):
+**Read side.** `project.describe` returns a compact summary, not the full document:
 
 ```json
 {
   "revision": 88,
   "sequence": {"name": "Main", "duration": "00:01:30:12", "timebase": "30000/1001",
                "resolution": [1920, 1080]},
-  "tracks": [
-    {"id": "tr_V1", "kind": "video", "clips": 3},
-    {"id": "tr_A1", "kind": "audio", "clips": 2}
-  ],
-  "clips": [
-    {"id": "cl_…", "track": "tr_V1", "asset": "interview_a.mov",
-     "start": "00:00:00:00", "end": "00:00:12:14", "source_in": "00:00:04:02",
-     "effects": ["core.color.correct"], "enabled": true}
-  ],
-  "issues": [],
-  "missing": []
+  "tracks": [{"id": "tr_V1", "kind": "video", "clips": 3},
+             {"id": "tr_A1", "kind": "audio", "clips": 2}],
+  "clips": [{"id": "cl_…", "track": "tr_V1", "asset": "interview_a.mov",
+             "start": "00:00:00:00", "end": "00:00:12:14", "source_in": "00:00:04:02",
+             "effects": ["core.color.correct"], "enabled": true}],
+  "issues": [], "missing": []
 }
 ```
 
-Timecodes are `HH:MM:SS:FF` at project timebase for human/LLM legibility, with exact rationals available
-under `--exact` or in the full document resource. Both map deterministically; the timecode is a rendering
-of the rational, not a replacement.
+Timecodes are `HH:MM:SS:FF` at the project timebase for legibility; exact rationals are available with
+`exact: true`. Timecodes render rationals — they never replace them.
 
-## 5. Text timeline (the agent's "document view")
+## 5. Text timeline (read view)
 
-LLMs reason far better over linear text than over deeply nested JSON. `inspect.timeline` returns a
-round-trippable EDL-like projection:
+LLMs reason better over linear text than nested JSON. `inspect.timeline` returns a dense EDL-like view:
 
 ```
 # arcline timeline v1
@@ -109,102 +107,104 @@ MARK
   00:00:12:14 "cut point"
 ```
 
-Rules for the projection:
+- **Read-only in v1.** `timeline.apply_text` (diff a rewritten timeline into a command batch) is deferred
+  to v1.1. Writes go through JSON commands, which are typed, validated, and unambiguous.
+- **Stable and parseable.** One clip per line, fixed field order, quoting for spaces. The grammar ships in
+  [schema/timeline-text.abnf](schema/timeline-text.abnf).
+- **Partial reads.** `inspect.timeline` accepts a time range so a 2,000-clip project is consumable in
+  chunks.
+- **Lossless for structure, lossy for depth.** Full parameter and keyframe detail stays in JSON
+  (`inspect.clip <id> --json`).
 
-- **Stable and parseable.** One clip per line, fixed field order, quoting for names with spaces.
-  ABNF grammar ships in `docs/schema/timeline-text.abnf`; the parser is fuzzed.
-- **Read is complete; write is a convenience layer.** `timeline.apply_text` diffs a submitted text against
-  the current timeline and emits the equivalent command batch — it never bypasses validation. This lets an
-  agent "rewrite the edit" as text and get a previewable diff back.
-- **Lossless for structure, lossy for depth.** Full parameter/keyframe detail stays in JSON
-  (`inspect.clip <id> --json`); the text view carries structure, timing, and top-level effect params.
-- Both views are MCP **resources** so an agent can subscribe to changes.
+Both `inspect.timeline` and `inspect.clip` are MCP resources so an agent can re-read state after edits.
 
 ## 6. MCP surface
 
-`arcline mcp` speaks MCP over stdio, wrapping the same JSON-RPC session.
+`arcline-cli mcp --project <path>` speaks MCP over stdio, wrapping the JSON-RPC session.
 
-### 6.1 Tools
+### 6.1 Tools (20)
 
 | Group | Tools |
 |---|---|
-| Project | `project_open`, `project_create`, `project_describe`, `project_save`, `project_export_report` |
-| Assets | `media_import`, `media_probe`, `media_generate_proxy`, `media_relink` |
-| Edit | `timeline_add_clip`, `timeline_move_clip`, `timeline_trim_clip`, `timeline_split_clip`, `timeline_remove_clip`, `timeline_set_speed`, `timeline_set_transform`, `timeline_add_transition` |
-| Effects | `effect_list`, `effect_describe`, `effect_add`, `effect_set_params`, `effect_set_keyframes` |
-| Audio | `audio_set_gain`, `audio_set_fades`, `audio_normalize`, `audio_set_track_mix` |
-| Text | `title_add`, `subtitle_import`, `subtitle_from_transcript` |
-| Inspect | `inspect_timeline`, `inspect_clip`, `inspect_frame` (image), `inspect_waveform` (image), `inspect_scopes` (image) |
-| History | `history_undo`, `history_redo`, `history_list` |
-| Batch | `edit_apply` (raw command batch, for power users), `edit_validate` (dry-run) |
-| Jobs | `render_submit`, `render_status`, `render_cancel`, `job_list` |
+| Project | `project_open` (creates if missing), `project_describe`, `project_save` |
+| Media | `media_import` (returns probe summary) |
+| Edit | `timeline_add_clip`, `timeline_move_clip`, `timeline_trim_clip`, `timeline_split_clip`, `timeline_remove_clip`, `timeline_add_transition` |
+| Effects | `effect_list` (returns manifests), `effect_add`, `effect_set_params` |
+| Audio | `audio_set_gain` |
+| Text | `title_add`, `subtitle_import` |
+| Inspect | `inspect_timeline`, `inspect_frame` |
+| Render | `render_submit`, `render_status` |
 
 Design notes:
 
-- **One tool per intent**, narrow parameters, no `--flags` strings. Schemas are generated from the same
-  Rust command types (single source of truth), so tool docs cannot drift from behavior.
-- `inspect_frame` returns an image content block (PNG, ≤ 1600 px on the long edge, `quality` param). This is
-  how an agent *sees* its work — after a grade, after a transition, after a title placement.
-- `effect_list` / `effect_describe` return the manifest ([02 §3.4](02-domain-model-and-project-format.md)),
-  so an agent discovers parameters and ranges instead of guessing.
+- **One tool per intent**, narrow parameters, no flag strings. Schemas are generated from the Rust command
+  types so tool docs cannot drift from behavior.
+- `inspect_frame` returns an image content block (PNG, ≤ 1600 px) **of the composited output**, not the raw
+  source frame. This is how an agent checks its grade, transition, or title placement.
+- `effect_list` returns manifests, so agents discover parameters and ranges instead of guessing.
 - Every mutating tool accepts `dry_run` and returns the diff it would make.
+- The full command set remains available through the JSON-RPC `project.apply` method (batch, undo/redo,
+  relinking, markers). MCP exposes the common path; power users drop to JSON-RPC rather than growing the
+  tool surface.
 
 ### 6.2 Resources
 
 ```
-arcline://session/info            capabilities, schema, renderer, revision
-arcline://project/timeline.txt    text projection (subscribe-able)
-arcline://project/document.json   full canonical document (large; use with care)
+arcline://project/timeline.txt    text projection (re-readable after each edit)
+arcline://project/document.json   full canonical document (large; use sparingly)
 arcline://project/schema.json     JSON schema for commands
-arcline://effects/catalog.json    all installed effect manifests
+arcline://effects/catalog.json    installed effect manifests
 arcline://media/{asset}/wave.png  waveform image
 ```
 
-### 6.3 Prompts (optional convenience)
+## 7. Jobs
 
-`rough_cut(footage_dir, brief)`, `caption_video(language)`, `color_match(reference_frame)`. These are
-scaffolding for agent hosts, not required for correctness, and are thin wrappers over the tools above.
-
-## 7. Jobs and long-running work
-
-Rendering, proxy generation, and analysis are **jobs**, decoupled from command calls:
+Rendering is a job, decoupled from command calls:
 
 ```
-render_submit {sequence, range, preset|explicit, output, strict_loudness?} → {job_id}
+render_submit {sequence, range, preset, output} → {job_id}
 render_status {job_id} → {state: queued|running|done|failed|cancelled,
-                          progress: {frames_done, frames_total, current_time},
-                          report: {…} | null, error? }
+                          progress: {frames_done, frames_total},
+                          report: {…} | null, error?}
 ```
 
-- Progress is pushed over JSON-RPC notifications (`job.progress`) for WebSocket clients; MCP clients poll.
-- Jobs survive client disconnect; they are owned by the daemon, not the connection.
-- Cancellation is cooperative and immediate (segment workers check a shared flag per frame).
-- Job results include the `export_report.json` content inline — the verification artifact ([04 §7](04-media-pipeline.md)).
+Jobs survive client disconnect because they belong to the process, not the connection. Cancellation is
+cooperative and checked per frame. Results include `export_report.json` inline so the agent can verify
+rather than trust.
 
-## 8. Security model
+## 8. Trust and safety (v1)
 
 | Concern | Control |
 |---|---|
-| File access | `--root` allow-list; paths canonicalized and checked pre-syscall; symlink escapes rejected |
-| Capabilities | scopes at session open: `project:read/write`, `media:import`, `render:submit`, `plugin:load`, `fs:root=…` |
-| Untrusted media | decoders sandboxed in subprocess with rlimits, no network, no writes ([04 §1](04-media-pipeline.md)) |
-| Untrusted effects | WASM sandbox with explicit buffer access, no syscalls ([09](09-plugin-system.md)) |
-| Token handling | 256-bit random, stored hashed, 24 h default expiry, per-session revocation |
-| Audit | every applied batch logged with session, command, diff hash, timestamp; `history.audit` queryable |
-| Resource abuse | per-session limits: max batch size, max render minutes/day, max concurrent jobs (configurable) |
-| Prompt-injection blast radius | an agent's session can only do what its capabilities allow; render output paths constrained to a job output root |
+| File access | `--root` media allow-list and `--output-root` for renders; canonicalized paths; symlink escapes rejected before syscalls |
+| Untrusted media | decode panics caught per clip; no shell interpolation of paths (`Command` args only) |
+| Resource abuse | per-session caps: batch size, concurrent jobs, total render minutes (configurable) |
+| Audit | every applied batch logged with timestamp, command types, and diff hash; queryable via `history.list` |
+| Destructive writes | `project.save` writes atomically; an optional `--snapshot-before-save` keeps the previous container |
 
-The threat model is explicit: adversarial agents and adversarial media are both assumed. The design answer
-is capability-scoped commands + sandboxed decoders + a journal that can reconstruct exactly what happened.
+No authentication, capability tokens, or multi-tenant isolation: the process runs as the user, locally.
+Remote transports and tokens are added with the remote topology, and the threat model grows with them.
 
-## 9. Worked example: agent produces a 45-second cut
+## 9. Future topologies
+
+When a live-attach or remote mode is added (v1.1+), the protocol does not change; only transport and
+authorization change:
+
+1. Local named pipe to a running GUI: a per-user socket path in a discovery file.
+2. Remote WebSocket: TLS required for non-loopback binds; a scoped capability token per session.
+3. Multi-session daemon: sessions become addressable and isolated.
+
+The design deliberately keeps these additive. Nothing in the command semantics depends on how the client
+connected.
+
+## 10. Worked example: agent produces a 45-second cut
 
 ```
 1  project_create {name:"Launch Teaser", res:[1920,1080], timebase:"30000/1001"}
-2  media_import {files:["a_roll.mov","b_roll.mov","music.flac","logo.png"]}
-   → [{asset:"as_a", duration:"00:03:12:00", streams:[…]}, …]
-3  media_probe {asset:"as_b"} → key scenes / duration / fps
-4  inspect_frame {asset:"as_b", at:"00:00:41:02"} → image  (agent looks at the footage)
+2  media_import {files:["a_roll.mov","b_roll.mov","music.flac"]}
+   → [{asset:"as_a", duration:"00:03:12:00"}, {asset:"as_b", …}, {asset:"as_m", …}]
+3  project_describe → assets, durations, fps, issues
+4  inspect_frame {asset:"as_b", at:"00:00:41:02"} → image  (the agent looks at the footage)
 5  edit_apply {base_revision:0, commands:[
      {op:"track.add", kind:"video", name:"A-Roll"},
      {op:"track.add", kind:"video", name:"B-Roll"},
@@ -213,36 +213,24 @@ is capability-scoped commands + sandboxed decoders + a journal that can reconstr
         start:T(0), source_in:T(12.5), duration:T(18)},
      {op:"timeline.add_clip", track:"tr_V2", asset:"as_b",
         start:T(18), source_in:T(41), duration:T(6)},
-     {op:"timeline.add_clip", track:"tr_A1", asset:"as_music",
+     {op:"timeline.add_clip", track:"tr_A1", asset:"as_m",
         start:T(0), duration:T(45), audio:{gain_db:-9, fade_out:T(2)}},
    ]}
 6  timeline_add_transition {a:"cl_1", b:"cl_2", kind:"cross_dissolve", duration:T(0.5)}
 7  effect_add {clip:"cl_1", effect:"core.color.correct"}
    effect_set_params {clip:"cl_1", effect:"fx_1", params:{exposure:0.2, contrast:1.08}}
 8  inspect_frame {clip:"cl_1", at_local:T(3)} → image   (verify the grade)
-9  subtitle_from_transcript {track:"tr_S1", transcript:"…"}   # if captions requested
-10 render_submit {preset:"web_1080p", output:"launch_teaser.mp4", strict_loudness:true}
-11 render_status → progress … done; report: {loudness:-14.2 LUFS, frames:1350, …}
-12 edit_validate + project_describe → confirm final state; project_save
+9  render_submit {preset:"web_1080p", output:"launch_teaser.mp4"}
+10 render_status → done; report {frames:1350, encoder:"nvenc", …}
+11 project_describe → confirm final state; project_save
 ```
 
-Every step is typed, inspectable, and reversible. Step 8 is the crucial one: the agent checks its work
-visually instead of assuming success — the same loop a human editor runs.
+Every step is typed, inspectable, and reversible. Step 8 is the essential loop: the agent verifies visually
+instead of assuming success.
 
-## 10. What we deliberately do not expose
+## 11. Versioning
 
-- **Raw decoder/encoder settings.** Presets are semantic (`fast`, `quality`, `master`); encoder strings are
-  an implementation detail and change per platform.
-- **Direct file writes inside the project container.** Saves go through the document, so the journal and
-  checksums stay coherent.
-- **Arbitrary plugin loading by default.** Agents may use installed effects; loading new native code is a
-  human-gated capability.
-- **Screen automation or UI scripting.** Not supported, by policy — the command API is the interface.
-
-## 11. Versioning and compatibility
-
-- Protocol `1.0` is frozen at P3; additive changes bump the minor. Unknown fields are ignored by both
-  sides; unknown *commands* return `unsupported_op` with the protocol version in the error.
-- Tool schemas are generated; a schema diff is a breaking change and requires a deprecation cycle of one
-  minor release with `deprecated` notes in the tool description.
-- The text timeline format has an explicit version line; the parser accepts `v1` forever.
+- Protocol `1.0` freezes at Phase F. Additive changes bump the minor; unknown fields are ignored; unknown
+  methods return `unsupported_method` with the protocol version.
+- Tool schemas are generated; a schema diff is a breaking change requiring a one-release deprecation note.
+- The text timeline format carries an explicit version line (`v1`) and remains backward-compatible.

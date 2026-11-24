@@ -1,37 +1,34 @@
-# ADR-0006 — Embedded core + optional daemon, one protocol
+# ADR-0006 — Embedded core + headless CLI, one protocol
 
-**Status:** Accepted · 2026-11-24
+**Status:** Accepted, revised 2026-11-24 after architecture review.
 
 ## Context
 
-A desktop editor wants the engine in-process for latency and simplicity. Agents want a headless, scriptable
-service. A human editing in the GUI may want an agent to assist in the *same live session*. Supporting each
-with a different code path guarantees divergence.
+The desktop app wants the engine in-process for latency and simplicity. Agents want a headless, scriptable
+surface. Supporting both with different code paths guarantees divergence. The original proposal also
+included a live-attach daemon and multiple transports for v1.
 
 ## Decision
 
-Build the engine as a **library**. The desktop app embeds it; a separate `arcline serve` binary embeds the
-same library. Both speak the **same JSON-RPC protocol**; the desktop app exposes a local control endpoint
-(named pipe / unix socket) so agents can attach to a live session. The MCP server is a facade over the
-protocol, not a separate implementation.
+Build the engine as a library. `arc-app` embeds it (`arcline`); `arc-cli` embeds the same library for
+headless rendering and the MCP server (`arcline-cli`). Both speak the **same JSON-RPC protocol**. In v1 the
+transport is **stdio only**; there is no daemon and no live GUI attach.
 
 ## Consequences
 
-- One behavioral definition of "edit"; tests run against the protocol, so GUI and agent paths are covered by
-  the same conformance suite.
-- A live GUI session becomes agent-automatable without screen scraping — the central product promise.
-- Cost: the protocol must be complete enough for the GUI, which means avoiding tempting shortcuts where the
-  UI calls internal APIs directly. This is enforced by lint/architecture rules (UI crate cannot depend on
-  engine internals beyond session handles).
-- In-process GUI calls still take the in-memory transport path; the overhead is a serialization-free direct
-  dispatch when both ends are in the same process (the wire format stays the same, the transport is a
-  function call).
-- The daemon gains job persistence, multi-session handling, and capability enforcement that the embedded
-  mode inherits from the same code.
+- One behavioral definition of "edit"; the GUI and agent paths share the command engine and the offscreen
+  renderer, so preview and export cannot diverge.
+- Agents work on project files in a dedicated process — a clean trust boundary for a local tool.
+- The protocol must be complete enough for the CLI; the GUI is not exempt from it. This is enforced by the
+  crate rule that only `arc-app`/`arc-cli` construct sessions.
+- Deferred but additive: named-pipe transport, live GUI attach, remote WebSocket, capability tokens,
+  multi-session daemon. None changes command semantics ([06 §9](../06-agent-interface.md)).
+- A GUI-only direct call path is avoided; the cost (serialization on in-process boundaries) is negligible
+  at command granularity.
 
 ## Alternatives considered
 
-- **Always out-of-process core**: cleanest isolation and simplest license boundary, but adds IPC latency to
-  every UI interaction (hover, drag) and complicates the renderer's access to UI-owned GPU surfaces.
-- **Library only, no daemon**: fails the headless/agent requirement.
-- **Separate server implementation sharing the model crate**: two protocol implementations drift; rejected.
+- **Always out-of-process core**: clean isolation, but adds IPC to every UI interaction and complicates
+  GPU-surface sharing.
+- **Live-attach daemon in v1**: an IPC surface and trust model with no demonstrated user; deferred.
+- **Separate server implementation**: two protocol implementations drift; rejected.

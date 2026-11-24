@@ -1,294 +1,247 @@
 # 01 — System Architecture
 
-This document is the spine of the proposal. Everything else elaborates one of its sections.
+This document is the spine of the proposal. It describes a system sized for one developer with AI
+assistance: six crates, two deployment shapes, and no machinery that does not serve a v1 user.
 
 ## 1. Design principles
 
-1. **One core, many clients.** The editor engine is a library (`arcline-core` facade over typed crates).
-   The GUI, the CLI, the daemon, and the MCP server are all clients of the same command protocol.
-2. **Commands are the only way to change state.** No component mutates the project directly. A GUI drag
-   is a `MoveClip { .. }` command; an agent call is the same command. This single rule buys undo, audit,
-   crash recovery, dry-run, and collaboration.
+1. **One core, two clients.** The engine is a library. The GUI (`arc-app`) and the headless tool
+   (`arc-cli`) are its only clients, and both drive it through the same command model.
+2. **Commands are the only way to change state.** No component mutates the project directly. A GUI drag is
+   a `MoveClip` command; an agent call is the same command. This buys undo, audit, crash recovery, and
+   dry-run from one mechanism.
 3. **Immutable snapshots, single writer.** The document is published as an immutable `Arc<Project>`.
-   Readers (renderer, UI, agents) never lock. A dedicated engine thread is the only writer.
-4. **Determinism is a product feature.** Given (project, commands, renderer version) the output is
-   characterized and reproducible; the contract and its exact bounds are in [03 §8](03-render-engine.md).
-5. **Native, no web runtime.** No Chromium, no WebView, no JS engine in the process. UI is drawn by our
-   own retained widget layer onto `wgpu`.
-6. **Failure isolation by construction.** Media decoding runs in a separate process from the UI from day
-   one. A malformed file crashes the decoder, not the session.
-7. **Performance is budgeted, not hoped for.** Every subsystem has numbers with CI gates ([08](08-performance-reliability.md)).
+   Readers never lock. One engine thread writes.
+4. **Reproducible on the machine that made it.** Same project + commands + renderer version ⇒ same output
+   on the same hardware. Cross-device bit-exactness is not promised ([03 §9](03-render-engine.md)).
+5. **Native, no web runtime.** `wgpu` for rendering, `egui` for the shell. No Chromium, no WebView, no JS.
+6. **Simplicity before robustness theater.** In-process decode, single-process export, one fallback quality
+   level. Process isolation and parallel export are documented upgrade paths, not v1 work.
+7. **Budgets, not vibes.** Every subsystem has numbers with CI gates ([08](08-performance-reliability.md)).
+8. **Windows first.** Windows is the primary target through v1.0; macOS follows; Linux is post-1.0
+   ([ADR-0011](adr/0011-windows-first.md)).
 
 ## 2. Platform matrix
 
-| Concern | Windows | macOS | Linux |
+| Concern | Windows (v1.0) | macOS (follow-up) | Linux (post-1.0) |
 |---|---|---|---|
-| Graphics API | D3D12 (Vulkan fallback) | Metal | Vulkan 1.2 (software fallback: lavapipe) |
+| Graphics API | D3D12 (Vulkan fallback) | Metal | Vulkan |
 | GPU abstraction | `wgpu` | `wgpu` | `wgpu` |
-| Hardware decode | D3D11VA / D3D12VA via FFmpeg hwaccel | VideoToolbox | VAAPI / NVDEC |
+| Hardware decode | D3D11VA/D3D12VA via FFmpeg | VideoToolbox | VAAPI/NVDEC |
 | Hardware encode | NVENC / QSV / AMF | VideoToolbox | NVENC / VAAPI |
-| Audio device | WASAPI (shared + exclusive) | CoreAudio | PipeWire → ALSA |
-| Windowing | `winit` | `winit` | `winit` (Wayland + X11) |
-| File watching | `ReadDirectoryChangesW` | FSEvents | inotify |
-| Crash reporting | minidump | minidump | minidump + coredump |
-| Primary channel | MSIX + portable zip | DMG, notarized, universal (arm64+x86_64) | Flatpak, AppImage, tarball |
+| Audio device | WASAPI (shared) | CoreAudio | PipeWire/ALSA |
+| Windowing | `winit` (via `eframe`) | `winit` | `winit` |
+| Packaging | Portable zip + MSIX, signed | DMG, notarized, universal | Flatpak (community) |
 
-Minimum targets: Windows 10 21H2, macOS 13, Ubuntu 22.04. Apple silicon is first-class (universal binary),
-x86_64 macOS remains supported through the transition period.
+Minimums: Windows 10 21H2; macOS 13; Ubuntu 22.04 when Linux support starts. Code stays portable from day
+one, and CI compiles on all three OSes to prevent bit-rot, but only Windows is a shipping target in v1.
 
 ## 3. Deployment topologies
 
-The same engine binary supports three shapes:
+Two shapes, one engine:
 
 ```
- A. Embedded (desktop default)
- ┌──────────────────────────────┐
- │ arcline-app                  │
- │  ├── UI thread (winit+wgpu)  │
- │  ├── engine thread           │
- │  ├── render threads          │
- │  ├── audio thread            │
- │  └── decode subprocess pool  │
- └──────────────────────────────┘
+ A. Desktop (primary)
+ ┌──────────────────────────────────────┐
+ │ arcline  (arc-app)                   │
+ │  ├── UI thread: egui layout + paint  │
+ │  ├── engine thread (single writer)   │
+ │  ├── render thread (wgpu compositor) │
+ │  ├── decode threads (in-process)     │
+ │  └── audio thread (cpal callback)    │
+ └──────────────────────────────────────┘
 
- B. Daemon (agents, automation)
- ┌──────────────┐   JSON-RPC over    ┌─────────────────────────────┐
- │ agent / MCP  │◄── stdio / WS / ──►│ arcline serve --root ~/media │
- │ client       │    named pipe      │  sessions, jobs, watch      │
- └──────────────┘                    └─────────────────────────────┘
-
- C. Desktop + local control (human editing, agent assisting)
- ┌────────────────┐  named pipe   ┌──────────────────────────────┐
- │ arcline-app    │◄─────────────►│ listens on a per-user socket │
- │ (live session) │  JSON-RPC     │ bound to session capabilities│
- └────────────────┘               └──────────────────────────────┘
+ B. Headless (agents, batch)
+ ┌──────────────┐   JSON-RPC / MCP    ┌──────────────────────────────┐
+ │ agent / MCP  │◄── stdio (NDJSON) ─►│ arcline-cli mcp --project …  │
+ │ host         │                     │  session, commands, render   │
+ └──────────────┘                     └──────────────────────────────┘
 ```
 
-Topology C is why the protocol must exist even though the GUI is in-process: it is the only supported way
-for an agent to act on a session a human currently has open. No screen scraping, ever.
+Topology B is how agents work in v1: a process that opens a project file, applies commands, and renders.
+Attaching an agent to a *live GUI session* (a control socket) is a v1.1+ feature; it is explicitly not in
+v1 ([06 §2](06-agent-interface.md)). This removes an entire IPC surface and trust model from the first
+release while keeping the protocol that will make it possible later.
 
-The **decode subprocess** deserves emphasis. `arc-media` runs demuxing/decoding in a child process
-(`arcline-decode`) speaking a small binary pipe protocol (shared-memory frame buffers + control messages).
-Process-per-source-group, restarted on crash, capped by a memory budget. This isolates FFmpeg (a large C
-codebase that has historically had memory-safety incidents) and guarantees the editor survives a hostile
-file. Cost: one extra copy on the GPU upload path, mitigated by shared memory (`CreateFileMapping` /
-`shm_open` / `mmap`). See [04 §3](04-media-pipeline.md).
+**No decode subprocess in v1.** FFmpeg runs in-process behind a `Decoder` trait, with panics caught at the
+call boundary and autosave limiting blast radius. The trait shape permits moving decode into a worker
+process later without changing callers. This is the largest deliberate robustness trade in v1, and it is
+recorded in [ADR-0003](adr/0003-ffmpeg-for-media-io.md).
 
-## 4. Crate graph and layering
+## 4. Crate graph
+
+Six crates, with enforced dependency rules (checked in CI from `cargo metadata`):
 
 ```
-                     ┌─────────────┐   ┌─────────────┐   ┌─────────────┐
-   clients           │  arc-app    │   │  arc-cli    │   │ arc-server  │
-                     └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
-                            │                 │                 │
-                     ┌──────┴─────────────────┴─────────────────┴──────┐
-   interface layer   │       arc-protocol  (rpc types, capabilities)   │
-                     └──────┬─────────────────┬─────────────────┬──────┘
-                            │                 │                 │
-                     ┌──────┴──────┐   ┌──────┴──────┐   ┌──────┴──────┐
-   engine layer      │  arc-ui     │   │ arc-render  │   │arc-plugin-  │
-                     │  (widgets)  │   │ arc-audio   │   │   host      │
-                     └──────┬──────┘   └──────┬──────┘   └──────┬──────┘
-                            │                 │                 │
-                     ┌──────┴─────────────────┴─────────────────┴──────┐
-   core layer        │   arc-command → arc-model → arc-time           │
-                     │   arc-media, arc-cache, arc-encode, arc-text,  │
-                     │   arc-effects                                  │
-                     └───────────────────────┬───────────────────────┘
-                                             │
-                     ┌───────────────────────┴───────────────────────┐
-   platform layer    │  arc-platform (winit/wgpu/audio/fs/hwaccel shims) │
-                     └───────────────────────────────────────────────┘
+              ┌───────────┐        ┌───────────┐
+   clients    │  arc-app  │        │  arc-cli  │
+              │  (egui)   │        │ (headless)│
+              └─────┬─────┘        └─────┬─────┘
+                    │                    │
+        ┌───────────┼────────┬───────────┼─────────┐
+        ▼           ▼        ▼           ▼         ▼
+   ┌─────────┐ ┌─────────┐ ┌────────┐ ┌────────┐ ┌─────────┐
+   │arc-render│ │arc-audio│ │arc-media│ │arc-cli │ │arc-core │
+   │ (wgpu)  │ │ (cpal)  │ │(FFmpeg) │ │ uses   │ │(no GPU, │
+   └────┬────┘ └────┬────┘ └───┬────┘ │ all    │ │ no FFmpeg)│
+        └───────────┴───────────┴──────┴────────┴─► arc-core │
+   └─────────────────────────────────────────────────────────┘
 ```
 
-Dependency rules, enforced by a CI check on `cargo metadata` (no exceptions, no "just this once"):
+| Crate | Owns | May depend on | Must not depend on |
+|---|---|---|---|
+| `arc-core` | time, model, commands, validation, undo/journal, project file, schema migrations | std, serde, `im` | GPU, FFmpeg, UI, audio devices |
+| `arc-media` | probe, decode, encode, mux, proxy/thumbnail/waveform jobs | core, FFmpeg | render, UI |
+| `arc-render` | `wgpu` device, compositor, effects, text, frame cache | core, `wgpu` | FFmpeg, UI |
+| `arc-audio` | device output, mixer, offline render | core, `cpal` | render, UI |
+| `arc-app` | `egui` shell, timeline canvas, viewer, app binary | all of the above | — |
+| `arc-cli` | headless render, JSON-RPC/MCP server, utilities | core, media, render, audio | `egui` |
 
-- `arc-time` depends on nothing internal.
-- `arc-model` may depend only on `arc-time`.
-- `arc-command` may depend on `arc-model`, `arc-time`. It must **not** depend on render, audio, media, or
-  UI. Commands are pure data + pure validation.
-- `arc-render`, `arc-audio`, `arc-media`, `arc-encode`, `arc-text`, `arc-effects` depend on model/time,
-  never on each other (effects depend on render's shader ABI only).
-- `arc-ui` never calls decoders or encoders directly; it talks to `arc-render`/`arc-audio` handles.
-- Only `arc-app`, `arc-cli`, `arc-server` may construct a "session" (the thing that owns threads).
+Why this shape:
 
-Rationale: this graph makes the core testable headlessly (no GPU required for model/command tests) and
-makes the agent server provably free of UI entanglement.
+- `arc-core` has **no GPU and no FFmpeg**, so the document model and command semantics are testable
+  headlessly with `cargo test`.
+- Effect manifests live in `arc-render`, next to the shaders, and are consumed by the UI and MCP alike.
+- `arc-cli` renders offscreen with the same `arc-render` code the GUI uses, so export and preview cannot
+  diverge.
+- Six crates is the smallest split that preserves these properties. Fewer boundaries mean less Cargo
+  plumbing and fewer cross-file contexts for AI-assisted edits.
+
+Dependency rule enforcement: a CI script parses `cargo metadata` and fails on forbidden edges. Module-level
+boundaries inside `arc-core` (e.g. `model` vs `command`) carry the discipline that separate crates used to.
 
 ## 5. Runtime: threads and ownership
 
 ```
- ┌──────────────────────────── UI THREAD ─────────────────────────────┐
- │ winit event loop · input dispatch · widget layout · submit to GPU  │
- │ owns: UiState, WidgetTree, RenderTarget. Never blocks > 2 ms.      │
- └───┬───────────────────────────────────────────────────────────┬────┘
-     │ Command batch (mpsc, non-blocking)                        │ Frame request
-     ▼                                                           ▼
- ┌────────────── ENGINE THREAD ──────────────┐      ┌──────── RENDER THREAD ────────┐
- │ single writer · validate · apply · publish│      │ builds render graph per frame │
- │ Arc<Project> via arc-swap · journal · undo│─────►│ GPU submit · present · cache  │
- └───┬───────────────────────────▲───────────┘      └───────────────┬───────────────┘
-     │ commands                  │ snapshots                        │ frame requests
-     ▼                           │                                  ▼
- ┌──────────── SESSION/AGENT ────┴───────┐          ┌──────── RENDER WORKERS (N) ───┐
- │ JSON-RPC dispatch, MCP adapter,       │          │ offscreen render, effect pre- │
- │ auth, rate limits, job queue          │          │ pass, thumbnail generation    │
- └───────────────────────────────────────┘          └───────────────────────────────┘
+ ┌──────────────────── UI THREAD (eframe/egui) ────────────────────┐
+ │ event loop · egui layout · paint · timeline canvas · presenter   │
+ │ never blocks > 4 ms; missing data renders as stale, never stall  │
+ └───────┬───────────────────────────────────────────────┬─────────┘
+         │ command batch (mpsc)                          │ frame request
+         ▼                                               ▼
+ ┌──────────── ENGINE THREAD ────────────┐     ┌──────── RENDER THREAD ─────────┐
+ │ single writer · validate · apply ·    │     │ direct compositor · GPU submit │
+ │ publish Arc<Project> · journal        │────►│ frame cache · readback/export  │
+ └───────────────┬───────────────────────┘     └───────────────┬────────────────┘
+                 │ snapshots                                   │ frame upload
+                 ▼                                             ▼
+ ┌─────────── SESSION (arc-cli) ─────────┐        ┌──── DECODE THREADS ─────────┐
+ │ JSON-RPC dispatch · MCP tools · jobs  │        │ per-clip decoders · seek ·  │
+ └───────────────────────────────────────┘        │ YUV → GPU upload            │
+                                                  └─────────────────────────────┘
 
- ┌──────────── AUDIO THREAD (real-time, no alloc, no lock) ───────────┐
- │ pull model: ring buffer ← offline mixed blocks from audio workers  │
- └────────────────────────────────────────────────────────────────────┘
-
- ┌──────────── TOKIO RUNTIME (I/O) ───────────────────────────────────┐
- │ file watching, proxying, encoder subprocesses, network transports  │
- └────────────────────────────────────────────────────────────────────┘
+ ┌──────── AUDIO THREAD (cpal callback, no alloc, no locks) ────────┐
+ │ ring buffer ← mixed blocks from audio worker · device clock      │
+ └──────────────────────────────────────────────────────────────────┘
 ```
 
-Rules that are architectural, not stylistic:
+Rules:
 
-- **The audio thread allocates nothing and takes no locks.** It reads from a lock-free SPSC ring
-  pre-filled by a mixing worker. Any violation fails a debug assertion in CI's soak test.
-- **The engine thread never blocks on I/O.** Persistence is a command journal appended by a writer task;
-  the engine hands off bytes and moves on.
-- **The UI thread never waits on decode.** Missing frames resolve to the nearest cached frame plus a
-  "stale" indicator; never a stall.
-- **Snapshots are cheap.** `Project` uses persistent data structures (`im::Vector`, `im::HashMap`) so a
-  1,000-clip edit produces an O(log n) new root, not a full copy. Measured target: ≤ 200 µs per applied
-  command batch at 1,000 clips ([08 §2](08-performance-reliability.md)).
+- The **engine thread** owns the document and never blocks on I/O. Persistence is an append-only journal
+  written by a background task.
+- The **UI thread** never waits on decode. A missing frame shows the nearest cached frame with a stale
+  indicator.
+- The **audio callback** allocates nothing and takes no locks; it drains a pre-filled SPSC ring.
+- The **render thread** uses the same `wgpu::Device`/`Queue` created by `egui-wgpu`; `wgpu` queues are
+  thread-safe, and the viewer presents the resulting texture through `egui_wgpu` user textures.
+- Snapshots are cheap: `Project` uses persistent collections (`im::Vector`, `im::HashMap`), so a 1,000-clip
+  edit produces an O(log n) new root. Target ≤ 200 µs per applied batch.
+
+No async runtime is used in v1. Threads and channels cover the workload; `tokio` is added only if a real
+network requirement appears.
 
 ## 6. The protocol
 
-One protocol everywhere. JSON-RPC 2.0 over newline-delimited framing, with three transports:
+JSON-RPC 2.0, newline-delimited, over **stdio** in v1. Named pipes and WebSocket are later transports, not
+new implementations.
 
-| Transport | Use | Notes |
-|---|---|---|
-| stdio | `arcline mcp` spawned by an agent host | Simplest; no ports, no firewall |
-| named pipe (Win) / unix socket (mac/Linux) | GUI ⇄ local agents | Per-user ACL; path in a discovery file |
-| WebSocket (localhost by default) | Debugging, remote LAN use, browser-based control surfaces | Off unless `--listen` given; TLS required for non-loopback |
+### 6.1 Methods
 
-### 6.1 Envelope
-
-```jsonc
-// request
-{
-  "jsonrpc": "2.0",
-  "id": "7f3a",
-  "method": "project.apply",
-  "params": {
-    "session": "s_01J8…",
-    "base_revision": 412,
-    "dry_run": false,
-    "idempotency_key": "agent-a-step-0042",
-    "commands": [
-      { "op": "timeline.trim_clip", "clip": "cl_01J8…", "edge": "out",
-        "to": { "num": 185, "den": 30 } }
-    ]
-  }
-}
-// response
-{
-  "jsonrpc": "2.0",
-  "id": "7f3a",
-  "result": {
-    "revision": 413,
-    "applied": 1,
-    "resulting": [{ "op": "timeline.trim_clip", "clip": "cl_01J8…", "duration": "6.00s" }],
-    "warnings": []
-  }
-}
+```
+project.open      {path, create?}        → session, schema, renderer, revision, project summary
+project.describe  {session, exact?}      → compact summary (tracks, clips, issues)
+project.apply     {session, base_revision, commands[], dry_run?, idempotency_key?}
+                  → {revision, applied, resulting[], warnings[]}
+project.save      {session}              → {path}
+job.submit        {session, kind: "render", spec} → {job_id}
+job.status        {job_id}               → {state, progress, report?, error?}
+job.cancel        {job_id}
+history.undo/redo {session}              → {revision}
 ```
 
 ### 6.2 Semantics
 
-- **Revisions.** Every committed command batch increments `revision` by exactly one. Clients send
-  `base_revision`; mismatch → error `409 stale_revision` with the current revision and a structured diff
-  of what changed. This gives agents optimistic concurrency without locks.
-- **Batching is atomic.** A batch either fully applies or applies nothing. Validation runs on the whole
-  batch against a simulated snapshot before the first mutation.
-- **Idempotency.** A repeated `idempotency_key` within a session returns the original result. Agents that
-  retry after a timeout do not double-apply.
-- **Dry run.** `dry_run: true` validates and returns the diff without committing — how agents "look before
-  they leap."
-- **Typed errors.** `{code, kind, message, path?, hint?, details?}` where `kind` is a stable machine string
-  (`unknown_clip`, `overlap`, `unsupported_codec`, `capability_denied`, …). Agents branch on `kind`, not on
-  prose.
-- **Protocol version** is in the handshake (`session.open` → `{protocol: "1.0", schema: 7, renderer: "…"}`)
-  and every message is forward-compatible by ignoring unknown fields.
+- **Revisions.** Every committed batch increments `revision` by one. A stale `base_revision` fails with
+  `409 stale_revision` and the current revision. Optimistic concurrency, no locks.
+- **Batches are atomic.** The whole batch is validated against a simulated snapshot before the first
+  mutation; it applies fully or not at all.
+- **Idempotency.** A repeated key returns the original result; retries after timeouts are safe.
+- **Dry run.** Validation plus a structured diff, no commit.
+- **Typed errors.** `{code, kind, message, path?, details?}` with stable `kind` strings
+  (`unknown_clip`, `overlap`, `unsupported_codec`, `path_denied`, …).
+- **Versioning.** Handshake reports `{protocol: "1.0", schema: 7, renderer: "…"}`; unknown fields are
+  ignored; unknown methods return `unsupported_method`.
 
-### 6.3 Capabilities
+### 6.3 Trust model (v1)
 
-A session is opened with a capability token granting a set of scopes:
-
-```
-project:read  project:write  media:import  render:submit  plugin:load  fs:root=/home/x/media
-```
-
-The daemon takes `--root` allow-lists; any path outside them is rejected before syscalls. `plugin:load` is
-denied by default for agent-opened sessions. Tokens are random 256-bit values, stored hashed, and expire
-(default 24 h). Full model in [06 §8](06-agent-interface.md).
+Local, single-user, no authentication: the process runs with the user's privileges. `arcline-cli` takes
+`--root` (media allow-list) and `--output-root` (render destinations) and rejects paths outside them before
+any syscall. Capability tokens, remote access, and multi-tenant isolation are deliberately deferred; see
+[06 §8](06-agent-interface.md).
 
 ## 7. Data flow: one edit, end to end
 
-A drag of a clip in the GUI:
+GUI drag of a clip:
 
 ```
-1. UI thread      pointer drag ends → builds MoveClip{clip, to_track, to_start}
-2. UI thread      sends CommandBatch{base_revision, cmds} to engine thread (non-blocking)
-3. Engine thread  validate on simulated snapshot:
-                    - destination track type matches clip kind
-                    - no overlap after resolved ripple/snap policy
-                    - time values are exact rationals on frame boundaries
-4. Engine thread  apply → new immutable Project root (structural sharing)
-                  append to journal (durable, fsync policy §08)
-                  bump revision → publish snapshot via arc-swap
-5. Render thread  sees new snapshot; invalidates cache keys for affected time range
-6. UI thread      receives ApplyResult; refreshes the clip's visual state
-                  (UI had already moved the ghost during the drag — no round-trip latency)
-7. Autosave task  enqueues periodic snapshot write
+1. UI thread      pointer drag ends → MoveClip{clip, to_track, to_start}
+2. UI thread      sends CommandBatch{base_revision, cmds} to the engine (non-blocking)
+3. Engine thread  validates on a simulated snapshot:
+                    track kind matches, no overlap after the explicit ripple policy,
+                    times are exact rationals on frame boundaries
+4. Engine thread  applies → new immutable snapshot (structural sharing)
+                  appends to the journal, bumps revision, publishes via arc-swap
+5. Render thread  sees the new snapshot; invalidates cache keys for the affected range
+6. UI thread      receives ApplyResult; the optimistic ghost is reconciled
+7. Autosave task  enqueues a periodic snapshot write
 ```
 
-The UI mutates its own *ghost* state optimistically during interaction; the authoritative state always
-arrives from the engine. If validation fails, the UI animates the clip back and shows the typed error. The
-same flow, minus step 6's ghost, is what an agent experiences.
+The UI moves a **ghost** optimistically during drag; authoritative state always comes from the engine. If
+validation fails, the ghost animates back and the typed error is shown. An agent experiences the same flow
+without the ghost.
 
 ## 8. Startup and project open
 
-Startup budget: **cold start to usable window ≤ 1.5 s**, open a 1,000-clip project ≤ 2 s.
+Budget: cold start to usable window ≤ 2 s; open a 1,000-clip project ≤ 2 s.
 
 ```
-main → load user config → init logging/crash handler → create wgpu instance/adapter
-     → create window (shown with last layout skeleton immediately) → spawn engine
-     → restore workspace layout → if palette argument, open project:
-          read container manifest (JSON, ≤ 2 MB) → validate schema version
-          → migrate if older (offline, no UI block) → resolve asset refs (may be missing → offline refs)
-          → first snapshot published → renderer warm-up (compile shaders from cache)
+main → config → logging/crash handler → wgpu adapter (via egui-wgpu)
+     → window shown with last layout skeleton → spawn engine
+     → open project if given:
+          read manifest (JSON) → validate schema → migrate if older
+          → resolve asset refs (missing files become offline assets)
+          → publish first snapshot → shader cache warm-up
 ```
 
-Shader compilation is cached to disk keyed by `(driver id, pipeline hash)`; first run pays it, later runs
-do not. Project open never blocks on media probing: probe results are cached in the container and refreshed
-asynchronously.
+Project open never blocks on media probing: probe results are cached in the container and refreshed in the
+background. Shader pipelines are cached per driver to avoid first-frame hitches.
 
 ## 9. Error model
 
-Three layers, each with a different owner:
-
 | Layer | Example | Handling |
 |---|---|---|
-| **Domain error** (expected) | overlap, unknown clip, unsupported codec | Typed `CommandError`, surfaced to client, no log noise |
-| **Operational error** (unexpected but recoverable) | decoder died, GPU device lost, disk full | Recover: restart decoder / recreate device / pause and warn |
-| **Defect** (bug) | invariant violation, panic in engine | Catch at thread boundary, quarantine session state, offer journal recovery, emit minidump |
+| **Domain error** | overlap, unknown clip, unsupported codec | Typed `CommandError`, returned to the client, no log noise |
+| **Operational error** | decoder panic, GPU device lost, disk full | Caught and recovered: restart decoder, recreate device, pause and warn |
+| **Defect** | invariant violation | Engine thread catches panics per batch, marks the session degraded, keeps the last good snapshot exportable, writes a crash bundle |
 
-The engine thread catches panics via `catch_unwind` around each batch and, on catch, marks the session
-`degraded`: further commands rejected, project exportable from last good snapshot, crash bundle written.
-No panic may cross into the UI thread.
+No panic crosses into the UI thread. A decoder panic is converted into a `MediaError` for that clip; other
+clips continue to decode.
 
-## 10. Extension points (summary)
+## 10. Extension points
 
-| Point | Mechanism | Doc |
+| Point | Mechanism | Status |
 |---|---|---|
-| New effect | WGSL pass + JSON param schema, registered in a manifest | [03 §5](03-render-engine.md) |
-| Third-party effect (native) | OFX bridge (P5) | [09](09-plugin-system.md) |
-| Third-party effect (sandboxed) | WASM component with declared buffer access | [09](09-plugin-system.md) |
-| Automation | JSON-RPC / MCP tools | [06](06-agent-interface.md) |
-| Interchange | EDL, FCPXML, OTIO import/export | [04 §8](04-media-pipeline.md) |
-```
+| New built-in effect | WGSL pass + JSON manifest registered in `arc-render` | v1 |
+| Automation | JSON-RPC / MCP | v1 |
+| Third-party effect plugins | OFX / WASM | Post-1.0 ([09](09-effects-and-extensions.md)) |
+| Interchange | EDL/FCPXML/OTIO adapters | Post-1.0 |

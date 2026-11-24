@@ -11,9 +11,8 @@ an editor mean lost work, so the cost of a use-after-free is not a crash — it 
 
 ## Decision
 
-Use **Rust (2024 edition)** for every component we author: engine, renderer, audio, media abstraction,
-protocol, CLI, daemon, and UI. The only non-Rust code is third-party C (FFmpeg, OFX host shims) accessed
-through owned, narrow FFI layers.
+Use **Rust (2024 edition)** for every component we author: core, media, renderer, audio, app shell, and
+CLI. The only non-Rust code is third-party C (FFmpeg) accessed through an owned, narrow FFI layer.
 
 ## Consequences
 

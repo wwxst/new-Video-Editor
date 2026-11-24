@@ -1,38 +1,43 @@
-# ADR-0003 — FFmpeg for media I/O, out of process
+# ADR-0003 — FFmpeg for media I/O, in-process in v1
 
-**Status:** Accepted · 2026-11-24
+**Status:** Accepted, revised 2026-11-24 after architecture review.
 
 ## Context
 
-The product must ingest a very wide range of containers and codecs (camera, phone, screen recording,
-broadcast MXF, stills, image sequences) and must encode professional deliverables (ProRes, DNxHR, H.264/HEVC,
-AV1, PCM audio). Writing demuxers and codecs from scratch is a multi-year effort and a quality trap.
+The product must ingest a wide range of containers and codecs (camera, phone, screen recording, broadcast
+MXF, stills) and encode professional deliverables (ProRes, DNxHR, H.264/HEVC, AV1, PCM). Writing demuxers
+and codecs is a multi-year quality trap. The original proposal isolated FFmpeg in a dedicated subprocess
+with shared-memory frame transport — a robustness feature whose complexity is priced for a team.
 
 ## Decision
 
-Use **FFmpeg `libav*`** as the media I/O engine, behind an owned abstraction (`arc-media`), running inside a
-**dedicated decode subprocess** (`arcline-decode`), linked against an **LGPL-only build**. Encode uses the
-same libraries for muxing plus hardware encoders where available.
+Use **FFmpeg `libav*`** behind an owned `arc-media` abstraction, **in-process in v1**, with:
+
+- hardware decode/encode first, software fallback;
+- panic isolation at the `Decoder` call boundary (a decoder panic becomes a per-clip `MediaError`);
+- the `ffmpeg` CLI for batch jobs (proxies, thumbnails, waveform decode, unusual audio conversion);
+- an LGPL-only build, dynamically linked, with the compliance package.
+
+The `Decoder`/`Encoder` traits are shaped so decode can move to a worker process later without changing
+callers.
 
 ## Consequences
 
-- Broadest format support available; hardware acceleration for decode/encode on all three platforms.
-- Process isolation converts FFmpeg's security and stability risks into a recoverable failure mode: a
-  decoder crash degrades one clip, never the session ([04 §1](04-media-pipeline.md)).
-- IPC cost is real but bounded: frames move through shared memory, not the control pipe.
-- Legal obligations are real: LGPL dynamic linking, source/build-script publication, no GPL components, and
-  a separate patent posture for H.264/HEVC ([11 §2](11-risks-and-legal.md)). This is scheduled work, not a
-  footnote.
-- Version pinning is deliberate: we upgrade FFmpeg on a fixed cadence with a regression suite over the
-  fixture corpus, not continuously.
-- The abstraction lets us swap individual decoders (e.g., platform VideoToolbox directly for specific
-  codecs, or a future AV2 implementation) without touching callers.
+- Broad format support with no IPC plumbing in v1; the media path stays simple.
+- A hostile or broken file can crash the decoder. Mitigations: catch-unwind at the boundary, journal +
+  autosave limiting loss, fuzzed media in CI. The upgrade path to process isolation is documented and
+  additive.
+- Batch transcodes via the CLI remove a large amount of encoder-wiring code from `arc-media`.
+- Legal obligations remain: LGPL dynamic linking, published build scripts and source offer, no GPL
+  components, and a separate patent posture for H.264/HEVC ([11 §2](../11-risks-and-legal.md)).
+- Version pinning is deliberate; upgrades happen on a cadence against the fixture corpus.
 
 ## Alternatives considered
 
-- **GStreamer**: excellent for streaming pipelines, but its push/pipeline model fights frame-accurate
-  random access, and the dependency/plugin surface is large for a desktop app.
-- **Platform decoders only** (Media Foundation / AVFoundation / GStreamer-on-Linux): best platform
-  integration but three divergent format matrices and poor support for MXF/ProRes/DNxHR on Windows.
-- **Commercial SDKs** (MainConcept, NDI, etc.): licensing cost and vendor lock-in; not justified for v1.
-- **Custom demuxers**: rejected — decades of real-world edge cases live in FFmpeg's demuxers.
+- **Subprocess decode with shared-memory frames** (original decision): strongest isolation, but days of
+  IPC, a second binary, and a custom failure-recovery surface before any editing exists. Deferred, not
+  rejected.
+- **GStreamer**: pipeline model fights frame-accurate random access; large plugin surface.
+- **Platform decoders only** (Media Foundation/AVFoundation): three divergent format matrices; poor
+  MXF/ProRes coverage on Windows.
+- **Commercial SDKs**: cost and lock-in; not justified for v1.

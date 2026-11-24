@@ -1,169 +1,122 @@
 # 07 — UI Architecture
 
-The UI is a client of the engine, like an agent. It is a high-quality *view* over the document and a
-producer of commands. This keeps the editing surface honest: anything the GUI can do, the protocol can do.
+v2 decision: **`egui` for the application shell, custom `wgpu` canvases for the timeline and viewer.**
+The custom widget toolkit from v1 is removed ([ADR-0007](adr/0007-native-wgpu-ui.md)). The reason is
+schedule, not taste: a polished widget layer is months of work that produces no video-editing capability,
+and `egui` already provides docking, dialogs, tables, menus, text editing, and a `wgpu` integration.
 
-## 1. Stack decision
-
-**Own retained-mode widget layer on `wgpu`.** No Electron, no Qt, no WebView.
+## 1. Stack
 
 ```
-arc-ui
-├── layout      (taffy flexbox/grid)
-├── text        (cosmic-text shaping + glyph atlas management)
-├── paint       (wgpu renderer: quads, glyphs, rounded rects, shadows, clips)
-├── widgets     (buttons, sliders, trees, tabs, docks, popups, virtualized lists)
-├── input       (mouse, pen, keyboard, IME, shortcuts, drag-and-drop, accessibility bridge)
-└── style       (theme tokens, light/dark, density, motion)
+arc-app
+├── eframe (winit + wgpu backend)
+├── egui + egui_dock + egui_extras      # shell, panels, tables, dialogs
+├── custom timeline canvas              # egui::Painter first; dedicated pass if needed
+├── custom viewer                       # egui_wgpu user texture
+├── cosmic-text / glyphon               # canvas text, titles
+└── rfd                                 # native file dialogs
 ```
 
-Rationale:
+One `wgpu::Device`/`Queue` for everything:
 
-- A professional NLE's most important surfaces — timeline and preview — are custom GPU canvases anyway.
-  A framework buys you chrome, not the parts that matter.
-- One GPU context, one event loop, one allocator. No cross-runtime IPC for a hover state.
-- Full control of text rendering and timeline paint at 120 Hz; no DOM layout cost.
-- `accesskit` provides the OS accessibility tree, which is the piece people assume requires a platform
-  toolkit; it does not.
+- The viewer presents the compositor's output as an `egui_wgpu` user texture — zero interop copies.
+- The timeline paints in `egui` until profiling shows it is insufficient. Thousands of rectangles per frame
+  are well within `egui`'s capability on desktop; a dedicated render pass is a measured optimization, not a
+  starting point.
+- Text on canvas (titles, subtitles, clip labels) uses `glyphon` against the same device.
 
-**The cost is real:** widgets take 3–4 engineer-months to reach parity with a stock toolkit for a *basic*
-app, and years for an exhaustive one. Mitigation, in order:
-
-1. **Phase 0–1 prototype shell in `egui`** (dev-only, feature-flagged) to exercise the engine before the
-   widget layer exists. It is deleted at P2; nothing ships on it.
-2. **Fixed widget inventory** for v1 ([§3.2](#32-widget-inventory)) — we build exactly this list, not a
-   general-purpose GUI toolkit.
-3. **Buy the hard parts**: `taffy` (layout), `cosmic-text` (shaping), `accesskit`, `winit`.
-
-See ADR-0007 for the full alternative analysis (Qt, egui, Slint, iced, GPUI).
+**Accepted trade-offs:** `egui` does not look native, text input is less polished than Qt, and multi-window
+is limited. A theming layer (fonts, spacing, colors, icon set) narrows the gap for v1. The application shell
+is kept behind a thin boundary so a future toolkit swap remains possible, but no abstraction is built
+speculatively.
 
 ## 2. Application shell
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│ menubar / workspace tabs                    project · dirty · revision  │
+│ menubar · project name · dirty · revision · job progress                 │
 ├──────────────┬───────────────────────────────────────────┬───────────────┤
-│ Media bin    │                Viewer (preview)           │  Inspector    │
-│ (tree/list)  │   ┌───────────────────────────────┐       │  (params,     │
-│              │   │                               │       │   keyframes,  │
-│  assets      │   │         frame canvas          │       │   metadata)   │
-│  effects     │   │                               │       │               │
-│  transitions │   └───────────────────────────────┘       │  Audio mixer  │
-│              │   transport · scopes · quality badge     │  (tab)        │
+│ Media bin    │                Viewer                     │  Inspector    │
+│ (tree/list)  │   ┌───────────────────────────────┐       │  params,      │
+│              │   │        composited frame       │       │  keyframes,   │
+│  assets      │   └───────────────────────────────┘       │  metadata     │
+│  effects     │   transport · timecode · quality badge    │               │
 ├──────────────┴───────────────────────────────────────────┴───────────────┤
-│ Timeline: ruler · tracks · clips · playhead · markers · zoom              │
+│ Timeline: ruler · tracks · clips · playhead · markers · zoom             │
 ├──────────────────────────────────────────────────────────────────────────┤
-│ status bar: cache · fps · audio latency · job progress · errors          │
+│ status bar: cache · fps · audio latency · errors                         │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Docking**: a split tree of panels (our own `DockTree`, serializable to the workspace file). Panels can
-  float into OS windows (spawned as secondary `winit` windows sharing the adapter), tab together, and
-  collapse. Layouts are saved per workspace (`Edit`, `Color`, `Audio`, `Agent Ops`).
-- **Single-document window** in v1, with tabs reserved in the model (one `Session` per tab in P4+).
-- **Startup**: window with skeleton and last layout appears immediately; project loading fills panels
-  progressively ([01 §8](01-system-architecture.md)).
+- **Docking** via `egui_dock`: panels split, tab, and collapse; layouts are serializable to the workspace
+  file. One workspace in v1; presets (`Edit`, `Color`, `Agent Ops`) are saved layout snapshots.
+- **Single-document window.** Tabs are a post-1.0 feature.
+- **Startup:** window and skeleton appear immediately; project load fills panels progressively
+  ([01 §8](01-system-architecture.md)).
 
-## 3. Widgets
+## 3. Inspector
 
-### 3.1 Rendering model
+Generated from effect manifests ([02 §3.4](02-domain-model-and-project-format.md)): the manifest drives
+controls, ranges, units, and grouping. A new effect gets a working inspector the moment its manifest exists.
+Keyframe editing (add/remove/move, interpolation menu) is a shared component used by every animatable
+property. Because MCP and the inspector read the same manifest, tool schemas and UI controls cannot drift.
 
-Retained tree, immediate-mode *declaration*: widgets are rebuilt each frame from state via a declarative
-description, diffed against the previous tree, and only changed subtrees are updated. Painting is batched
-into a small number of draw calls (textured quads + SDF rounded rects + glyph atlas). Damage tracking
-ensures idle frames cost near zero (present-on-demand, no continuous 60 Hz redraw when nothing changed).
+Numeric fields accept expressions (`+2`, `1.5*2`, `-6dB`) evaluated by a tiny arithmetic parser — a
+professional-editor expectation and cheap to implement.
 
-Why not pure immediate mode: inspector trees with thousands of keyframes, virtualized lists, and
-accessibility all want identity. Why not full retained mutation: declarative rebuild eliminates the
-"widget drifted from state" bug class. The diff is the compromise professionals use (Figma/Flutter model).
+## 4. Timeline canvas
 
-### 3.2 Widget inventory (v1 — build exactly this)
+Custom-painted, virtualized:
 
-Buttons, toggles, segmented controls, sliders + numeric fields (with expression-ish input: `+2`,
-`1.5*2`, `-6dB`), color picker, dropdowns, combo boxes, tabs, collapsible sections, trees, tables,
-virtualized lists, tooltips, popovers, modals, context menus, toasts, file dialogs (native where available,
-`rfd`), progress bars, splitters, dock panels, scroll areas (wheel + trackpad + drag), text edit (single/multi
-line with IME + selection + undo), badges, icons (SVG → atlas, `resvg`).
-
-Explicitly *not* building: rich text documents, layout editors, charts (we draw our own timeline/scope
-canvases), web views.
-
-### 3.3 Inspector
-
-Auto-generated from effect manifests ([02 §3.4](02-domain-model-and-project-format.md)): the manifest drives
-the control set, ranges, units, and grouping. A new effect appears in the inspector with a working UI the
-moment its manifest exists — no per-effect hand-written panel. Keyframe editing (add/remove/move, curve
-selection, interpolation menu) is a shared component used by every parameter. This is also why MCP tools and
-UI stay in sync: one manifest, two renderers.
-
-## 4. Timeline renderer
-
-The timeline is a custom canvas, not a widget tree — thousands of clips must paint in one pass.
-
-- **Virtualization**: only the visible time range contributes draw data. Data is a set of instanced quads
-  (clip body, selected state, fades, effect badges) plus a glyph run list for labels.
-- **Level of detail**:
+- **Data**: per visible time range, instanced rectangles for clip bodies, selection, fades, effect badges,
+  plus glyph runs for labels. Only visible clips contribute draw work.
+- **LOD**:
   | Zoom | What is drawn |
   |---|---|
-  | > 40 px/s | full clip labels, thumbnails strip, waveform, per-effect badges, keyframe markers |
-  | 8–40 px/s | labels, waveform envelope, no thumbnails |
-  | < 8 px/s | solid blocks + transition glyphs only |
-- **Thumbnails**: filmstrip from the thumbnail cache (2 Hz), requested asynchronously, drawn as a texture
-  atlas per clip. Never blocks a frame; missing tiles draw as a flat color.
-- **Waveforms**: min/max pyramid from the peak cache, drawn as a triangle strip; LOD switches at zoom.
-- **Playhead and scroll**: playhead is the only per-frame-updating element during playback; scroll follows
-  playhead with a "soft" mode. Scrolling never re-lays-out clips — it changes the viewport transform.
-- **Hit testing**: spatial index per track (sorted clip array + binary search); drag/trim handles are 6 px
-  hit zones with pointer-type awareness (pen exactness, touch fat-fingers are out of scope).
-- **Interaction gestures**: move (with snapping to playhead/edges/markers, magnetic mode optional and
-  always expandable to explicit commands), trim in/out (with "ripple" modifier), slip/slide, split at
-  playhead, razor, selection box, range select, track mute/solo/lock toggles, drag-to-relink.
-- **Undo affinity**: a completed gesture is one command batch; an aborted gesture (Esc) is nothing.
+  | > 40 px/s | labels, thumbnail strip, waveform, effect badges |
+  | 8–40 px/s | labels, waveform envelope |
+  | < 8 px/s | solid blocks + transition glyphs |
+- **Thumbnails and waveforms** come from caches ([04 §6](04-media-pipeline.md)); missing tiles draw flat
+  and never block a frame.
+- **Hit testing**: per-track sorted clip array + binary search; trim handles are 6 px zones.
+- **Gestures**: move (snapping to playhead, edges, markers), trim in/out (ripple modifier), slip/slide,
+  split at playhead, razor, selection box, track mute/solo/lock, drag-to-relink. A completed gesture is one
+  command batch; Esc aborts with no command.
+- **Magnetic behavior is UI-side**: snapping and ripple presets expand into explicit commands before they
+  reach the engine, so the recorded edit is deterministic.
 
-Budget: 60 fps scroll/live-drag with 2,000 visible clip-seconds and 8 tracks; 8 ms CPU paint budget
+Budget: 60 fps scroll and drag with 8 tracks and 2,000 visible clip-seconds; 8 ms CPU paint
 ([08 §2](08-performance-reliability.md)).
 
 ## 5. Viewer
 
-- Presents the renderer's output texture; zoom (fit / 50% / 100%), pixel-accurate 1:1 mode, pan, safe-area
-  guides, alpha checkerboard.
-- Overlays: scopes (waveform, vectorscope, histogram — GPU-computed, drawn in a panel), quality-level badge
-  when the governor degrades, timecode bar, A/B compare with a wipe against a reference frame.
-- Click-to-inspect: clicking exports a frame grab at full resolution to the media bin (useful for agents
-  too — same command).
+- Presents the compositor texture; zoom (fit / 50% / 100%), 1:1 pixel mode, pan, safe-area guides.
+- Overlays: timecode bar, quality badge when the governor degrades, optional histogram/waveform scope.
+- Click-to-export-frame: a full-resolution grab lands in the media bin (the same command agents use).
 
-## 6. Input, shortcuts, command palette
+## 6. Input and commands
 
-- **Command registry**: every UI action is a named command with metadata (label, icon, shortcut defaults,
-  enablement predicate). Menus, buttons, and the palette all render *from the registry*, so a new action is
-  declared once.
-- **Keymap**: platform-aware defaults (Cmd vs Ctrl), user-rebindable, conflict detection, chord support
-  (`Ctrl+K Ctrl+S`), context scoping (timeline vs viewer vs global). Stored per workspace with import/export.
-- **Command palette** (`Ctrl/Cmd+K`): fuzzy search over the registry; invoking a command is *identical* to
-  the menu path and to the agent's RPC call (same command ID where meaningful). This is the clearest
-  demonstration that the GUI is a protocol client.
-- **IME** is handled properly for CJK text entry (candidate window positioning, composition preview) —
-  a common failure in cross-platform GPU UIs, so it is in the P2 acceptance criteria.
+- **Command registry**: every action is a named command with label, icon, shortcut defaults, and an
+  enablement predicate. Menus, buttons, and the palette render from this registry.
+- **Keymap**: platform-aware defaults (Cmd/Ctrl), user-rebindable, conflict detection, chords
+  (`Ctrl+K Ctrl+S`), context scoping. Stored per workspace, importable/exportable.
+- **Command palette** (`Ctrl/Cmd+K`): fuzzy search over the registry. This demonstrates in the product that
+  the GUI is a protocol client — the palette invocation and the agent call share command semantics.
+- **IME** for CJK text entry is an explicit Phase C acceptance criterion.
 
 ## 7. Accessibility, theming, i18n
 
-- **Accessibility**: `accesskit` tree maintained alongside the widget tree; keyboard-only operation for
-  every command (no mouse-only paths); focus rings; reduced-motion setting honored (timeline animations off).
-  Screen-reader support is a P6 gate, keyboard completeness is a P2 gate.
-- **Theming**: token-based (color roles, spacing scale, type ramp). Light, dark, high-contrast. No hard-coded
-  colors in widgets; a theme is a token map.
-- **i18n**: `fluent` bundles, no concatenated strings, plural rules respected. English at v1; localization
-  infrastructure ships so community translations are possible without code changes.
+- **Accessibility**: keyboard completeness for every command (Phase C gate); `egui`'s accesskit integration
+  provides an OS accessibility tree as a best-effort. Screen-reader certification is post-1.0.
+- **Theming**: token-based (color roles, spacing scale, type ramp); light, dark, high-contrast. No
+  hard-coded colors in widgets.
+- **i18n**: `fluent` bundles, no concatenated strings, plural rules respected. English at v1.
 
 ## 8. Failure UX
 
-The UI is where recovery becomes trust:
-
-- **GPU device loss**: overlay "Restoring GPU…" ≤ 2 s, session continues.
-- **Decoder crash**: clip shows a damaged-media hatch; a "retry" action respawns the worker.
-- **Engine degraded** (panic caught): banner with "Export last good state" and "View crash report";
-  project remains exportable.
-- **Missing media**: placeholder frames with the asset name; relink dialog is reachable in one click; the
-  timeline is fully editable with offline media.
-- **Slow operation**: jobs run with progress in the status bar and a cancel action; nothing modal except
-  file dialogs and destructive confirmations.
+- **GPU device loss**: "Restoring GPU…" overlay ≤ 2 s; session continues.
+- **Decoder error/panic**: the clip shows a damaged-media hatch; retry is one click; other clips continue.
+- **Engine degraded**: banner with "Export last good state" and "View crash report".
+- **Missing media**: placeholders with asset names; relink is one click; the timeline stays fully editable.
+- **Long operations**: jobs show progress in the status bar with cancel; nothing modal except file dialogs
+  and destructive confirmations.

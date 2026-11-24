@@ -1,39 +1,36 @@
-# ADR-0009 — Tiered determinism contract
+# ADR-0009 — Same-machine determinism, tolerance goldens
 
-**Status:** Accepted · 2026-11-24
+**Status:** Accepted, revised 2026-11-24 after architecture review.
 
 ## Context
 
-Agents and pipelines need to verify renders; golden tests need a stable reference. But GPU floating-point
-results differ across vendors and drivers, and even within a vendor across driver versions. Promising
-bit-exact output everywhere would be false, and a false promise in a verification product is worse than a
-narrower true one.
+Agents and pipelines need reproducible renders; golden tests need a stable reference. GPU floating point
+differs across vendors and drivers, so a cross-device bit-exact promise would be false. The original
+proposal defined a three-tier contract with a CPU reference-render mode — correct, but more machinery than
+a solo project needs in v1.
 
 ## Decision
 
-State and enforce a **tiered contract**:
-
-1. **Bit-exact** for the same device class, driver version, and Arcline version (including shader cache
-   hash). Same machine, same output, every time.
-2. **Tolerance-bounded** across devices: PSNR ≥ 50 dB and max channel difference ≤ 2 LSB at 10-bit for
-   pure-GPU paths; effects with non-associative iteration are documented as excluded.
-3. **Reference mode** (`--render-mode=reference`): fp32, no fast-math, pinned kernels, CPU/lavapipe; the
-   arbiter for golden tests and disputes.
-4. **Attribution**: every export report records renderer version, shader cache hash, driver, adapter, and
-   encoder so any result can be explained.
+1. **Same machine, same driver, same renderer version ⇒ bit-exact output.** Rendering twice yields identical
+   frames; CI asserts this.
+2. **Across machines ⇒ tolerance-bounded.** Golden tests compare with PSNR ≥ 45 dB; effects with
+   non-associative math are documented as excluded.
+3. **Attribution.** Every export report records renderer version and shader-cache hash so a result can be
+   explained.
+4. No reference-render mode and no cross-device bit-exactness claim in v1.
 
 ## Consequences
 
-- Honest, testable, and useful: users can reproduce their own renders; CI can gate on goldens; disagreements
-  have an arbiter.
-- Some effects (e.g., certain temporal or iterative filters) are excluded from the cross-device tier; the
-  exclusion list is maintained and surfaced in `effect_describe`.
-- Reference mode is slow and is not offered as a normal export path — it exists for verification.
-- Determinism becomes a compatibility surface: changing a shader or kernel is a *renderer version* bump,
-  not a silent change, and old projects record the version they were created with.
+- The contract is honest and testable with a software adapter in CI.
+- Goldens are regenerated deliberately and reviewed when rendering changes; a shader change is a renderer
+  version bump, not a silent difference.
+- Users can reproduce their own renders; support can diagnose differing outputs from the report.
+- Some effects are excluded from cross-machine comparison; the exclusion is documented per effect.
 
 ## Alternatives considered
 
-- **Claim bit-exact everywhere**: impossible; would fail on real hardware and destroy trust.
-- **No determinism guarantee**: unacceptable for agent verification and golden testing.
-- **CPU-only rendering**: deterministic but far too slow for real-time preview.
+- **Bit-exact everywhere**: impossible; would fail on real hardware.
+- **No guarantee**: unacceptable for agent verification and goldens.
+- **CPU-only rendering**: deterministic but far too slow.
+- **Full three-tier contract with reference mode** (original decision): unnecessary for v1; the same-machine
+  guarantee and tolerance goldens cover the practical need. Reference mode can be added if disputes arise.

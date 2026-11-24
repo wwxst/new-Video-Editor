@@ -1,0 +1,57 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/arc-core",
+    "crates/arc-media",
+    "crates/arc-render",
+    "crates/arc-audio",
+    "crates/arc-cli",
+    "crates/arc-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Proprietary"
+repository = "https://github.com/wwxst/new-Video-Editor"
+
+[workspace.dependencies]
+arc-core = { path = "crates/arc-core" }
+arc-media = { path = "crates/arc-media" }
+arc-render = { path = "crates/arc-render" }
+arc-audio = { path = "crates/arc-audio" }
+arc-cli = { path = "crates/arc-cli" }
+
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+im = { version = "15", features = ["serde"] }
+arc-swap = "1"
+blake3 = { version = "1", default-features = false, features = ["pure", "std"] }
+ciborium = "0.2"
+ulid = "3"
+zip = { version = "9", default-features = false, features = ["deflate"] }
+thiserror = "2"
+proptest = "1"
+tempfile = "3"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+unwrap_used = "warn"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.test]
+opt-level = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

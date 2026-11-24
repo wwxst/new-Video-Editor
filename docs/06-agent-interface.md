@@ -4,7 +4,7 @@ This document specifies how an AI agent edits video in Arcline with the same aut
 that is safe. It is the product differentiator; the rest of the architecture exists to make it possible.
 
 v2 scope: local trust (single-user process, path allow-lists), stdio transport only, no live GUI attach,
-13 JSON-RPC methods, and 20 MCP tools. The command model, revisions, dry-run, typed errors, and rendered-frame
+13 JSON-RPC methods, and 21 MCP tools. The command model, revisions, dry-run, typed errors, and rendered-frame
 inspection — the parts that make agents effective — are unchanged.
 
 This document is the **single normative definition** of the JSON-RPC methods (§4.1) and the MCP tools
@@ -65,8 +65,8 @@ seconds, or a `"HH:MM:SS:FF"` timecode at the sequence `frame_rate`.
 | `effect.list` | `session` | effect manifests ([02 §3.4](02-domain-model-and-project-format.md)) |
 | `inspect.timeline` | `session`, `range?: {from, to}` | text view (§5) |
 | `inspect.frame` | `session`, one of `at` (sequence time) · `clip` + `at_local` · `asset` + `at`, `max_px?: 1600` | PNG (base64) of the **composited** output (source frame for `asset`) |
-| `job.submit` | `session`, `kind: "render"`, `spec: {range?, preset, output}` | `job_id` |
-| `job.status` | `job_id` | `state` (`queued \| running \| done \| failed \| cancelled`), `progress: {frames_done, frames_total}`, `report?`, `error?` |
+| `job.submit` | `session`, `kind: "render" \| "interchange"`, `spec` (render: `{range?, preset, output}`; interchange: [12 §9](12-project-interchange.md)) | `job_id` |
+| `job.status` | `job_id` | `state` (`queued \| running \| done \| failed \| cancelled`), `progress`, `report?` (`export_report.json` or `interchange_report.json`), `error?` |
 | `job.cancel` | `job_id` | `state` |
 
 Rules:
@@ -158,7 +158,7 @@ MARK
 injects `session`; for single-intent tools `base_revision` is optional and defaults to the current revision
 (the process has one client). `edit_apply` accepts an explicit `base_revision`.
 
-### 6.1 Tools (20) and their JSON-RPC mapping
+### 6.1 Tools (21) and their JSON-RPC mapping
 
 | # | Tool | JSON-RPC | Notes |
 |---|---|---|---|
@@ -181,7 +181,8 @@ injects `session`; for single-intent tools `base_revision` is optional and defau
 | 17 | `inspect_frame` | `inspect.frame` | image content block |
 | 18 | `history_undo` | `history.undo` | |
 | 19 | `render_submit` | `job.submit` (`kind: "render"`) | |
-| 20 | `render_status` | `job.status` | includes `export_report.json` when done |
+| 20 | `render_status` | `job.status` | status of any job; includes the export or interchange report when done |
+| 21 | `interchange_export` | `job.submit` (`kind: "interchange"`) | FCPXML / FCP7 XML / OTIO + package + compatibility report ([12](12-project-interchange.md)) |
 
 Design notes:
 
@@ -189,7 +190,7 @@ Design notes:
 - Schemas are generated from the Rust command types, so tool docs cannot drift from behavior.
 - Anything not covered by a dedicated tool is reachable through `edit_apply` (e.g. `track.add`,
   `audio.set_gain`, `audio.set_fades`, `subtitle.import`). Methods without a tool (`history.redo`,
-  `history.list`, `job.cancel`) are available over JSON-RPC. The tool count stays at 20 on purpose.
+  `history.list`, `job.cancel`) are available over JSON-RPC. The tool surface is kept deliberately small.
 
 ### 6.2 Resources
 
@@ -206,6 +207,10 @@ Rendering is a job, decoupled from edits. `job.submit` snapshots the document at
 spawns `arcline-cli render` as a child process, so later edits do not affect a running render and a render
 crash cannot end the session. Jobs belong to the process, not the connection; cancellation is checked per
 frame; `job.status` returns `export_report.json` inline when done, so the agent verifies rather than trusts.
+
+Interchange exports (`kind: "interchange"`) run the same way in an `arcline-cli export` child process and
+return `interchange_report.json`; an agent should read its `unverified`, `baked`, and `annotated` items before
+telling a user that a project is ready to open in another editor ([12 §6](12-project-interchange.md)).
 
 ## 8. Trust and safety (v1)
 

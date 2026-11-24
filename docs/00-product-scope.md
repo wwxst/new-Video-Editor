@@ -36,8 +36,9 @@ produce user-visible capability in the first six months is deferred.
 | Subtitles | [02 §3.7](02-domain-model-and-project-format.md) | G |
 | Audio processing | [05](05-audio-engine.md) | D |
 | Video export | [04 §7](04-media-pipeline.md), [03 §7](03-render-engine.md) | B, G |
+| Cross-editor project export (FCPXML, FCP7 XML, OTIO; media packaging; compatibility report) | [12](12-project-interchange.md), [ADR-0012](adr/0012-project-interchange-export.md) | I |
 | Agent interfaces (MCP, APIs) | [06](06-agent-interface.md) | F |
-| Performance, stability, maintainability | [08](08-performance-reliability.md) | A–H |
+| Performance, stability, maintainability | [08](08-performance-reliability.md) | A–I |
 
 ## 4. Non-goals for v1.0
 
@@ -49,7 +50,8 @@ Explicit and binding. Each item removed here is weeks returned to the core produ
 - **No collaboration or multi-user.** Command logs remain mergeable in principle; live sync is post-1.0.
 - **No live GUI agent attach.** Agents run headless against project files; attaching to an open GUI session
   is post-1.0 and unscheduled.
-- **No interchange formats** (EDL/FCPXML/OTIO) in v1.
+- **No project import from other editors** (export only; see §8). No AAF/EDL, and no native Jianying/CapCut
+  draft files.
 - **No multicam, cloud rendering, render farms, multi-GPU, or mobile.**
 - **No screen-reader certification** in v1; keyboard completeness is required instead.
 - **No macOS or Linux in v1.0.** v1.0 is Windows-only; v1.1 is the macOS port; Linux is post-1.0 with no date
@@ -88,3 +90,29 @@ by one person with AI.
 - Zero lost acknowledged edits across a 30-day soak with forced-kill testing
   ([08 §4.7](08-performance-reliability.md)).
 - A non-developer completes import → cut → export without reading documentation.
+- An Arcline sequence exported for Premiere Pro, DaVinci Resolve, and Final Cut Pro opens as an editable
+  timeline with cuts, tracks, audio levels, transitions, and markers intact, with a compatibility report that
+  lists every approximation; Jianying Pro reaches the same bar if the compatibility lab confirms an import
+  path.
+
+## 8. Cross-editor project export
+
+Arcline edits must be finishable in other editors. Requirements (design: [12](12-project-interchange.md),
+decision: [ADR-0012](adr/0012-project-interchange-export.md)):
+
+1. **Native format stays `.arcline`.** Interchange files are exports; v1.0 does not import them.
+2. **Formats:** FCPXML and OpenTimelineIO (OTIO), plus FCP7 XML (`xmeml`) because Premiere Pro does not
+   import FCPXML natively.
+3. **Priority targets:** Jianying Pro, Premiere Pro, DaVinci Resolve, Final Cut Pro.
+4. **CapCut:** investigated in the compatibility lab. No editable path is assumed; until one is verified,
+   CapCut receives a handoff package (media, SRT, stems, baked titles, reference render, cut list).
+5. **Editability first:** timelines, clips, source ranges, speed, transforms, transitions, audio levels and
+   fades, markers, and subtitles are preserved wherever the target can represent them.
+6. **Explicit fallbacks:** unsupported effects are annotated (default) or baked with the original kept
+   beneath; titles are baked to alpha clips by default; subtitles always ship as SRT; nothing is silently
+   dropped.
+7. **Media packaging:** reference, copy, or consolidate (used ranges + handles), with optional transcode for
+   target-unfriendly sources.
+8. **Automatic compatibility report** for every export: per clip and feature, with outcome and evidence
+   level; unverified mappings are labeled as such.
+9. **Agent access:** the same export is available to agents via MCP and JSON-RPC.

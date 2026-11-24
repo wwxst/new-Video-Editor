@@ -10,8 +10,8 @@ post-1.0 with no date. The release plan and CI tiers are defined in [ADR-0011](a
 ## 1. Phase overview
 
 ```
-Weeks  1    4    8    12   16   20   24   27
-       |----|----|----|----|----|----|----|
+Weeks  1    4    8    12   16   20   24   28   32
+       |----|----|----|----|----|----|----|----|
 A Spine     ███
 B Pipeline     ███████
 C Compositor        ████████████
@@ -19,11 +19,13 @@ D Audio                  ██████
 E Lifecycle                 ████
 F Agent                        █████
 G Finish                          ████████
-H Harden                              ██████
+I Interchange                           ██████
+H Harden                                    ███████
 ```
 
-Critical path: A → B → C → G → H. F depends on C's command surface and can run in parallel with late C/D.
-D is independent of F. E depends on C and D.
+Critical path: A → B → C → G → I → H. F depends on C's command surface and can run in parallel with late
+C/D. D is independent of F. E depends on C and D. I depends on F (jobs, reports) and G (titles, subtitles,
+keyframes — the features it must map). H stays last.
 
 ## 2. Phase A — Spine (weeks 1–3)
 
@@ -127,7 +129,7 @@ Deliverables
 
 - `arc-cli`: `arcline-cli rpc` with the 13 JSON-RPC methods of [06 §4.1](06-agent-interface.md),
   revisions, dry-run, idempotency, typed errors, acknowledgement after journal write.
-- `arcline-cli mcp` with the 20 tools of [06 §6.1](06-agent-interface.md), resources, and rendered-frame
+- `arcline-cli mcp` with the tools of [06 §6.1](06-agent-interface.md), resources, and rendered-frame
   inspection.
 - Text timeline (`inspect.timeline`), read-only.
 - Render jobs with progress and reports.
@@ -156,7 +158,33 @@ Deliverables
 - A 10-minute, 4-track project with titles, music, and effects is edited and exported by a non-developer.
 - Budgets met on both reference machines.
 
-## 9. Phase H — Harden (weeks 23–27)
+## 9. Phase I — Interchange export (weeks 23–28)
+
+**Goal:** an Arcline edit opens as an editable timeline in Premiere Pro, DaVinci Resolve, and Final Cut Pro,
+and in Jianying Pro if an import path is confirmed ([12](12-project-interchange.md)).
+
+Deliverables
+
+- **Week 1 — compatibility lab:** hand-built FCPXML, FCP7 XML, and OTIO samples imported into Premiere,
+  Resolve, Final Cut Pro (borrowed or rented Mac), Jianying Pro, and CapCut; results recorded; default
+  formats chosen for Jianying Pro and Resolve; decision on offering Premiere OTIO.
+- `arc-core::interchange`: IR, target profiles with evidence levels, FCPXML / FCP7 XML / OTIO writers,
+  loss analysis.
+- `arc-cli` export job: packaging (reference / copy / consolidate, optional transcode), baking of effect and
+  title clips, SRT sidecars, stems, reference render, CapCut handoff package.
+- `interchange_report.json` / `.md`; `job.submit {kind: "interchange"}`; MCP `interchange_export`;
+  `arcline-cli export`; *Export Project for…* dialog with report view.
+- CI validation: FCPXML DTD, OTIO reference loader, frame-count checks, 12 golden reference projects.
+
+**Exit criteria**
+
+- The 12 reference projects import into Premiere (FCP7 XML), Resolve (FCPXML and OTIO), and Final Cut Pro
+  (FCPXML) with cuts, tracks, source ranges, transitions, audio levels/fades, and markers intact.
+- Every approximation, bake, and drop appears in the report; no feature is silently lost.
+- Jianying Pro and CapCut each have a recorded lab verdict, and their profiles reflect it (editable import,
+  or handoff package).
+
+## 10. Phase H — Harden (weeks 27–32)
 
 **Goal:** ship v1.0 on Windows.
 
@@ -179,15 +207,16 @@ Deliverables
   notarized universal DMG. Same features as v1.0.
 - **Linux** — post-1.0, no date commitment; Flatpak, started on demonstrated demand.
 
-## 10. Explicit v1 cut list
+## 11. Explicit v1 cut list
 
 No plugins (OFX/WASM/VST3); no HDR/ACES/OCIO; no collaboration; no live GUI agent attach; no render
-farm/multi-GPU; no EDL/FCPXML/OTIO; no multicam; no screen-reader certification; no image sequences; no
+farm/multi-GPU; no project import from other editors, no EDL/AAF, no native Jianying/CapCut drafts; no
+multicam; no screen-reader certification; no image sequences; no
 audio EQ/compressor/loudness; no three-OS installer matrix.
 
 These are not failures. They are the difference between shipping and not.
 
-## 11. Effort assumptions
+## 12. Effort assumptions
 
 | Phase | Weeks | Notes |
 |---|---|---|
@@ -198,13 +227,15 @@ These are not failures. They are the difference between shipping and not.
 | E | 4 | persistence; test-heavy |
 | F | 5 | protocol + MCP; well-scoped |
 | G | 7 | broad surface; cut aggressively if late |
+| I | 5 | 1 week lab + 4 weeks writers, packaging, reports; overlaps late G |
 | H | 4 | packaging + hardening |
-| **Total** | **~27** | v1.0 (Windows); v1.1 macOS port +3–4 |
+| **Total** | **~32** | v1.0 (Windows); v1.1 macOS port +3–4 |
 
 If a phase slips beyond its estimate by more than 30%, cut from Phase G's list before extending the
-schedule — the v1 promise is a working editor with an agent surface, not a feature checklist.
+schedule — the v1 promise is a working editor with an agent surface, not a feature checklist. Within
+Phase I, cut in this order: OTIO for Premiere, consolidate/transcode modes, stems; never the report.
 
-## 12. KPIs
+## 13. KPIs
 
 | KPI | Target at 1.0 |
 |---|---|

@@ -74,9 +74,12 @@ When added, plugins will be capabilities, not defaults: loading native code is a
 - The internal pipeline is already RGBA16F linear, which is the expensive structural prerequisite; adding
   HDR later is a transform and metadata problem, not a rewrite.
 
-## 5. Deferred: interchange
+## 5. Interchange
 
-EDL, FCPXML, and OTIO import/export are post-1.0. The document model is designed to map onto them, but
+Interchange **export** (FCPXML, FCP7 XML, OTIO) is now a v1.0 feature, specified in
+[12 — Cross-Editor Project Export](12-project-interchange.md). Built-in effects have no portable equivalent in
+other editors; they are annotated or baked per [12 §4.3](12-project-interchange.md). The rest of this section
+applies to **import** and EDL/AAF, which remain post-1.0. The document model is designed to map onto them, but
 each adapter is a compatibility project with its own test corpus and no v1 user. Project files are the
 native interchange format until then.
 

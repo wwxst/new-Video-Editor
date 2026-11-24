@@ -22,6 +22,8 @@ Scoring: likelihood (L) and impact (I) on 1–5; exposure = L×I.
 | R11 | **Packaging and signing delays** | 3 | 2 | 6 | Start the Windows installer spike in Phase E, not H; use standard signing services | Portable zip as the fallback distribution |
 | R12 | **Data loss** | 2 | 5 | 10 | Journal commit/ack rule, group `fsync` + durable mode, atomic saves, forced-kill CI, VM hard-reset test ([08 §4](08-performance-reliability.md)) | Support runbook for manual journal recovery from `.rejected` tails |
 | R13 | **Determinism expectations misunderstood** | 2 | 2 | 4 | Same-machine contract stated in docs and export report; tolerance-based goldens | Diagnostics in `export_report.json` explain differences |
+| R14 | **Target editors change or reject imports** (FCPXML version lag in Resolve, Premiere OTIO beta, undocumented Jianying behavior) | 4 | 3 | 12 | Versioned target profiles with evidence levels; compatibility lab per target version; FCP7 XML for Premiere; reports mark unverified mappings | Fall back to the handoff package for that target and say so in the report |
+| R15 | **CapCut/Jianying expectations exceed what is possible** | 3 | 3 | 9 | No assumed support; CapCut handoff package; no reverse-engineered drafts ([12 §5.5](12-project-interchange.md)) | Publish the verified matrix; add a profile only when a documented path exists |
 
 The top exposures (R1, R2/R3) are revisited at every phase gate.
 

@@ -121,6 +121,8 @@ Budget: 60 fps scroll and drag with 8 tracks and 2,000 visible clip-seconds; 8 m
   preview uses its proxy; the reason is shown in the inspector ([04 §1.2](04-media-pipeline.md)).
 - **After an unclean exit**: the recovery dialog reports the recovered revision, any discarded journal
   records, and any newly quarantined asset ([08 §4.6](08-performance-reliability.md)).
+- **Interchange export**: *File → Export Project for…* picks a target editor and packaging mode, then shows
+  the compatibility report (unverified and baked items first) ([12](12-project-interchange.md)).
 - **Export failure**: exports run in a child process, so a crash fails the job with a report; the session
   continues.
 - **Engine degraded**: banner with "Export last good state" and "View crash report".

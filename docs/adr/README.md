@@ -18,3 +18,4 @@ a new ADR references the old one, and the old file's status changes to `Supersed
 | [0009](0009-determinism-contract.md) | Same-machine determinism, tolerance goldens | Accepted (revised 2026-11-24) |
 | [0010](0010-text-timeline-for-agents.md) | Read-only text timeline for agents | Accepted (revised 2026-11-24) |
 | [0011](0011-windows-first.md) | Windows-first release strategy (v1.0 Windows, v1.1 macOS, Linux post-1.0) | Accepted 2026-11-24 |
+| [0012](0012-project-interchange-export.md) | Cross-editor project export (FCPXML, FCP7 XML, OTIO) | Accepted 2026-11-24 |

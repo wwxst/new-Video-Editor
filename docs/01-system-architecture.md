@@ -98,12 +98,12 @@ Six crates, with enforced dependency rules (checked in CI from `cargo metadata`)
 
 | Crate | Owns | May depend on | Must not depend on |
 |---|---|---|---|
-| `arc-core` | time, model, commands, validation, undo/journal, project file, schema migrations | std, serde, `im` | GPU, FFmpeg, UI, audio devices |
+| `arc-core` | time, model, commands, validation, undo/journal, project file, schema migrations, interchange writers (pure) | std, serde, `im` | GPU, FFmpeg, UI, audio devices |
 | `arc-media` | probe, decode, encode, mux, proxy/thumbnail/waveform jobs | core, FFmpeg | render, UI |
 | `arc-render` | `wgpu` device, compositor, effects, text, frame cache | core, `wgpu` | FFmpeg, UI |
 | `arc-audio` | device output, mixer, offline render | core, `cpal` | render, UI |
 | `arc-app` | `egui` shell, timeline canvas, viewer, app binary | all of the above | — |
-| `arc-cli` | headless render, JSON-RPC/MCP server, utilities | core, media, render, audio | `egui` |
+| `arc-cli` | headless render, interchange export jobs (packaging, baking, reports), JSON-RPC/MCP server, utilities | core, media, render, audio | `egui` |
 
 Why this shape:
 
@@ -256,4 +256,5 @@ faults and is never relied on for them.
 | New built-in effect | WGSL pass + JSON manifest registered in `arc-render` | v1 |
 | Automation | JSON-RPC / MCP | v1 |
 | Third-party effect plugins | OFX / WASM | Post-1.0 ([09](09-effects-and-extensions.md)) |
-| Interchange | EDL/FCPXML/OTIO adapters | Post-1.0 |
+| Interchange export | FCPXML / FCP7 XML / OTIO writers in `arc-core::interchange`, export job in `arc-cli` | v1.0 ([12](12-project-interchange.md)) |
+| Interchange import | OTIO first | Post-1.0 |

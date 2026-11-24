@@ -173,6 +173,9 @@ crash: the user loses no acknowledged edits and reopens into the recovered state
   crashing/hanging file ends up quarantined. The same corpus runs through the in-process decoder in a
   separate harness process, where crashes are expected to be possible and are triaged as FFmpeg or wrapper
   defects.
+- **Interchange**: FCPXML DTD validation, OTIO reference-library load, FCP7 XML structural checks,
+  exact frame-count checks, and byte-stable golden exports of 12 reference projects
+  ([12 §7](12-project-interchange.md)). Import into target editors is a manual lab step.
 - **CI matrix**: per the release plan in [ADR-0011](adr/0011-windows-first.md) — Windows: build, full test
   suite, packaging. macOS: `cargo check` on every PR until v1.1 work starts, then full tests. Linux:
   `cargo check` plus `arc-core` tests on every PR (core is platform-independent).

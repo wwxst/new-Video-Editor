@@ -97,7 +97,8 @@ scope; older formats are best-effort via FFmpeg demuxers.
 
 **Egress (v1):** MP4/MOV (H.264, HEVC, AV1), MOV ProRes, WAV/AIFF.
 
-**Interchange** (EDL/FCPXML/OTIO) is post-1.0.
+**Interchange export** (FCPXML, FCP7 XML, OTIO) with media packaging and optional consolidation/transcode is
+in v1.0 and reuses these encoders ([12](12-project-interchange.md)). Interchange import is post-1.0.
 
 ## 5. Hardware encode
 

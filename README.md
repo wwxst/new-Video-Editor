@@ -27,7 +27,7 @@ and the MCP server are consequences of that one decision.
 
 What changed in v2, after review: a solo-calibrated scope, `egui` instead of a custom widget toolkit, six
 crates instead of eighteen, a direct compositor instead of a generic render graph, in-process decode, a
-simplified agent surface, and a 27-week roadmap to v1.0 on Windows.
+simplified agent surface, cross-editor project export, and a ~32-week roadmap to v1.0 on Windows.
 
 ---
 
@@ -45,8 +45,9 @@ simplified agent surface, and a 27-week roadmap to v1.0 on Windows.
 | 07 | [UI Architecture](docs/07-ui-architecture.md) | `egui` shell, custom timeline/viewer canvases, inspector, input |
 | 08 | [Performance & Reliability](docs/08-performance-reliability.md) | Budgets, memory policy, crash recovery, testing strategy |
 | 09 | [Effects & Extensions](docs/09-effects-and-extensions.md) | Built-in effect manifests; deferred plugin tiers |
-| 10 | [Development Roadmap](docs/10-roadmap.md) | Phases A–H, exit criteria, scope cut list, KPIs |
+| 10 | [Development Roadmap](docs/10-roadmap.md) | Phases A–I, exit criteria, scope cut list, KPIs |
 | 11 | [Risks & Legal](docs/11-risks-and-legal.md) | Risk register, codec/FFmpeg licensing, platform compliance |
+| 12 | [Cross-Editor Project Export](docs/12-project-interchange.md) | FCPXML / FCP7 XML / OTIO export, target matrix, packaging, compatibility reports |
 | ADR | [Decision Records](docs/adr/README.md) | Decisions with alternatives; revised after review |
 | — | [Architecture Review](reports/architecture-review.md) | Independent review that motivates v2 |
 
@@ -68,6 +69,7 @@ simplified agent surface, and a 27-week roadmap to v1.0 on Windows.
 | Plugins | None in v1; internal effect manifests only; OFX/WASM/VST3 deferred | [0008](docs/adr/0008-plugin-strategy.md) |
 | Determinism | Bit-exact per machine; tolerance-bounded golden tests; no cross-device contract in v1 | [0009](docs/adr/0009-determinism-contract.md) |
 | Agent text | Read-only EDL-like text view; writes go through JSON commands | [0010](docs/adr/0010-text-timeline-for-agents.md) |
+| Interchange | `.arcline` native; export FCPXML, FCP7 XML, OTIO with packaging and compatibility reports; no foreign import in v1.0 | [0012](docs/adr/0012-project-interchange-export.md) |
 
 ---
 
@@ -79,12 +81,13 @@ simplified agent surface, and a 27-week roadmap to v1.0 on Windows.
 | **B Headless pipeline** | 3–7 | Import → trim → export works end-to-end from the CLI with hardware encode |
 | **C Compositor + shell** | 6–12 | 1080p preview ≥ 30 fps with 4 tracks and 8 effects; move/trim/split in the GUI |
 | **D Audio** | 11–14 | 10-minute playback drifts ≤ 1 frame; preview/export mix hashes match |
-| **E Lifecycle** | 13–16 | 100 forced kills during edit/save lose zero edits |
+| **E Lifecycle** | 13–16 | 100 forced kills during edit/save lose zero acknowledged edits |
 | **F Agent surface** | 15–19 | An agent builds a captioned three-shot cut through MCP |
 | **G Finish** | 18–24 | A non-developer edits and exports a 10-minute project |
-| **H Harden** | 23–27 | Budgets met; Windows installer; beta with external users |
+| **I Interchange** | 23–28 | Reference projects open editable in Premiere, Resolve, and Final Cut Pro; lab verdicts for Jianying Pro and CapCut |
+| **H Harden** | 27–32 | Budgets met; Windows installer; beta with external users |
 
-**v1.0 (Windows): week 27.** v1.1 (macOS port, no new features): +3–4 weeks. Linux: post-1.0, no date.
+**v1.0 (Windows): ~week 32.** v1.1 (macOS port, no new features): +3–4 weeks. Linux: post-1.0, no date.
 
 ---
 

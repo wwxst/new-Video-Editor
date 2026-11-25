@@ -113,9 +113,11 @@ the [Phase B closure report](../reports/phase-b-exit-2026-11-25.md))
 - **Met** — `.github/workflows/ci.yml`: `core` on ubuntu/windows/macos (Rust 1.95 + clippy, the
   FFmpeg-free crates) is **green on GitHub** (runs 2 and 3: windows, ubuntu and macos); the Windows
   `media` job builds the pinned FFmpeg 9.1 from the in-repo recipe **in CI** and its workspace step
-  failed on a WARP/software-adapter crash in the GPU tests, which is **fixed** (tests serialized;
-  whole suite 116/116 under `ARCLINE_FORCE_FALLBACK_ADAPTER=1` locally). Failures now emit check-run
-  annotations readable without a token — see the closure report §3.2/§4.
+  failed on two independent causes, both **fixed**: the CI-built FFmpeg package landed under the
+  MSYS2 home instead of the cached `C:\Users\<user>\.local` path, and the GPU tests crashed under the
+  WARP/software adapter (now serialized; whole suite 116/116 under
+  `ARCLINE_FORCE_FALLBACK_ADAPTER=1` locally). Failures now emit check-run annotations readable
+  without a token; run 7 (`4b4be80`) verifies the fix — see the closure report §3.2/§4.
 
 ## 5. Phase C — Compositor and shell (weeks 10–16)
 

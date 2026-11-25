@@ -215,10 +215,13 @@ Fold these into docs/02–06 (or an ADR) when convenient; none contradicts an AD
 3. **CI exists** (`.github/workflows/ci.yml`, ADR-0011): `core` on ubuntu/windows/macos (Rust 1.95 + clippy,
    FFmpeg-free crates) is green on GitHub (runs 2 and 3); `media` on Windows builds the pinned FFmpeg 9.1
    from the in-repo recipe (cached) and runs the full workspace build/test/clippy with
-   `ARCLINE_FORCE_FALLBACK_ADAPTER=1`. Its workspace step failed on a WARP crash in the `arc-render` GPU
-   tests; the tests are now serialized (whole suite 116/116 green under the fallback adapter locally).
-   Failures emit check-run annotations, which are readable without a token. The hardware-encoder tests
-   skip themselves on machines without a GPU. Run links: [Phase B closure](reports/phase-b-exit-2026-11-25.md) §3.2.
+   `ARCLINE_FORCE_FALLBACK_ADAPTER=1`. Its workspace step had two causes, both fixed: the CI-built FFmpeg
+   package was installed under the MSYS2 `$HOME` instead of the cached `C:\Users\<user>\.local` path
+   (both MSYS2 steps now export `HOME="$(cygpath "$USERPROFILE")"`), and the `arc-render` GPU tests
+   crash under the WARP/software adapter when their devices are created concurrently (now serialized;
+   whole suite 116/116 green under the fallback adapter locally). Failures emit check-run annotations,
+   readable without a token. The hardware-encoder tests skip themselves on machines without a GPU.
+   Run links: [Phase B closure](reports/phase-b-exit-2026-11-25.md) §3.2.
 4. **GPU tests need an adapter.** They ran on Intel integrated graphics here; on CI use the fallback adapter.
 5. **Embedding PoC manual items open:** keyboard focus round-trip, IME placement, DPI change across monitors,
    Electron host (Electron not installed).

@@ -4,4 +4,5 @@
 pub mod export;
 pub mod inspect;
 pub mod media;
+pub mod preview;
 pub mod rpc;

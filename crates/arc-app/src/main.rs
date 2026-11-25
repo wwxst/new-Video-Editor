@@ -1,13 +1,14 @@
 //! `arcline` — the desktop app.
 //!
 //! ```text
-//! arcline                                     top-level window
+//! arcline [--project FILE]                     editor: viewer + transport for a project
 //! arcline --embed-parent <HWND> --embed-channel stdio [--poc-seconds N]
 //! ```
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod editor;
 mod embed;
 mod poc;
 
@@ -39,9 +40,13 @@ fn parse_args() -> Result<app::Options, String> {
                 let v = it.next().ok_or("--poc-seconds needs a value")?;
                 o.poc_seconds = Some(v.parse().map_err(|_| format!("invalid seconds {v}"))?);
             }
+            "--project" => {
+                let v = it.next().ok_or("--project needs a path")?;
+                o.project = Some(std::path::PathBuf::from(v));
+            }
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: arcline [--embed-parent HWND --embed-channel stdio] [--poc-seconds N]"
+                    "usage: arcline [--project FILE] [--embed-parent HWND --embed-channel stdio] [--poc-seconds N]"
                 );
                 std::process::exit(0);
             }

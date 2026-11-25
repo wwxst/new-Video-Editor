@@ -5,6 +5,7 @@
 //! same process, so the session survives (docs/13 §2.5).
 
 use crate::embed::{self, AppMsg, HostMsg};
+use crate::editor::Editor;
 use crate::poc::Workload;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -28,6 +29,8 @@ pub struct Options {
     pub embed_stdio: bool,
     /// PoC: report stats and exit after this many seconds (`--poc-seconds`).
     pub poc_seconds: Option<f64>,
+    /// Editor mode: open this project and show the viewer/transport (`--project`).
+    pub project: Option<std::path::PathBuf>,
 }
 
 /// Longest `poc.hang` request honoured by a PoC session.
@@ -49,6 +52,8 @@ pub struct App {
     opts: Options,
     gfx: Option<Gfx>,
     workload: Workload,
+    /// Editor session when `--project` was given (viewer + transport).
+    editor: Option<Editor>,
     /// Parent currently in use; cleared by pop-out.
     parent: Option<isize>,
     started: Instant,
@@ -67,11 +72,13 @@ impl std::fmt::Debug for App {
 
 impl App {
     pub fn new(opts: Options) -> App {
+        let editor = opts.project.as_deref().map(Editor::open);
         App {
             parent: opts.parent,
             opts,
             gfx: None,
             workload: Workload::new(),
+            editor,
             started: Instant::now(),
             popped_out: None,
             exit_requested: false,
@@ -168,10 +175,14 @@ impl App {
             size.height,
             self.started.elapsed().as_secs_f32()
         );
-        let workload = &mut self.workload;
-        let mut out = g.ctx.run_ui(input, |ui| {
-            workload.ui(ui, "Arcline — embedding PoC", &live)
-        });
+        let mut out = if let Some(editor) = self.editor.as_mut() {
+            g.ctx.run_ui(input, |ui| editor.ui(ui))
+        } else {
+            let workload = &mut self.workload;
+            g.ctx.run_ui(input, |ui| {
+                workload.ui(ui, "Arcline - embedding PoC", &live)
+            })
+        };
         g.state
             .handle_platform_output(&g.window, out.platform_output);
         let clipped = g.ctx.tessellate(out.shapes, out.pixels_per_point);

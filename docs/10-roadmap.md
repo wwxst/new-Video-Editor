@@ -103,7 +103,7 @@ the [Phase B closure report](../reports/phase-b-exit-2026-11-25.md))
 - **Met** — a corrupt file produces a clean per-clip error; a file that crashes or hangs
   `ffprobe`/`ffmpeg` in the import check is quarantined and the parent process survives. The
   generated corpus (`arc-media/tests/malformed.rs`, nine fixtures under 2 MB) is refused by the
-  import check (truncation is detected through a frame-count check) and converges to typed
+  import check (video truncation is detected by decoded frames, audio-only by decoded output time) and converges to typed
   `MediaError`s; a mixed good/broken export completes with the broken asset named as unavailable
   (`render_e2e::mixed_media_export_survives_an_unreadable_asset`). The quarantine branch itself is
   covered by `arc-media/tests/quarantine.rs`: a generated stub tool crashes (NTSTATUS 0xC0000005),

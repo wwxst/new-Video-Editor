@@ -9,3 +9,8 @@
 *.mov  binary
 *.wav  binary
 *.flac binary
+*.mkv  binary
+*.mp3  binary
+*.ts   binary
+*.m4a  binary
+*.ogg  binary

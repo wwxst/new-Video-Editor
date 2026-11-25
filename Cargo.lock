@@ -200,6 +200,7 @@ name = "arc-media"
 version = "0.1.0"
 dependencies = [
  "arc-core",
+ "blake3",
  "cc",
  "pkg-config",
  "serde",

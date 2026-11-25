@@ -105,6 +105,9 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euo pipefail
+          # MSYS2's HOME is /home/<user> (inside the MSYS2 root), but the package path the workflow
+          # caches and passes as ARCLINE_FFMPEG_DIR is C:\Users\<user>\.local; align them.
+          export HOME="$(cygpath "$USERPROFILE")"
           mkdir -p "$HOME/.local/toolchains/dl-ffmpeg"
           curl -fsSL -o "$HOME/.local/toolchains/dl-ffmpeg/ffmpeg-9.1.tar.xz" \
             https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz
@@ -117,6 +120,10 @@ jobs:
         shell: msys2 {0}
         run: |
           set -euo pipefail
+          # build.sh installs to $HOME/.local/toolchains/ffmpeg-9.1-lgpl; MSYS2's default HOME is
+          # inside the MSYS2 root, so without this the package lands where the cache/ARCLINE_FFMPEG_DIR
+          # cannot see it (the arc-media build script then finds no headers).
+          export HOME="$(cygpath "$USERPROFILE")"
           cd "$(cygpath "$GITHUB_WORKSPACE")"
           bash third_party/ffmpeg/build.sh
 

@@ -30,8 +30,12 @@ Scoring: likelihood (L) and impact (I) on 1–5; exposure = L×I.
 | R19 | **Cross-process child-window embedding misbehaves on Windows** (input coupling, focus, DPI, presentation) | 3 | 4 | 12 | One-week PoC right after Phase A with go criteria; watchdog + companion fallback; reference host in CI ([13 §2.4](13-product-modes-and-live-sessions.md)) | Shared-texture composition spike as the L1 mechanism; full embedding stays the goal |
 | R20 | **No third-party host offers native embedding** (L2 stays empty) | 4 | 2 | 8 | L3 covers every MCP client; adapters are thin and built only on demand | Keep L2 as a contract; revisit per host release |
 | R21 | **macOS port needs a different embedding mechanism** | 4 | 3 | 12 | Decided during the v1.1 port; mechanism isolated in the host loop and embed channel | Ship macOS v1.1 with L3 only if the mechanism is not ready |
+| R22 | **Memory-safety defects in our own libav shim**, triggered by media that passes the import check (audit F-02, F-03) | 4 | 5 | 20 | Shim never trusts stream parameters for buffers or converters; parameter-change fixtures; in-process decoder harness against a mutated corpus ([08 §6](08-performance-reliability.md)) | Any shim crash on admitted media blocks the release until fixed |
+| R23 | **FFmpeg version or licence drift**: wrong DLLs or a GPL build loaded at run time; shim built against other headers (audit F-20, F-21) | 3 | 4 | 12 | Compile-time version pin, run-time version and licence check, build manifest with hashes ([spec](specs/ffmpeg-9.1-upgrade.md) §4–§6) | Refuse in-process decode and report; developer override only |
+| R24 | **Silent inaccuracy** (wrong frame, shifted or clicking audio) undermines the frame-exact promise (audit F-06–F-08) | 4 | 4 | 16 | Long-GOP, MPEG-TS and lossy-audio corpus in CI; random access tested at every frame | Block Phase C preview sign-off until fixed |
+| R25 | **Recovery paths lose acknowledged edits** (audit F-01, F-04, F-05, F-14) | 3 | 5 | 15 | Recovery scenario tests (rejected replay, stale sidecar, create over existing, rotation failure) | Treat any reproduction as a release blocker (R12) |
 
-The top exposures (R1, R2/R3) are revisited at every phase gate.
+The top exposures (R1, R22, R24, R2/R3) are revisited at every phase gate.
 
 ## 2. FFmpeg and codec licensing
 
@@ -47,7 +51,27 @@ build GPL. Arcline's posture:
   and provide the LGPL compliance package: exact source, build scripts, modification list, relink
   instructions — published per release.
 - Pin the FFmpeg version; track CVEs weekly; treat decoder crash rates as a tracked metric.
+- **Shipped build (2026-11-25):** FFmpeg 9.1, LGPL v2.1+ only, from the verified official tarball
+  by the recipe in [third_party/ffmpeg](../../third_party/ffmpeg) (D1–D4 recorded in its
+  `manifest.json` and in [HANDOVER](../../HANDOVER.md)). No `--enable-version3`, GPL, nonfree,
+  `libopenh264` or Media Foundation; only the `file` and `pipe` protocols, no HLS/DASH/concat
+  demuxers. The package bundles the runtime DLLs of its dynamically linked dependencies and the
+  third-party notice set in `third_party/ffmpeg/licenses/`; the CycloneDX SBOM is committed next to
+  the manifest.
+- **Runtime enforcement:** the shim is pinned at compile time (ABI and versions) and the process
+  checks the loaded libraries' versions and licences once at startup; a mismatch is refused unless
+  the user sets `ARCLINE_ALLOW_ANY_FFMPEG=1` (the LGPL relinking allowance), and the override is
+  recorded in every export report. CLI tools are resolved from the bundle only and verified against
+  the manifest ident (`ARCLINE_ALLOW_PATH_FFMPEG=1` in a debug build is a development aid).
 - On Linux (post-1.0), prefer system FFmpeg via distro/Flatpak packaging.
+- **Current state (2026-11-25):** development uses a BtbN FFmpeg 8.1.3 build that is LGPL **v3**
+  (`--enable-version3`) with about 60 bundled external libraries and network protocols. It is not the
+  shippable configuration (audit F-20). The FFmpeg 9.1 upgrade defines the shippable build (LGPL v2.1+ by
+  default, an explicit owner decision for v3), the compliance package, and the notices for each external
+  library: [specs/ffmpeg-9.1-upgrade.md](specs/ffmpeg-9.1-upgrade.md) §5–§6. FFmpeg's `LICENSE.md` also
+  requires crediting the Independent JPEG Group in the documentation when distributing executables, and the
+  LGPL requires that Arcline's EULA permit reverse engineering for debugging modifications of the
+  library; both need counsel review.
 
 ### 2.2 Patents (the harder problem)
 
@@ -62,7 +86,7 @@ Intended posture:
 | Encode H.264/HEVC | **hardware encoders only** (NVENC/QSV/AMF/VideoToolbox are licensed at the driver/platform level) |
 | Encode AV1 | SVT-AV1 (BSD) — royalty-free; recommended default for web delivery |
 | Encode ProRes | editorial mezzanine; review Apple's trademark and licensing terms with counsel; widely used by open-source tools but not free of considerations |
-| Software H.264/HEVC encoders | **not shipped** (x264/x265 are GPL; OpenH264 has its own terms) |
+| Software H.264/HEVC encoders | **not shipped** (x264/x265 are GPL; OpenH264 has its own terms: Cisco's patent coverage applies only to Cisco's binaries, not to a build from source). The current encoder candidate list still contains `h264_mf` and `libopenh264` (audit F-19); the shipped FFmpeg build excludes `libopenh264`, and `h264_mf` awaits owner decision D2 in the FFmpeg spec |
 | Naming | "H.264/AVC", "HEVC/H.265" used descriptively; no certification marks without permission |
 
 Business consequence: every machine with a GPU encoder is fully served, and software-encoder licensing

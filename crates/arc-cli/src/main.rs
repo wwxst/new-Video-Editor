@@ -1,10 +1,10 @@
-//! `arcline-cli` — headless Arcline (docs/06 §2).
+//! `arcline-cli` ??headless Arcline (docs/06 ?2).
 //!
 //! Output contract: stdout carries exactly one JSON document (or the text timeline for
 //! `timeline`). Errors print `{"error": {...}}` with a stable `kind` and exit with code 2;
 //! usage errors exit with code 64.
 //!
-//! Each invocation is one session; undo history does not persist across sessions (docs/02 §5),
+//! Each invocation is one session; undo history does not persist across sessions (docs/02 ?5),
 //! so undo/redo live in the JSON-RPC session (`arcline-cli rpc`, Phase F), not here.
 
 use arc_cli::inspect;
@@ -26,7 +26,7 @@ use std::process::ExitCode;
     about = "Headless Arcline: create, inspect, and edit projects"
 )]
 struct Cli {
-    /// fsync every journal record before acknowledging (docs/08 §4.4)
+    /// fsync every journal record before acknowledging (docs/08 ?4.4)
     #[arg(long, global = true)]
     durable: bool,
     #[command(subcommand)]
@@ -46,6 +46,10 @@ enum Cmd {
         /// Resolution WxH
         #[arg(long, default_value = "1920x1080")]
         res: String,
+        /// Replace an existing project file (refused by default; never replaces a project that is
+        /// open in another session)
+        #[arg(long)]
+        overwrite: bool,
     },
     /// Print the project.describe summary (JSON)
     Describe {
@@ -67,7 +71,7 @@ enum Cmd {
         #[arg(long)]
         base_revision: Option<u64>,
     },
-    /// Serve a JSON-RPC 2.0 session on stdin/stdout (docs/06 §4)
+    /// Serve a JSON-RPC 2.0 session on stdin/stdout (docs/06 ?4)
     Rpc {
         /// Client id recorded as the source of every edit
         #[arg(long, default_value = "rpc")]
@@ -82,7 +86,7 @@ enum Cmd {
         path: PathBuf,
         #[arg(short, long)]
         output: PathBuf,
-        /// ffv1 | h264 | av1 | prores
+        /// ffv1 | h264 | av1 | prores | dnxhd
         #[arg(long, default_value = "h264")]
         codec: String,
         /// Start timecode (inclusive)
@@ -158,6 +162,19 @@ fn parse_resolution(s: &str) -> Result<Resolution, Fail> {
     Ok(Resolution { w, h })
 }
 
+/// Media arguments must be local paths, never URLs, protocol strings or device namespaces
+/// (audit F-09).
+fn reject_non_local(p: &Path) -> Result<(), Fail> {
+    let s = p.to_string_lossy();
+    if arc_cli::media::has_url_scheme(&s) || arc_cli::media::is_device_path(&s) {
+        return Err(fail(
+            "invalid_value",
+            format!("media path must be a local file path, not a URL, protocol or device: {s}"),
+        ));
+    }
+    Ok(())
+}
+
 fn read_commands(file: &Option<PathBuf>) -> Result<Vec<Command>, Fail> {
     let text = match file {
         Some(p) => std::fs::read_to_string(p).map_err(|e| fail("io_error", e))?,
@@ -191,18 +208,6 @@ fn outcome_json(o: &arc_media::probe::ImportOutcome) -> Value {
     }
 }
 
-/// Store media paths relative to the project folder when the media lives below it.
-fn project_relative(project: &Path, media: &Path) -> String {
-    let abs = std::fs::canonicalize(media).unwrap_or_else(|_| media.to_path_buf());
-    let root = project.parent().and_then(|p| std::fs::canonicalize(p).ok());
-    let rel = root
-        .as_ref()
-        .and_then(|r| abs.strip_prefix(r).ok())
-        .map(Path::to_path_buf);
-    let s = rel.unwrap_or(abs).to_string_lossy().replace('\\', "/");
-    s.strip_prefix("//?/").map(str::to_string).unwrap_or(s)
-}
-
 fn run(cli: Cli) -> Result<String, Fail> {
     let d = durability(&cli);
     match &cli.cmd {
@@ -212,11 +217,26 @@ fn run(cli: Cli) -> Result<String, Fail> {
             name,
             fps,
             res,
+            overwrite,
         } => {
             let rate = FrameRate::parse(fps).map_err(|e| Fail::from(CommandError::from(e)))?;
             let project = Project::new(name, rate, parse_resolution(res)?);
-            let host = EngineHost::create(path, project, arc_render::builtin::catalog(), d)
-                .map_err(|e| fail("io_error", e))?;
+            let host = EngineHost::create(
+                path,
+                project,
+                arc_render::builtin::catalog(),
+                d,
+                *overwrite,
+            )
+            .map_err(|e| match e {
+                arc_core::runtime::HostError::Store(arc_core::store::StoreError::Locked(_)) => {
+                    fail("project_locked", &e)
+                }
+                arc_core::runtime::HostError::Store(arc_core::store::StoreError::Exists(_)) => {
+                    fail("project_exists", &e)
+                }
+                other => fail("io_error", other),
+            })?;
             let p = host.published();
             let out = inspect::describe(&p.project, p.revision, false);
             finish(host)?;
@@ -244,7 +264,8 @@ fn run(cli: Cli) -> Result<String, Fail> {
             dry_run,
             base_revision,
         } => {
-            let commands = read_commands(file)?;
+            let mut commands = read_commands(file)?;
+            arc_cli::media::resolve_imports(path, &mut commands).map_err(Fail::from)?;
             let host = open(path, d)?;
             let r = host.apply(ApplyRequest {
                 commands,
@@ -268,16 +289,20 @@ fn run(cli: Cli) -> Result<String, Fail> {
             Ok(serde_json::to_string(&r).unwrap_or_default())
         }
         Cmd::Probe { media } => {
+            arc_media::tools::verify().map_err(|e| fail("ffmpeg_unavailable", e))?;
+            reject_non_local(media)?;
             Ok(outcome_json(&arc_media::probe::import_check(media)).to_string())
         }
         Cmd::Import { path, media } => {
             use arc_media::probe::ImportOutcome;
+            arc_media::tools::verify().map_err(|e| fail("ffmpeg_unavailable", e))?;
             let mut commands = Vec::new();
             let mut outcomes = Vec::new();
             for m in media {
+                reject_non_local(m)?;
                 let o = arc_media::probe::import_check(m);
                 outcomes.push(json!({"path": m, "result": outcome_json(&o)}));
-                let rel = project_relative(path, m);
+                let rel = arc_cli::media::project_relative(path, m);
                 let (kind, probe, status) = match o {
                     ImportOutcome::Ok { kind, probe } => {
                         (kind, Some(probe), arc_core::model::AssetStatus::Ok)
@@ -329,7 +354,8 @@ fn run(cli: Cli) -> Result<String, Fail> {
             snapshot,
         } => {
             let codec = arc_media::encode::VideoCodec::parse(codec)
-                .ok_or_else(|| fail("invalid_value", "codec must be ffv1, h264, av1, or prores"))?;
+                .ok_or_else(|| fail("invalid_value", "codec must be ffv1, h264, av1, prores, or dnxhd"))?;
+            arc_media::tools::verify().map_err(|e| fail("ffmpeg_unavailable", e))?;
             let project = match snapshot {
                 Some(s) => {
                     let bytes = std::fs::read(s).map_err(|e| fail("io_error", e))?;
@@ -407,3 +433,4 @@ fn main() -> ExitCode {
         }
     }
 }
+

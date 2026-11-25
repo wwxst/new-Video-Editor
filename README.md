@@ -5,7 +5,10 @@
 >
 > Built by a single developer with AI assistance. Windows-first, portable by design.
 
-**Status:** Architecture v2 (post-review) — pre-implementation. No source code yet.
+**Status:** Architecture v2 (post-review). Implementation in progress: Phases A and P are done, Phase B is
+functionally complete, the P0 audit defects are fixed, and FFmpeg 9.1 is the pinned media build (2026-11-25).
+Phase F has started. See [HANDOVER.md](HANDOVER.md) for the current state and the
+[implementation audit](reports/audit-2026-11-25-88e0707.md) (2026-11-25) for the remaining P2/P3 defects.
 **Base:** [architecture review](reports/architecture-review.md), 2026-11-24.
 
 ---
@@ -52,7 +55,9 @@ Embedded with live attach, human takeover, and full-editor embedding in agent cl
 | 12 | [Cross-Editor Project Export](docs/12-project-interchange.md) | FCPXML / FCP7 XML / OTIO export, target matrix, packaging, compatibility reports |
 | 13 | [Product Modes & Live Sessions](docs/13-product-modes-and-live-sessions.md) | Standalone/Embedded modes, integration levels L1–L3, native embedding and embed channel, local IPC, live attach, takeover, state sync, Agent panel |
 | ADR | [Decision Records](docs/adr/README.md) | Decisions with alternatives; revised after review |
+| Spec | [FFmpeg 9.1 Upgrade](docs/specs/ffmpeg-9.1-upgrade.md) | Boundaries, build, FFI compatibility, LGPL, security, tests, acceptance criteria |
 | — | [Architecture Review](reports/architecture-review.md) | Independent review that motivates v2 |
+| — | [Implementation Audit](reports/audit-2026-11-25-88e0707.md) | Independent audit of the code at `88e0707`: defects, documentation drift, risks |
 
 ---
 
@@ -82,7 +87,7 @@ Embedded with live attach, human takeover, and full-editor embedding in agent cl
 
 | Phase | Weeks | Exit criterion |
 |-------|-------|----------------|
-| **A Spine** | 1–3 | `arcline-cli render` transcode is frame-accurate; command property tests pass 10k sequences |
+| **A Spine** | 1–3 | Command property tests pass 10k sequences; timecode boundary tests pass; `new` + `apply` produce a valid container |
 | **P Embedding PoC** | 4 | egui + wgpu child window in Win32 and Electron hosts meets the go criteria (or no-go path chosen) |
 | **B Headless pipeline** | 5–9 | Import → trim → export works end-to-end from the CLI with hardware encode |
 | **C Compositor + shell** | 10–16 | 1080p preview ≥ 30 fps with 4 tracks and 8 effects; move/trim/split in the GUI |
@@ -109,8 +114,8 @@ Arcline/
 │   ├── arc-audio/          # cpal output, mixer, offline render
 │   ├── arc-app/            # egui shell, timeline/viewer canvases, app binary
 │   └── arc-cli/            # headless render, JSON-RPC/MCP server, utilities
-├── docs/                   # this proposal
-├── reports/                # architecture review
+├── docs/                   # this proposal; docs/specs/ holds implementation specs
+├── reports/                # architecture review, implementation audits
 └── assets/                 # icons, default LUT, fonts (licensed)
 ```
 

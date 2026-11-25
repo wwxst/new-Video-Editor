@@ -25,6 +25,8 @@ pub enum StoreError {
     Io { path: PathBuf, source: io::Error },
     #[error("project is open in another process ({0})")]
     Locked(PathBuf),
+    #[error("a project already exists at {0}")]
+    Exists(PathBuf),
     #[error("not an Arcline project: {0}")]
     BadContainer(String),
     #[error("checksum mismatch in {0}")]
@@ -83,10 +85,10 @@ impl ProjectPaths {
         let sidecar = container.with_file_name(name);
         ProjectPaths { container, sidecar }
     }
-    fn snapshot(&self, rev: u64) -> PathBuf {
+    pub fn snapshot(&self, rev: u64) -> PathBuf {
         self.sidecar.join(format!("snapshot-{rev}.json"))
     }
-    fn journal(&self, rev: u64) -> PathBuf {
+    pub fn journal(&self, rev: u64) -> PathBuf {
         self.sidecar.join(format!("journal-{rev}.bin"))
     }
     fn lock(&self) -> PathBuf {
@@ -308,8 +310,13 @@ pub struct ProjectStore {
     saved_revision: u64,
 }
 
-fn latest_snapshot(paths: &ProjectPaths) -> Option<(u64, Project)> {
-    let rd = fs::read_dir(&paths.sidecar).ok()?;
+fn latest_snapshot(
+    paths: &ProjectPaths,
+    expected_id: Option<&str>,
+) -> (Option<(u64, Project)>, bool) {
+    let Ok(rd) = fs::read_dir(&paths.sidecar) else {
+        return (None, false);
+    };
     let mut revs: Vec<u64> = rd
         .filter_map(|e| e.ok())
         .filter_map(|e| {
@@ -321,6 +328,7 @@ fn latest_snapshot(paths: &ProjectPaths) -> Option<(u64, Project)> {
         })
         .collect();
     revs.sort_unstable();
+    let mut foreign = false;
     for rev in revs.into_iter().rev() {
         let Ok(bytes) = fs::read(paths.snapshot(rev)) else {
             continue;
@@ -328,24 +336,83 @@ fn latest_snapshot(paths: &ProjectPaths) -> Option<(u64, Project)> {
         let Ok(s) = serde_json::from_slice::<SnapshotFile>(&bytes) else {
             continue;
         };
-        if s.revision == rev && s.project.canonical_hash() == s.hash {
-            return Some((rev, s.project));
+        if s.revision != rev || s.project.canonical_hash() != s.hash {
+            continue;
         }
+        // A sidecar can outlive the container it belonged to (audit F-05). Never recover a
+        // snapshot into a project whose identity differs.
+        if expected_id.is_some_and(|id| s.project.meta.id.as_str() != id) {
+            foreign = true;
+            continue;
+        }
+        return (Some((rev, s.project)), foreign);
     }
-    None
+    (None, foreign)
+}
+
+/// Move every sidecar file except the lock aside, so a stale autosave from another project cannot
+/// be recovered by the project being created here (audit F-05). Files are never deleted.
+fn move_stale_sidecar_aside(paths: &ProjectPaths) -> Result<bool, StoreError> {
+    let rd = fs::read_dir(&paths.sidecar).map_err(io_err(&paths.sidecar))?;
+    let mut names = Vec::new();
+    for e in rd {
+        let e = e.map_err(io_err(&paths.sidecar))?;
+        if e.file_name() == "session.lock" {
+            continue;
+        }
+        names.push(e.file_name());
+    }
+    if names.is_empty() {
+        return Ok(false);
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let base = paths
+        .sidecar
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "autosave".into());
+    let mut stale = paths.sidecar.with_file_name(format!("{base}.stale-{stamp}"));
+    let mut n = 1u32;
+    while stale.exists() {
+        stale = paths
+            .sidecar
+            .with_file_name(format!("{base}.stale-{stamp}-{n}"));
+        n += 1;
+    }
+    fs::create_dir(&stale).map_err(io_err(&stale))?;
+    for name in names {
+        let from = paths.sidecar.join(&name);
+        let to = stale.join(&name);
+        fs::rename(&from, &to).map_err(io_err(&from))?;
+    }
+    Ok(true)
 }
 
 impl ProjectStore {
     /// Create a new project on disk and open it.
+    ///
+    /// The session lock is taken **before** anything is written (audit F-04), and an existing
+    /// container is refused unless `overwrite` is set, so creating a project can never destroy a
+    /// saved project that another session has open.
     pub fn create(
         path: &Path,
         project: &Project,
         durability: Durability,
+        overwrite: bool,
     ) -> Result<ProjectStore, StoreError> {
         let paths = ProjectPaths::new(path);
-        save_container(path, project, 0)?;
         fs::create_dir_all(&paths.sidecar).map_err(io_err(&paths.sidecar))?;
         let lock = SessionLock::acquire(&paths.lock())?;
+        if !overwrite && path.exists() {
+            return Err(StoreError::Exists(path.to_path_buf()));
+        }
+        // Any sidecar at this path belongs to a project that predates this one; keep it, but move
+        // it out of the way so it can never be recovered as the new project (audit F-05).
+        move_stale_sidecar_aside(&paths)?;
+        save_container(path, project, 0)?;
         let mut store = ProjectStore {
             journal: JournalWriter::new(open_journal(&paths.journal(0), 0)?, 0, durability),
             paths,
@@ -365,7 +432,19 @@ impl ProjectStore {
         fs::create_dir_all(&paths.sidecar).map_err(io_err(&paths.sidecar))?;
         let lock = SessionLock::acquire(&paths.lock())?;
 
-        let snap = latest_snapshot(&paths);
+        let expected_id = container
+            .as_ref()
+            .ok()
+            .map(|(p, _)| p.meta.id.as_str().to_string());
+        let (snap, foreign) = latest_snapshot(&paths, expected_id.as_deref());
+        if container.is_ok() && foreign && snap.is_none() {
+            // No snapshot of this project was selected, so the sidecar belongs to a different
+            // project (the container was replaced outside the API). Keep the files for support,
+            // but never replay them (audit F-05). A foreign snapshot alongside a *matching* base
+            // is simply ignored by the id check; moving the sidecar would discard the matching
+            // snapshot's journal and lose its acknowledged records.
+            move_stale_sidecar_aside(&paths)?;
+        }
         let (base, base_revision, from_sidecar, saved_revision) = match (container, snap) {
             (Ok((_p, m)), Some((rev, sp))) if rev >= m.revision => {
                 (sp, rev, rev > m.revision, m.revision)
@@ -444,6 +523,30 @@ impl ProjectStore {
             let f = open_journal(&jpath, 0)?;
             self.journal = JournalWriter::new(f, 0, self.durability);
         }
+        if old != rev {
+            let _ = fs::remove_file(self.paths.snapshot(old));
+            let _ = fs::remove_file(self.paths.journal(old));
+        }
+        self.snapshot_rev = rev;
+        Ok(())
+    }
+
+    /// Rebuild the sidecar after a replay rejection: the snapshot is written at `rev` and the
+    /// journal at `rev` is replaced by an empty one **even when `rev` is unchanged**. Otherwise
+    /// new records would be appended behind the rejected record, with a duplicate revision, and the
+    /// next recovery would discard them too (audit F-01).
+    pub fn restart_journal(&mut self, project: &Project, rev: u64) -> Result<(), StoreError> {
+        let file = SnapshotFile {
+            revision: rev,
+            hash: project.canonical_hash(),
+            project: project.clone(),
+        };
+        let bytes = serde_json::to_vec(&file).map_err(|e| StoreError::Document(e.to_string()))?;
+        write_atomic(&self.paths.snapshot(rev), &bytes)?;
+        let jpath = self.paths.journal(rev);
+        let f = open_journal(&jpath, 0)?;
+        self.journal = JournalWriter::new(f, 0, self.durability);
+        let old = self.snapshot_rev;
         if old != rev {
             let _ = fs::remove_file(self.paths.snapshot(old));
             let _ = fs::remove_file(self.paths.journal(old));

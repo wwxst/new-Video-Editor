@@ -126,9 +126,15 @@ impl Session {
                     comment: Option<String>,
                 }
                 let a: P = params(p)?;
+                let project_path = self
+                    .path
+                    .clone()
+                    .ok_or_else(|| err(DOMAIN_ERROR, "no_project", "call project.open first"))?;
+                let mut commands = a.commands;
+                crate::media::resolve_imports(&project_path, &mut commands)?;
                 let r = self.host()?.apply(ApplyRequest {
                     base_revision: a.base_revision,
-                    commands: a.commands,
+                    commands,
                     dry_run: a.dry_run,
                     idempotency_key: a.idempotency_key,
                     source: self.source(),
@@ -224,6 +230,10 @@ impl Session {
             resolution: [u32; 2],
             #[serde(default = "fps")]
             frame_rate: String,
+            /// Replace an existing project file (default false; never replaces a project that is
+            /// open in another session).
+            #[serde(default)]
+            overwrite: bool,
         }
         fn untitled() -> String {
             "Untitled".into()
@@ -268,13 +278,16 @@ impl Session {
                         h: c.resolution[1],
                     },
                 );
-                EngineHost::create(&a.path, project, cat, d)
+                EngineHost::create(&a.path, project, cat, d, c.overwrite)
             }
             None => EngineHost::open(&a.path, cat, d),
         }
         .map_err(|e| match e {
             HostError::Store(arc_core::store::StoreError::Locked(_)) => {
                 err(DOMAIN_ERROR, "project_locked", e.to_string())
+            }
+            HostError::Store(arc_core::store::StoreError::Exists(_)) => {
+                err(DOMAIN_ERROR, "project_exists", e.to_string())
             }
             HostError::Command(c) => RpcError::from(c),
             other => err(DOMAIN_ERROR, "io_error", other.to_string()),

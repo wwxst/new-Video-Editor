@@ -8,6 +8,7 @@
 pub mod encode;
 pub mod fixtures;
 pub mod libav;
+pub mod paths;
 pub mod probe;
 pub mod tools;
 

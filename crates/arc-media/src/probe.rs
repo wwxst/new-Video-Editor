@@ -52,18 +52,24 @@ fn str_of<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str)
 }
 
-/// Run `ffprobe` and map its JSON to the document model.
+/// Run `ffprobe` and map its JSON to the document model. Inputs are passed as `file:` URLs with
+/// `protocol_whitelist=file` (spec §4.6), never as bare protocol strings.
 pub fn probe(path: &Path) -> Result<(AssetKind, Probe), String> {
-    let mut cmd = Command::new(tools::ffprobe());
+    let url = crate::paths::file_url(path).ok_or_else(|| "not a local media file".to_string())?;
+    let ffprobe = tools::ffprobe_checked()?;
+    let mut cmd = Command::new(ffprobe);
     cmd.args([
         "-v",
         "error",
-        "-print_format",
+        "-of",
         "json",
         "-show_format",
         "-show_streams",
+        "-protocol_whitelist",
+        "file",
+        "-i",
     ])
-    .arg(path);
+    .arg(&url);
     let out = tools::run(cmd, PROBE_TIMEOUT).map_err(|e| format!("cannot run ffprobe: {e}"))?;
     match out.exit {
         Exit::Ok => {}
@@ -162,14 +168,18 @@ pub fn parse_probe(v: &Value) -> Result<(AssetKind, Probe), String> {
     ))
 }
 
-fn test_decode(path: &Path, seek: Option<Time>) -> std::io::Result<tools::Output> {
-    let mut cmd = Command::new(tools::ffmpeg());
+fn test_decode(path: &Path, seek: Option<Time>) -> Result<tools::Output, String> {
+    let url = crate::paths::file_url(path).ok_or_else(|| "not a local media file".to_string())?;
+    let ffmpeg = tools::ffmpeg_checked()?;
+    let mut cmd = Command::new(ffmpeg);
     cmd.args(["-hide_banner", "-v", "error", "-nostdin"]);
     if let Some(t) = seek {
         cmd.args(["-ss", &format!("{:.6}", t.to_f64_lossy())]);
     }
-    cmd.arg("-i").arg(path).args(["-t", "1", "-f", "null", "-"]);
-    tools::run(cmd, PROBE_TIMEOUT)
+    cmd.args(["-protocol_whitelist", "file", "-i"])
+        .arg(&url)
+        .args(["-t", "1", "-f", "null", "-"]);
+    tools::run(cmd, PROBE_TIMEOUT).map_err(|e| e.to_string())
 }
 
 /// The subprocess import check (docs/04 §1.2 step 1): probe, then test-decode the start, the
@@ -222,9 +232,7 @@ pub fn import_check(path: &Path) -> ImportOutcome {
                 }
             },
             Err(e) => {
-                return ImportOutcome::Offline {
-                    reason: format!("cannot run ffmpeg: {e}"),
-                };
+                return ImportOutcome::Offline { reason: e };
             }
         }
     }

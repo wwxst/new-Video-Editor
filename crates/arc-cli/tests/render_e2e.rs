@@ -106,6 +106,24 @@ fn render_is_frame_exact_with_audio() {
     assert_eq!(report["frames"], json!(50));
     assert_eq!(report["encoder"], json!("ffv1"));
     assert_eq!(report["duration"], json!("00:00:01:20"));
+    // Run-time identity block (spec §4.5 / AC-3).
+    assert_eq!(
+        report["ffmpeg"]["license"],
+        json!("LGPL version 2.1 or later")
+    );
+    assert_eq!(report["ffmpeg"]["override"], json!(false));
+    assert!(
+        report["ffmpeg"]["ident"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("9.1")),
+        "{report}"
+    );
+    assert_eq!(report["ffmpeg"]["libraries"]["avcodec"], json!("63.24.100"));
+    assert_eq!(
+        report["ffmpeg"]["build_id"].as_str().map(str::len),
+        Some(64),
+        "manifest sha256"
+    );
     assert!(
         report["warnings"].as_array().is_some_and(Vec::is_empty),
         "{report}"
@@ -133,6 +151,118 @@ fn render_is_frame_exact_with_audio() {
     assert!(got >= 48_000, "{got}");
     let rms = (buf.iter().map(|s| s * s).sum::<f32>() / buf.len() as f32).sqrt();
     assert!(rms > 0.05, "tone survives the mix and mux (rms {rms})");
+}
+
+#[test]
+fn av1_and_prores_exports_are_decodable() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let p = build(dir.path());
+    let ps = p.to_str().expect("utf8");
+
+    // AV1 through libsvtav1 (the only software AV1 encoder in the shipped profile).
+    let av1 = dir.path().join("out_av1.mkv");
+    let (code, stdout, err) = cli(
+        &[
+            "render",
+            ps,
+            "-o",
+            av1.to_str().expect("utf8"),
+            "--codec",
+            "av1",
+            "--from",
+            "00:00:00:00",
+            "--to",
+            "00:00:00:10",
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{stdout} {err}");
+    let r = j(&stdout);
+    let av1_encoder = r["encoder"].as_str().unwrap_or_default();
+    assert!(
+        ["av1_qsv", "av1_nvenc", "av1_amf", "libsvtav1"].contains(&av1_encoder),
+        "{av1_encoder} ({r})"
+    );
+    let mut d = VideoDecoder::open(&av1).expect("decode av1");
+    let f = d.frame_at(arc_core::Time::ZERO).expect("av1 frame");
+    assert_eq!((f.width, f.height), (320, 180));
+
+    // ProRes (prores_ks) is decodable by the same decoder.
+    let pro = dir.path().join("out_prores.mov");
+    let (code, stdout, err) = cli(
+        &[
+            "render",
+            ps,
+            "-o",
+            pro.to_str().expect("utf8"),
+            "--codec",
+            "prores",
+            "--from",
+            "00:00:00:00",
+            "--to",
+            "00:00:00:10",
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{stdout} {err}");
+    assert_eq!(j(&stdout)["encoder"], json!("prores_ks"));
+    let mut d = VideoDecoder::open(&pro).expect("decode prores");
+    let f = d.frame_at(arc_core::Time::ZERO).expect("prores frame");
+    assert_eq!((f.width, f.height), (320, 180));
+}
+
+/// Spec §8.4: DNxHD exports (SMPTE VC-3) produce decodable files. The DNxHD encoder only accepts
+/// the standard VC-3 frame sizes, so this uses a 1920x1080 project.
+#[test]
+fn dnxhd_exports_are_decodable() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let media = dir.path().join("counter1080.mkv");
+    write_counter_video(
+        &media,
+        15,
+        FrameRate::Fps30.rate(),
+        1920,
+        1080,
+        false,
+    )
+    .expect("fixture");
+    let p = dir.path().join("dnx.arcline");
+    let ps = p.to_str().expect("utf8");
+    let (code, out, err) = cli(
+        &["new", ps, "--fps", "30", "--res", "1920x1080", "--name", "DNx"],
+        None,
+    );
+    assert_eq!(code, 0, "{out} {err}");
+    let batch = json!([
+        {"op":"asset.import","id":"as_d","path":media.to_str().expect("utf8"),"kind":"video"},
+        {"op":"track.add","id":"tr_v1","kind":"video"},
+        {"op":"timeline.add_clip","id":"cl_d","track":"tr_v1","asset":"as_d","start":"00:00:00:00","duration":"00:00:00:10"}
+    ]);
+    let (code, out, err) = cli(&["apply", ps], Some(&batch.to_string()));
+    assert_eq!(code, 0, "{out} {err}");
+
+    let output = dir.path().join("out.mov");
+    let (code, stdout, err) = cli(
+        &[
+            "render",
+            ps,
+            "-o",
+            output.to_str().expect("utf8"),
+            "--codec",
+            "dnxhd",
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{stdout} {err}");
+    let r = j(&stdout);
+    assert_eq!(r["encoder"], json!("dnxhd"), "{r}");
+    assert_eq!(r["frames"], json!(10));
+    assert_eq!(r["ffmpeg"]["override"], json!(false));
+
+    let mut d = VideoDecoder::open(&output).expect("decode dnxhd output");
+    assert_eq!((d.info().width, d.info().height), (1920, 1080));
+    let f = d.frame_at(arc_core::Time::ZERO).expect("dnxhd frame");
+    assert_eq!((f.width, f.height), (1920, 1080));
 }
 
 #[test]

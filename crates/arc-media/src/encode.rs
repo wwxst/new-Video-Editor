@@ -22,6 +22,9 @@ pub enum VideoCodec {
     H264,
     Av1,
     ProRes,
+    /// SMPTE VC-3 / DNxHD (89/145/220 Mbit/s family; the encoder picks the profile from the size
+    /// and the 36 Mbit/s rate used here).
+    DnxHd,
 }
 
 impl VideoCodec {
@@ -31,6 +34,7 @@ impl VideoCodec {
             "h264" => Some(VideoCodec::H264),
             "av1" => Some(VideoCodec::Av1),
             "prores" => Some(VideoCodec::ProRes),
+            "dnxhd" => Some(VideoCodec::DnxHd),
             _ => None,
         }
     }
@@ -48,6 +52,7 @@ impl VideoCodec {
             ],
             VideoCodec::Av1 => &["av1_nvenc", "av1_qsv", "av1_amf", "libsvtav1"],
             VideoCodec::ProRes => &["prores_ks"],
+            VideoCodec::DnxHd => &["dnxhd"],
         }
     }
 
@@ -56,6 +61,7 @@ impl VideoCodec {
             VideoCodec::Ffv1 => "bgr0",
             VideoCodec::H264 | VideoCodec::Av1 => "yuv420p",
             VideoCodec::ProRes => "yuv422p10le",
+            VideoCodec::DnxHd => "yuv422p",
         }
     }
 
@@ -114,6 +120,12 @@ pub enum EncodeError {
 }
 
 fn trial(encoder: &str, codec: VideoCodec) -> bool {
+    // DNxHD only accepts the SMPTE VC-3 frame sizes (1920x1080 etc.), so its trial uses one; the
+    // other candidates can be tried cheaply at 256x144.
+    let size = match codec {
+        VideoCodec::DnxHd => "1920x1080",
+        _ => "256x144",
+    };
     let mut cmd = Command::new(tools::ffmpeg());
     cmd.args([
         "-hide_banner",
@@ -123,17 +135,13 @@ fn trial(encoder: &str, codec: VideoCodec) -> bool {
         "-f",
         "lavfi",
         "-i",
-        "color=c=gray:s=256x144:d=0.2:r=30",
+        &format!("color=c=gray:s={size}:d=0.2:r=30"),
     ])
-    .args([
-        "-c:v",
-        encoder,
-        "-pix_fmt",
-        codec.pix_fmt(),
-        "-f",
-        "null",
-        "-",
-    ]);
+    .args(["-c:v", encoder, "-pix_fmt", codec.pix_fmt()]);
+    if codec == VideoCodec::DnxHd {
+        cmd.args(["-b:v", "36M"]);
+    }
+    cmd.args(["-f", "null", "-"]);
     matches!(
         tools::run(cmd, Duration::from_secs(30)).map(|o| o.exit),
         Ok(Exit::Ok)
@@ -142,6 +150,7 @@ fn trial(encoder: &str, codec: VideoCodec) -> bool {
 
 /// Pick the first candidate that is compiled in and actually encodes on this machine (cached).
 pub fn select_encoder(codec: VideoCodec) -> Result<String, EncodeError> {
+    tools::verify().map_err(EncodeError::Failed)?;
     static CACHE: OnceLock<Mutex<std::collections::HashMap<VideoCodec, Option<String>>>> =
         OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
@@ -192,8 +201,10 @@ impl std::fmt::Debug for Encoder {
 impl Encoder {
     pub fn start(spec: EncodeSpec) -> Result<Encoder, EncodeError> {
         let encoder = select_encoder(spec.codec)?;
-        let mut cmd = Command::new(tools::ffmpeg());
+        let ffmpeg = tools::ffmpeg_checked().map_err(EncodeError::Failed)?;
+        let mut cmd = Command::new(ffmpeg);
         cmd.args(["-hide_banner", "-v", "error", "-y"])
+            .args(["-protocol_whitelist", "pipe"])
             .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
             .args(["-s", &format!("{}x{}", spec.width, spec.height)])
             .args(["-framerate", &spec.frame_rate.to_string()])
@@ -201,7 +212,10 @@ impl Encoder {
         let has_audio = match &spec.audio {
             AudioInput::None => false,
             AudioInput::Wav(p) => {
-                cmd.arg("-i").arg(p);
+                let url = crate::paths::file_url(p).ok_or_else(|| {
+                    EncodeError::Failed(format!("audio input is not a local file: {}", p.display()))
+                })?;
+                cmd.args(["-protocol_whitelist", "file", "-i"]).arg(url);
                 true
             }
             AudioInput::Lavfi(src) => {
@@ -233,13 +247,23 @@ impl Encoder {
             VideoCodec::ProRes => {
                 cmd.args(["-profile:v", "3"]);
             }
+            VideoCodec::DnxHd => {
+                // SMPTE VC-3: the DNxHD profile follows from the frame size and this rate.
+                cmd.args(["-b:v", "36M"]);
+            }
             _ => {}
         }
         let audio_codec = has_audio.then(|| spec.codec.audio_codec(&spec.output).to_string());
         if let Some(ac) = &audio_codec {
             cmd.args(["-c:a", ac]);
         }
-        cmd.arg(&spec.output)
+        let out_url = crate::paths::output_file_url(&spec.output).ok_or_else(|| {
+            EncodeError::Failed(format!(
+                "output is not a local path in an existing directory: {}",
+                spec.output.display()
+            ))
+        })?;
+        cmd.arg(out_url)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());

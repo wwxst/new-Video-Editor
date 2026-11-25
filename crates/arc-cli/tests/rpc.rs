@@ -146,6 +146,90 @@ fn session_semantics() {
     assert_eq!(ip["error"]["code"], json!(-32602));
 }
 
+/// Audit F-04: creation takes the lock before writing and refuses an existing container unless
+/// `create.overwrite` is true; both map to stable error kinds.
+#[test]
+fn create_refuses_locked_and_existing_projects() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("lock.arcline");
+    let create = |name: &str| {
+        json!({"path": path, "create": {"name": name, "frame_rate": "30", "resolution": [160, 90]}})
+    };
+    let mut a = Rpc::start();
+    a.ok("project.open", create("PROJECT A"));
+    a.ok("project.save", json!({}));
+
+    let mut b = Rpc::start();
+    assert_eq!(b.kind("project.open", create("PROJECT B")), "project_locked");
+    let mut overwrite = create("PROJECT B");
+    overwrite["create"]["overwrite"] = json!(true);
+    assert_eq!(
+        b.kind("project.open", overwrite),
+        "project_locked",
+        "overwrite must never break another session's lock"
+    );
+
+    drop(a); // kill the session; the lock is released with the process
+    let mut c = Rpc::start();
+    assert_eq!(
+        c.kind("project.open", create("PROJECT B")),
+        "project_exists"
+    );
+    let mut overwrite = create("PROJECT B");
+    overwrite["create"]["overwrite"] = json!(true);
+    let r = c.ok("project.open", overwrite);
+    assert_eq!(r["summary"]["project"]["name"], json!("PROJECT B"));
+    assert_eq!(r["revision"], json!(0));
+    c.ok("project.save", json!({}));
+}
+
+/// Audit F-09: `project.apply` runs the import check itself (docs/06 §4.1) and rejects URL paths.
+#[test]
+fn apply_checks_client_imports_and_rejects_urls() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let media = dir.path().join("media").join("counter.mkv");
+    std::fs::create_dir_all(media.parent().expect("parent")).expect("mkdir");
+    arc_media::fixtures::write_counter_video(
+        &media,
+        90,
+        arc_core::FrameRate::Fps30.rate(),
+        160,
+        90,
+        false,
+    )
+    .expect("fixture");
+    let path = dir.path().join("imp.arcline");
+    let mut s = Rpc::start();
+    s.ok(
+        "project.open",
+        json!({"path": path, "create": {"frame_rate": "30", "resolution": [160, 90]}}),
+    );
+
+    let url = json!({"commands": [{"op":"asset.import","path":"handle:1","kind":"video","status":"ok"}]});
+    assert_eq!(s.kind("project.apply", url), "invalid_value");
+    let device = json!({"commands": [{"op":"asset.import","path":"//./pipe/arcline","kind":"video","status":"ok"}]});
+    assert_eq!(s.kind("project.apply", device), "invalid_value");
+    assert_eq!(s.ok("project.describe", json!({}))["assets"], json!([]));
+
+    let r = s.ok(
+        "project.apply",
+        json!({"commands": [{
+            "op":"asset.import",
+            "path": media.to_str().expect("utf8"),
+            "kind":"audio",
+            "status":"offline",
+            "probe":{"duration":{"num":1,"den":1}}
+        }]}),
+    );
+    assert_eq!(r["revision"], json!(1));
+    let d = s.ok("project.describe", json!({}));
+    let a = &d["assets"][0];
+    assert_eq!(a["status"], json!("ok"), "client status ignored");
+    assert_eq!(a["kind"], json!("video"), "client kind ignored");
+    assert_eq!(a["path"], json!("media/counter.mkv"));
+    assert_eq!(a["duration"], json!("00:00:03:00"), "client probe ignored");
+}
+
 #[test]
 fn render_job_runs_out_of_process() {
     let dir = tempfile::tempdir().expect("tmp");

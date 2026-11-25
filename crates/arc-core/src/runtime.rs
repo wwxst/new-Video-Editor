@@ -117,8 +117,9 @@ impl EngineHost {
         project: Project,
         catalog: Arc<dyn EffectCatalog>,
         durability: Durability,
+        overwrite: bool,
     ) -> Result<EngineHost, HostError> {
-        let store = ProjectStore::create(path, &project, durability)?;
+        let store = ProjectStore::create(path, &project, durability, overwrite)?;
         let engine = Engine::new(project, 0, catalog)?;
         let report = RecoveryReport {
             recovered: false,
@@ -149,15 +150,25 @@ impl EngineHost {
             }
             replayed += 1;
         }
+        let discarded = opened.tail.is_some() || !rejected.is_empty();
         if !rejected.is_empty() {
+            // Keep the untrusted journal bytes for support, then start a clean journal at the
+            // recovered revision. This must truncate even when the revision did not change:
+            // appending behind the rejected record would lose the new edits at the next open
+            // (audit F-01; docs/08 §4.6).
+            let jpath = store.paths().journal(store.snapshot_revision());
+            if let Ok(bytes) = std::fs::read(&jpath) {
+                // Distinct from the torn-tail evidence that `ProjectStore::open` writes to
+                // `journal-<rev>.bin.rejected`; both may occur in the same recovery.
+                let _ = std::fs::write(jpath.with_extension("bin.replay-rejected"), &bytes);
+            }
             let p = store
                 .paths()
                 .sidecar
                 .join(format!("replay-rejected-{}.json", engine.revision()));
             let _ = std::fs::write(&p, serde_json::to_vec_pretty(&rejected).unwrap_or_default());
-        }
-        let discarded = opened.tail.is_some() || !rejected.is_empty();
-        if replayed > 0 || discarded {
+            store.restart_journal(&engine.snapshot(), engine.revision())?;
+        } else if replayed > 0 || discarded {
             // start a clean journal at the recovered revision
             store.write_snapshot(&engine.snapshot(), engine.revision())?;
         }

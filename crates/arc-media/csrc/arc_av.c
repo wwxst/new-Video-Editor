@@ -12,6 +12,7 @@
  */
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
@@ -19,6 +20,17 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+
+/* Compile-time version pin (spec docs/specs/ffmpeg-9.1-upgrade.md §4.3). The shim is written for
+ * FFmpeg 9.x only; build.rs gives the friendlier message, this is the backstop. */
+#if LIBAVUTIL_VERSION_MAJOR != 61 || LIBAVCODEC_VERSION_MAJOR != 63 || \
+    LIBAVFORMAT_VERSION_MAJOR != 63 || LIBSWSCALE_VERSION_MAJOR != 10 || \
+    LIBSWRESAMPLE_VERSION_MAJOR != 7
+#error "arc_av requires FFmpeg 9.x headers (lavu 61, lavc 63, lavf 63, sws 10, swr 7); see docs/specs/ffmpeg-9.1-upgrade.md"
+#endif
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(63, 24, 100) || LIBAVFORMAT_VERSION_INT < AV_VERSION_INT(63, 16, 100)
+#error "arc_av requires FFmpeg 9.1 or newer within the 9.x series"
+#endif
 
 typedef struct ArcAv {
     AVFormatContext *fmt;
@@ -32,8 +44,11 @@ typedef struct ArcAv {
     int is_audio;
     struct SwsContext *sws;
     int sws_w, sws_h, sws_fmt;
+    int dst_w, dst_h;     /* stream dimensions reported in ArcAvInfo: the RGBA destination size */
     struct SwrContext *swr;
     int out_rate;
+    int swr_in_fmt, swr_in_rate;  /* input parameters of the current resampler */
+    AVChannelLayout swr_in_layout;
     int64_t last_pts;     /* pts of the last delivered video frame, INT64_MIN if none */
     int eof_sent;
     /* buffered resampled audio (interleaved stereo f32) */
@@ -54,6 +69,42 @@ typedef struct ArcAvInfo {
     char pix_fmt[32];
 } ArcAvInfo;
 
+/* Run-time identity of the loaded libraries (spec §4.5). Signatures are part of the FFI. */
+typedef struct ArcAvRuntime {
+    unsigned build[5];    /* LIB*_VERSION_INT at compile time: avutil, avcodec, avformat, swscale, swresample */
+    unsigned runtime[5];  /* avutil_version(), avcodec_version(), ... at run time */
+    char license[5][48];  /* av*_license() */
+    char ident[64];       /* av_version_info(), e.g. "n9.1" */
+} ArcAvRuntime;
+
+int arc_av_abi_size(void) { return (int)sizeof(ArcAvInfo); }
+
+static void copy_str(char *dst, size_t len, const char *src) {
+    snprintf(dst, len, "%s", src ? src : "");
+}
+
+int arc_av_runtime(ArcAvRuntime *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    out->build[0] = LIBAVUTIL_VERSION_INT;
+    out->build[1] = LIBAVCODEC_VERSION_INT;
+    out->build[2] = LIBAVFORMAT_VERSION_INT;
+    out->build[3] = LIBSWSCALE_VERSION_INT;
+    out->build[4] = LIBSWRESAMPLE_VERSION_INT;
+    out->runtime[0] = avutil_version();
+    out->runtime[1] = avcodec_version();
+    out->runtime[2] = avformat_version();
+    out->runtime[3] = swscale_version();
+    out->runtime[4] = swresample_version();
+    copy_str(out->license[0], sizeof out->license[0], avutil_license());
+    copy_str(out->license[1], sizeof out->license[0], avcodec_license());
+    copy_str(out->license[2], sizeof out->license[0], avformat_license());
+    copy_str(out->license[3], sizeof out->license[0], swscale_license());
+    copy_str(out->license[4], sizeof out->license[0], swresample_license());
+    copy_str(out->ident, sizeof out->ident, av_version_info());
+    return 0;
+}
+
 static void set_err(char *err, int len, const char *what, int code) {
     if (!err || len <= 0) return;
     char buf[256] = {0};
@@ -65,6 +116,7 @@ void arc_av_close(ArcAv *a) {
     if (!a) return;
     if (a->sws) sws_freeContext(a->sws);
     if (a->swr) swr_free(&a->swr);
+    av_channel_layout_uninit(&a->swr_in_layout);
     if (a->held) av_frame_free(&a->held);
     if (a->cur) av_frame_free(&a->cur);
     if (a->frame) av_frame_free(&a->frame);
@@ -79,11 +131,26 @@ void arc_av_close(ArcAv *a) {
 int arc_av_open(const char *path, int kind, int threads, ArcAv **out, char *err, int errlen) {
     *out = NULL;
     av_log_set_level(AV_LOG_ERROR);
+    /* Only local files: the caller builds `file:` URLs from canonical paths, and the whitelist is
+     * inherited by nested opens (playlists, references). Rejects http:, handle:, concat:, ... even
+     * if a binary contains those protocols (audit F-09, spec S1). */
+    if (!path || strncmp(path, "file:", 5) != 0) {
+        set_err(err, errlen, "open: only local file: paths are allowed", 0);
+        return -1;
+    }
     ArcAv *a = av_mallocz(sizeof *a);
     if (!a) { set_err(err, errlen, "out of memory", 0); return -1; }
     a->last_pts = INT64_MIN;
     a->is_audio = kind == 1;
-    int r = avformat_open_input(&a->fmt, path, NULL, NULL);
+    AVDictionary *opts = NULL;
+    if (av_dict_set(&opts, "protocol_whitelist", "file", 0) < 0) {
+        set_err(err, errlen, "open: out of memory", 0);
+        av_dict_free(&opts);
+        av_free(a);
+        return -1;
+    }
+    int r = avformat_open_input(&a->fmt, path, NULL, &opts);
+    av_dict_free(&opts);
     if (r < 0) { set_err(err, errlen, "open", r); arc_av_close(a); return -1; }
     r = avformat_find_stream_info(a->fmt, NULL);
     if (r < 0) { set_err(err, errlen, "find_stream_info", r); arc_av_close(a); return -1; }
@@ -97,6 +164,11 @@ int arc_av_open(const char *path, int kind, int threads, ArcAv **out, char *err,
     if (!a->dec) { set_err(err, errlen, "alloc codec context", 0); arc_av_close(a); return -1; }
     r = avcodec_parameters_to_context(a->dec, a->fmt->streams[a->stream]->codecpar);
     if (r < 0) { set_err(err, errlen, "codec parameters", r); arc_av_close(a); return -1; }
+    /* The buffer Rust allocates is the size reported by arc_av_info (the stream's codec
+     * parameters), so every decoded frame is scaled to exactly this size. Frames can change size
+     * mid-stream (audit F-02). */
+    a->dst_w = a->fmt->streams[a->stream]->codecpar->width;
+    a->dst_h = a->fmt->streams[a->stream]->codecpar->height;
     a->dec->thread_count = threads;
     a->dec->pkt_timebase = a->fmt->streams[a->stream]->time_base;
     r = avcodec_open2(a->dec, codec, NULL);
@@ -169,9 +241,12 @@ static int64_t frame_pts(const AVFrame *f) {
 }
 
 static int to_rgba(ArcAv *a, const AVFrame *f, uint8_t *dst, int stride) {
+    if (a->dst_w <= 0 || a->dst_h <= 0) return -1;
+    /* `dst` holds dst_h rows of dst_w RGBA pixels; a smaller stride would overflow every row. */
+    if (stride < a->dst_w * 4) return -1;
     if (!a->sws || a->sws_w != f->width || a->sws_h != f->height || a->sws_fmt != f->format) {
         if (a->sws) sws_freeContext(a->sws);
-        a->sws = sws_getContext(f->width, f->height, f->format, f->width, f->height, AV_PIX_FMT_RGBA,
+        a->sws = sws_getContext(f->width, f->height, f->format, a->dst_w, a->dst_h, AV_PIX_FMT_RGBA,
                                 SWS_BICUBIC | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT, NULL, NULL, NULL);
         if (!a->sws) return -1;
         a->sws_w = f->width;
@@ -184,7 +259,8 @@ static int to_rgba(ArcAv *a, const AVFrame *f, uint8_t *dst, int stride) {
     }
     uint8_t *planes[4] = {dst, NULL, NULL, NULL};
     int strides[4] = {stride, 0, 0, 0};
-    return sws_scale(a->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, planes, strides) > 0 ? 0 : -1;
+    /* Scale to the reported size even when the frame itself changed size or format. */
+    return sws_scale(a->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, planes, strides) == a->dst_h ? 0 : -1;
 }
 
 /*
@@ -256,24 +332,6 @@ int arc_av_video_at(ArcAv *a, int64_t target_pts, uint8_t *dst, int stride, int6
 
 /* ---- audio ---------------------------------------------------------------------------------- */
 
-static int ensure_swr(ArcAv *a, const AVFrame *f, int out_rate) {
-    if (a->swr && a->out_rate == out_rate) return 0;
-    if (a->swr) swr_free(&a->swr);
-    AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
-    AVChannelLayout in;
-    if (av_channel_layout_copy(&in, &f->ch_layout) < 0 || in.nb_channels == 0) av_channel_layout_default(&in, 2);
-    int r = swr_alloc_set_opts2(&a->swr, &stereo, AV_SAMPLE_FMT_FLT, out_rate, &in, f->format, f->sample_rate, 0, NULL);
-    av_channel_layout_uninit(&in);
-    if (r < 0) return r;
-    /* high quality, deterministic resampler */
-    av_opt_set_int(a->swr, "filter_size", 32, 0);
-    av_opt_set_int(a->swr, "phase_shift", 10, 0);
-    r = swr_init(a->swr);
-    if (r < 0) return r;
-    a->out_rate = out_rate;
-    return 0;
-}
-
 static int abuf_push(ArcAv *a, int frames) {
     int need = (a->abuf_len + frames) * 2;
     if (need > a->abuf_cap) {
@@ -283,6 +341,58 @@ static int abuf_push(ArcAv *a, int frames) {
         a->abuf = n;
         a->abuf_cap = cap;
     }
+    return 0;
+}
+
+/* Flush the samples still buffered inside the current resampler into `abuf`, so a rebuild on an
+ * input parameter change does not create a gap or repeat samples (F-03). */
+static int swr_drain(ArcAv *a) {
+    if (!a->swr) return 0;
+    int maxo = swr_get_out_samples(a->swr, 0);
+    if (maxo <= 0) return 0;
+    if (abuf_push(a, maxo) < 0) return AVERROR(ENOMEM);
+    uint8_t *outp = (uint8_t *)(a->abuf + (size_t)a->abuf_len * 2);
+    int got = swr_convert(a->swr, &outp, maxo, NULL, 0);
+    if (got < 0) return got;
+    a->abuf_len += got;
+    return 0;
+}
+
+/*
+ * Configure the resampler for this frame's input parameters. Any change of format, sample rate or
+ * channel layout rebuilds it, and the old one is drained first: frames can change parameters
+ * mid-stream and feeding a mono frame to a stereo resampler is invalid (audit F-03).
+ */
+static int ensure_swr(ArcAv *a, const AVFrame *f, int out_rate) {
+    /* av_channel_layout_copy() frees the destination first: it must be zero-initialised. */
+    AVChannelLayout in = {0};
+    if (av_channel_layout_copy(&in, &f->ch_layout) < 0) return AVERROR(ENOMEM);
+    if (in.nb_channels == 0) av_channel_layout_default(&in, 2);
+    if (a->swr && a->out_rate == out_rate && a->swr_in_fmt == f->format &&
+        a->swr_in_rate == f->sample_rate && av_channel_layout_compare(&a->swr_in_layout, &in) == 0) {
+        av_channel_layout_uninit(&in);
+        return 0;
+    }
+    if (a->swr) {
+        int d = swr_drain(a);
+        if (d < 0) { av_channel_layout_uninit(&in); return d; }
+        swr_free(&a->swr);
+    }
+    av_channel_layout_uninit(&a->swr_in_layout);
+    AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
+    int r = swr_alloc_set_opts2(&a->swr, &stereo, AV_SAMPLE_FMT_FLT, out_rate, &in, f->format, f->sample_rate, 0, NULL);
+    if (r >= 0) {
+        /* high quality, deterministic resampler */
+        av_opt_set_int(a->swr, "filter_size", 32, 0);
+        av_opt_set_int(a->swr, "phase_shift", 10, 0);
+        r = swr_init(a->swr);
+    }
+    if (r >= 0) r = av_channel_layout_copy(&a->swr_in_layout, &in);
+    av_channel_layout_uninit(&in);
+    if (r < 0) { swr_free(&a->swr); return r; }
+    a->swr_in_fmt = f->format;
+    a->swr_in_rate = f->sample_rate;
+    a->out_rate = out_rate;
     return 0;
 }
 
@@ -344,7 +454,6 @@ int arc_av_audio_read(ArcAv *a, int out_rate, int64_t start, int frames, float *
         int r = next_frame(a, err, errlen);
         if (r < 0) return r;
         if (r == 1) break;
-        if (ensure_swr(a, a->frame, out_rate) < 0) { set_err(err, errlen, "resampler", 0); return -1; }
         if (a->audio_next_sample < 0) {
             AVStream *s = a->fmt->streams[a->stream];
             int64_t pts = frame_pts(a->frame);
@@ -352,6 +461,8 @@ int arc_av_audio_read(ArcAv *a, int out_rate, int64_t start, int frames, float *
             a->audio_next_sample = pts == AV_NOPTS_VALUE ? 0 : av_rescale_q(pts - base, s->time_base, (AVRational){1, out_rate});
             if (a->audio_next_sample < 0) a->audio_next_sample = 0;
         }
+        /* May drain the previous resampler into abuf before rebuilding it. */
+        if (ensure_swr(a, a->frame, out_rate) < 0) { set_err(err, errlen, "resampler", 0); return -1; }
         int maxo = swr_get_out_samples(a->swr, a->frame->nb_samples);
         if (abuf_push(a, maxo) < 0) { set_err(err, errlen, "out of memory", 0); return -1; }
         uint8_t *outp = (uint8_t *)(a->abuf + (size_t)a->abuf_len * 2);

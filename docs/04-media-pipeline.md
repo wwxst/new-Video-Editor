@@ -74,6 +74,13 @@ file.
 The child processes are invoked with argument vectors, never shell strings, and only with paths that have
 passed the root allow-list.
 
+**The import check is a filter, not a guarantee** (clarified 2026-11-25, [audit](../reports/audit-2026-11-25-88e0707.md)
+F-02/F-03). The `ffmpeg` CLI reconfigures its filters when frame size, pixel format or channel layout change
+mid-stream; the in-process shim must do the same, or files that pass the check can still crash it. The shim
+therefore never sizes buffers or configures converters from stream parameters alone, and it opens only
+local `file:` URLs with `protocol_whitelist=file`, because asset paths in documents are untrusted input
+(F-09).
+
 ## 2. Probe
 
 - On import: shallow probe (container + stream headers) → enough to place the clip.
@@ -184,3 +191,16 @@ Ship a **custom FFmpeg build pinned to LGPLv2.1-compatible components only** (no
 linked, with the LGPL compliance package (source, build scripts, relink instructions). H.264/HEVC encoding
 uses hardware encoders only; AV1 (SVT-AV1, BSD) is the royalty-free default for software encoding. This
 constrains Phase B deliverables and is a business decision, not a technical one.
+
+**Version pin (2026-11-25).** Development and release use **FFmpeg 9.1 "Gauss"**, built from the
+verified official tarball by the in-repo recipe in [third_party/ffmpeg](../../third_party/ffmpeg)
+(decision D1: LGPL version 2.1 or later; no GPL, nonfree, version-3 libraries or `libopenh264`;
+D2: no Media Foundation). The build has no network protocols and no Windows `handle:`/`libcurl`
+protocol — only `file` and `pipe` — and drops the HLS/DASH/concat demuxers and the tee/segment
+muxers ([spec §5.3](specs/ffmpeg-9.1-upgrade.md)). The shim and `build.rs` pin the ABI (lavu 61,
+lavc 63, lavf 63, sws 10, swr 7); the process checks the loaded version and licence at run time and
+refuses a mismatched build unless `ARCLINE_ALLOW_ANY_FFMPEG=1` is set for development (recorded in
+export reports). The previous 8.1.3 package stays installed for rollback (spec §11); audit F-20 and
+F-21 are closed by the build manifest, the compile-time pin and the runtime check.
+`scripts/dev-env.sh` prefers the 9.1 package and can be pointed at 8.1.3 with
+`ARCLINE_FFMPEG_DIR`.

@@ -6,7 +6,7 @@ with the migration function name and its test fixture.
 
 | Schema | Date | Change | Migration | Fixture |
 |---|---|---|---|---|
-| 7 | 2026-11-24 | Baseline for this proposal: sequences, tracks, clips, keyframed effect params, transitions, subtitles, masters | — | `fixtures/schema/v7_min.arcline` |
+| 7 | 2026-11-24 | Baseline for this proposal: sequences, tracks, clips, keyframed effect params, transitions, subtitles, masters | — | `fixtures/schema/v7_min.arcline` (planned; not committed yet; `.gitignore` excludes `*.arcline` and needs a negation rule for `fixtures/`) |
 
 Rules for contributors:
 

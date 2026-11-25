@@ -83,10 +83,10 @@ impl ProjectPaths {
         let sidecar = container.with_file_name(name);
         ProjectPaths { container, sidecar }
     }
-    fn snapshot(&self, rev: u64) -> PathBuf {
+    pub fn snapshot(&self, rev: u64) -> PathBuf {
         self.sidecar.join(format!("snapshot-{rev}.json"))
     }
-    fn journal(&self, rev: u64) -> PathBuf {
+    pub fn journal(&self, rev: u64) -> PathBuf {
         self.sidecar.join(format!("journal-{rev}.bin"))
     }
     fn lock(&self) -> PathBuf {
@@ -444,6 +444,30 @@ impl ProjectStore {
             let f = open_journal(&jpath, 0)?;
             self.journal = JournalWriter::new(f, 0, self.durability);
         }
+        if old != rev {
+            let _ = fs::remove_file(self.paths.snapshot(old));
+            let _ = fs::remove_file(self.paths.journal(old));
+        }
+        self.snapshot_rev = rev;
+        Ok(())
+    }
+
+    /// Rebuild the sidecar after a replay rejection: the snapshot is written at `rev` and the
+    /// journal at `rev` is replaced by an empty one **even when `rev` is unchanged**. Otherwise
+    /// new records would be appended behind the rejected record, with a duplicate revision, and the
+    /// next recovery would discard them too (audit F-01).
+    pub fn restart_journal(&mut self, project: &Project, rev: u64) -> Result<(), StoreError> {
+        let file = SnapshotFile {
+            revision: rev,
+            hash: project.canonical_hash(),
+            project: project.clone(),
+        };
+        let bytes = serde_json::to_vec(&file).map_err(|e| StoreError::Document(e.to_string()))?;
+        write_atomic(&self.paths.snapshot(rev), &bytes)?;
+        let jpath = self.paths.journal(rev);
+        let f = open_journal(&jpath, 0)?;
+        self.journal = JournalWriter::new(f, 0, self.durability);
+        let old = self.snapshot_rev;
         if old != rev {
             let _ = fs::remove_file(self.paths.snapshot(old));
             let _ = fs::remove_file(self.paths.journal(old));

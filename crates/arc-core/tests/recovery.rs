@@ -1,0 +1,127 @@
+//! Recovery regressions (audit F-01, F-04, F-05; docs/08 §4.6).
+
+mod common;
+
+use arc_core::effects::StaticCatalog;
+use arc_core::engine::{ApplyRequest, ApplyResult, Source};
+use arc_core::ids::{AssetId, ClipId, EffectId, TrackId};
+use arc_core::journal::Durability;
+use arc_core::model::{AssetKind, TrackKind};
+use arc_core::runtime::EngineHost;
+use arc_core::{Command, FrameRate, TimeInput};
+use common::*;
+use std::sync::Arc;
+
+fn empty_catalog() -> Arc<StaticCatalog> {
+    Arc::new(StaticCatalog::new(std::iter::empty()))
+}
+
+fn track() -> TrackId {
+    TrackId::parse("tr_v1").expect("track id")
+}
+fn asset() -> AssetId {
+    AssetId::parse("as_a").expect("asset id")
+}
+fn clip() -> ClipId {
+    ClipId::parse("cl_a").expect("clip id")
+}
+
+fn setup() -> Vec<Command> {
+    vec![
+        Command::TrackAdd {
+            id: Some(track()),
+            kind: TrackKind::Video,
+            name: None,
+            index: None,
+        },
+        Command::AssetImport {
+            id: Some(asset()),
+            path: "a.mov".into(),
+            kind: AssetKind::Video,
+            probe: Some(video_probe(60)),
+            status: Default::default(),
+        },
+        Command::AddClip {
+            id: Some(clip()),
+            track: track(),
+            asset: Some(asset()),
+            start: TimeInput::Timecode("00:00:00:00".into()),
+            duration: TimeInput::Timecode("00:00:01:00".into()),
+            source_in: None,
+            speed: None,
+        },
+    ]
+}
+
+fn apply(host: &EngineHost, commands: Vec<Command>) -> ApplyResult {
+    host.apply(ApplyRequest {
+        commands,
+        source: Some(Source::Human),
+        ..Default::default()
+    })
+    .expect("apply")
+}
+
+/// Audit F-01 (experiment F): a journal record that decodes but fails replay validation must not
+/// silently swallow later acknowledged edits. The rejected record is kept for support, the journal
+/// restarts at the recovered revision, and the next edits survive the next open.
+#[test]
+fn rejected_replay_record_does_not_lose_later_edits() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("reject.arcline");
+
+    // Session 1: build and save revision 1, then add an effect (revision 2) and die without saving.
+    let host = EngineHost::create(
+        &path,
+        project(FrameRate::Fps30),
+        catalog(),
+        Durability::Default,
+    )
+    .expect("create");
+    apply(&host, setup());
+    assert_eq!(host.save().expect("save"), 1);
+    apply(
+        &host,
+        vec![Command::EffectAdd {
+            id: Some(EffectId::parse("fx_a").expect("effect id")),
+            clip: clip(),
+            effect: "core.color.correct".into(),
+            params: Default::default(),
+        }],
+    );
+    drop(host); // the sidecar keeps revision 2
+
+    // Session 2: a catalog that no longer knows the effect rejects revision 2's record.
+    let host = EngineHost::open(&path, empty_catalog(), Durability::Default).expect("open 2");
+    assert!(
+        host.recovery().discarded_records,
+        "replay rejection was reported"
+    );
+    assert_eq!(host.recovery().replayed, 0);
+    let r = host
+        .apply(ApplyRequest {
+            commands: vec![Command::ProjectRename {
+                name: "Edited in session 2".into(),
+            }],
+            ..Default::default()
+        })
+        .expect("edit after rejection");
+    assert_eq!(r.revision, 2);
+    drop(host);
+
+    // The rejected bytes are kept for support (docs/08 §4.6).
+    let paths = arc_core::store::ProjectPaths::new(&path);
+    let rejected = paths.sidecar.join("journal-1.bin.rejected");
+    assert!(
+        std::fs::metadata(&rejected).is_ok_and(|m| m.len() > 0),
+        "rejected journal kept at {}",
+        rejected.display()
+    );
+
+    // Session 3: the acknowledged session-2 edit must be there.
+    let host = EngineHost::open(&path, catalog(), Durability::Default).expect("open 3");
+    assert_eq!(host.recovery().replayed, 1);
+    assert_eq!(host.published().revision, 2);
+    assert_eq!(host.published().project.meta.name, "Edited in session 2");
+    host.shutdown();
+}

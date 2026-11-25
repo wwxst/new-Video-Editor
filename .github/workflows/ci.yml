@@ -149,7 +149,20 @@ jobs:
           ARCLINE_FORCE_FALLBACK_ADAPTER: "1"
         run: |
           $env:PATH = "C:\msys64\ucrt64\bin;$env:ARCLINE_FFMPEG_DIR\bin;$env:PATH"
-          cargo build --workspace --all-targets
+          $log = Join-Path $env:RUNNER_TEMP 'build.log'
+          cargo build --workspace --all-targets 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            $lines = Get-Content $log
+            $hits = $lines | Select-String -Pattern 'error\[|error:|warning: unused' | Select-Object -First 25
+            foreach ($h in $hits) {
+              $msg = ($h.Line.Trim() -replace '%', '%%') -replace "`r?`n", ' '
+              Write-Output "::error title=cargo build:: $msg"
+            }
+            $tail = ($lines | Select-Object -Last 60) -join "`n"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### cargo build failed`n``````text`n$tail`n``````"
+            exit $code
+          }
 
       - name: Test the whole workspace
         shell: pwsh
@@ -161,7 +174,20 @@ jobs:
           RUST_BACKTRACE: "1"
         run: |
           $env:PATH = "C:\msys64\ucrt64\bin;$env:ARCLINE_FFMPEG_DIR\bin;$env:PATH"
-          cargo test --workspace --no-fail-fast
+          $log = Join-Path $env:RUNNER_TEMP 'test.log'
+          cargo test --workspace --no-fail-fast 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            $lines = Get-Content $log
+            $hits = $lines | Select-String -Pattern 'FAILED|panicked at|STATUS_|error\[|test result: FAILED' | Select-Object -First 25
+            foreach ($h in $hits) {
+              $msg = ($h.Line.Trim() -replace '%', '%%') -replace "`r?`n", ' '
+              Write-Output "::error title=cargo test:: $msg"
+            }
+            $tail = ($lines | Select-Object -Last 80) -join "`n"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### cargo test failed`n``````text`n$tail`n``````"
+            exit $code
+          }
 
       - name: Clippy
         shell: pwsh
@@ -169,4 +195,17 @@ jobs:
           ARCLINE_FFMPEG_DIR: C:\Users\runneradmin\.local\toolchains\ffmpeg-9.1-lgpl
         run: |
           $env:PATH = "C:\msys64\ucrt64\bin;$env:ARCLINE_FFMPEG_DIR\bin;$env:PATH"
-          cargo clippy --workspace --all-targets
+          $log = Join-Path $env:RUNNER_TEMP 'clippy.log'
+          cargo clippy --workspace --all-targets 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            $lines = Get-Content $log
+            $hits = $lines | Select-String -Pattern 'error\[|error:' | Select-Object -First 25
+            foreach ($h in $hits) {
+              $msg = ($h.Line.Trim() -replace '%', '%%') -replace "`r?`n", ' '
+              Write-Output "::error title=cargo clippy:: $msg"
+            }
+            $tail = ($lines | Select-Object -Last 60) -join "`n"
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### cargo clippy failed`n``````text`n$tail`n``````"
+            exit $code
+          }

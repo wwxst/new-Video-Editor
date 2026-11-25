@@ -4,8 +4,8 @@
 and exit criteria), [docs/07](../07-ui-architecture.md), [docs/03 §3/§10](../03-render-engine.md),
 [HANDOVER §7](../../HANDOVER.md). **First slice implemented in this change:** C1.
 
-Phase B is functionally closed (frame-exact render, malformed-media corpus, HEVC; the media CI
-verification was still in flight when this plan was written), so the editor is the next milestone. This plan turns the Phase C deliverables into ordered, testable slices. It changes no
+Phase B is closed (frame-exact render, malformed-media corpus, HEVC; CI is green on all four
+jobs, runs 7 and 9), so the editor is the next milestone. This plan turns the Phase C deliverables into ordered, testable slices. It changes no
 architecture: the same six crates, the same dependency rules ([docs/01 §4](../01-system-architecture.md)),
 no schema or protocol change.
 

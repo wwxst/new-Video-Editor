@@ -3,7 +3,7 @@
 Checkpoint date: 2026-11-25. Supersedes the earlier WIP handover of `720a99a`.
 
 **State: the workspace builds against the pinned FFmpeg 9.1 package, clippy exits 0 (pre-existing lint
-warnings only), and 115 tests pass** (Windows 11, Intel integrated GPU; see §3 for the exact counts and the three-run evidence in
+warnings only), and 116 tests pass** (Windows 11, Intel integrated GPU; see §3 for the exact counts and the three-run evidence in
 `reports/ffmpeg-9.1-differential.md`). All P0 audit defects are fixed, the FFmpeg 8.1.3 → 9.1
 upgrade is implemented (spec steps 0–3), and the follow-up work closed twelve more audit findings
 (F-06, F-07, F-08, F-11, F-12, F-13, F-14, F-24, F-26, F-28, F-29, F-31). The remaining findings
@@ -92,7 +92,7 @@ scripts/dev-env.sh
 |---|---|---|
 | **A Spine** | **Done** (dependency-rule CI check still missing) | Exit criteria met: 10,000-case property test, timecode boundary tests, `new` + `apply` produce valid containers |
 | **P Embedding PoC** | **Done — GO** | All automated criteria pass (docs/poc, ADR-0014 outcome) |
-| **B Headless pipeline** | **Exit criteria met except the crashing-media quarantine fixture** | Frame-exact `import → edit → render` through FFV1, H.264 (`h264_qsv`), HEVC (`hevc_qsv`), AV1 (`libsvtav1`), ProRes and DNxHD; long-GOP/B-frame/MPEG-TS random access is frame-exact (F-08) and lossy/resampled audio survives the mixer's block pattern (F-06/F-07); a generated malformed corpus converges to typed errors and a mixed good/broken export completes (goal B); CI runs on ubuntu/windows/macos with the pinned FFmpeg on Windows (goal C). Still open: a fixture that crashes or hangs the import check (quarantine branch unproven) — see [Phase B closure](reports/phase-b-exit-2026-11-25.md) |
+| **B Headless pipeline** | **Exit criteria met** | Frame-exact `import → edit → render` through FFV1, H.264 (`h264_qsv`), HEVC (`hevc_qsv`), AV1 (`libsvtav1`), ProRes and DNxHD; long-GOP/B-frame/MPEG-TS random access is frame-exact (F-08) and lossy/resampled audio survives the mixer's block pattern (F-06/F-07); a generated malformed corpus converges to typed errors and a mixed good/broken export completes (goal B); CI runs on ubuntu/windows/macos with the pinned FFmpeg on Windows (goal C). The `Quarantined` branch is covered by a generated stub tool (crash/hang/garbage, bounded time) — see [Phase B closure](reports/phase-b-exit-2026-11-25.md) |
 | **C Compositor + shell** | Compositor done; **GUI editor not started** | `arc-app` currently shows the PoC workload, not an editor |
 | **D Audio** | Mixer + export done; **real-time playback (cpal) not started** | |
 | **E Lifecycle** | Journal, recovery, atomic saves, forced-kill done; **crash breadcrumbs, quarantine on relaunch, hang watchdog, relink not started** | |
@@ -122,7 +122,7 @@ JSON-RPC methods implemented: `project.open` (incl. `create`), `project.describe
 Missing versus docs/06 §4.1: `history.list`, `inspect.frame`, `control.request`, `control.release`, and pushed
 notifications.
 
-## 3. Test results (all green, 115 tests, 1 ignored)
+## 3. Test results (all green, 116 tests, 1 ignored)
 
 Three consecutive full `cargo test --workspace` runs and a clean clippy run on the FFmpeg 9.1 switch
 are recorded in [reports/ffmpeg-9.1-differential.md](reports/ffmpeg-9.1-differential.md) §5; the
@@ -138,6 +138,7 @@ per-crate table below is the current suite.
 | arc-core `tests/recovery.rs` | 7 | P0 recovery/creation regressions: rejected replay (F-01), evidence split, create over locked/existing project (F-04), stale sidecar and foreign snapshot id checks (F-05) |
 | arc-media unit + `tests/decode.rs` | 11 + 3 | ffprobe mapping, runtime identity, ffprobe parse; **frame-accurate in-process decode** (sequential, random, repeated, backward) at 29.97 and 25 fps for FFV1 in MKV; sample-addressed audio; import check ok/offline |
 | arc-media `tests/malformed.rs` | 1 | Generated malformed corpus (9 fixtures under 2 MB: empty, text, truncated, corrupt header/index/payload): the import check refuses every unreadable file and the decode boundary returns typed errors, never a crash |
+| arc-media `tests/quarantine.rs` | 1 | A generated stub `ffmpeg`/`ffprobe` (proxying to the real tools) simulates a crash (0xC0000005), a hang (killed at the 20 s probe timeout) and garbage output: `Quarantined` vs `Offline` are distinguished, the process survives and real media still imports afterwards |
 | arc-media `tests/param_change.rs` | 2 | Mid-stream resolution change (F-02) scaled, not overflowing; MP2 stereo→mono (F-03) resampled safely |
 | arc-media `tests/audio_blocks.rs` | 2 | The mixer's 4096+1 block pattern is bit-identical to one continuous read for FLAC 48/44.1 kHz, MP3, Ogg/MKV Opus and AAC (**F-06**) |
 | arc-media `tests/audio_anchor.rs` | 2 | One Opus stream remuxed to Ogg and MKV decodes bit-identically; reads at 20/50/80 s align with the continuous decode (**F-07**) |
@@ -212,10 +213,12 @@ Fold these into docs/02–06 (or an ADR) when convenient; none contradicts an AD
 2. **MSVC target untested.** The shim should compile with `cl /std:c11` (compound literals are used); `build.rs`
    passes `-std=c11` only where supported — add `/std:c11` for MSVC if needed.
 3. **CI exists** (`.github/workflows/ci.yml`, ADR-0011): `core` on ubuntu/windows/macos (Rust 1.95 + clippy,
-   FFmpeg-free crates) is green on GitHub (run 2); `media` on Windows builds the pinned FFmpeg 9.1 from
-   the in-repo recipe (cached) and runs the full workspace build/test/clippy with
-   `ARCLINE_FORCE_FALLBACK_ADAPTER=1`. The hardware-encoder tests skip themselves on machines without a
-   GPU. Run links and status: [Phase B closure](reports/phase-b-exit-2026-11-25.md) §3.2.
+   FFmpeg-free crates) is green on GitHub (runs 2 and 3); `media` on Windows builds the pinned FFmpeg 9.1
+   from the in-repo recipe (cached) and runs the full workspace build/test/clippy with
+   `ARCLINE_FORCE_FALLBACK_ADAPTER=1`. Its workspace step failed on a WARP crash in the `arc-render` GPU
+   tests; the tests are now serialized (whole suite 116/116 green under the fallback adapter locally).
+   Failures emit check-run annotations, which are readable without a token. The hardware-encoder tests
+   skip themselves on machines without a GPU. Run links: [Phase B closure](reports/phase-b-exit-2026-11-25.md) §3.2.
 4. **GPU tests need an adapter.** They ran on Intel integrated graphics here; on CI use the fallback adapter.
 5. **Embedding PoC manual items open:** keyboard focus round-trip, IME placement, DPI change across monitors,
    Electron host (Electron not installed).

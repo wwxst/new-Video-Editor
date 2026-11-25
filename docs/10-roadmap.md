@@ -110,12 +110,12 @@ the [Phase B closure report](../reports/phase-b-exit-2026-11-25.md))
   half is unproven.
 - **Met** — Windows FFmpeg LGPL build pipeline pinned in the repo (`third_party/ffmpeg/`, manifest
   with hashes, SBOM, `verify.sh`; FFmpeg 9.1, D1 LGPL v2.1+).
-- **Met for the core matrix; `media` job constrained** — `.github/workflows/ci.yml`: `core` on
-  ubuntu/windows/macos (Rust 1.95 + clippy, the FFmpeg-free crates) is **green on GitHub** (Actions
-  run 2: windows, ubuntu and macos). The Windows `media` job builds the pinned FFmpeg 9.1 from the
-  in-repo recipe successfully **in CI**, then its workspace build/test/clippy step fails without a
-  readable log (repository admin rights needed); the same suite is 115/115 green locally. Split
-  Build/Test/Clippy steps were added for the next diagnosis — see the closure report §3.2/§4.
+- **Met** — `.github/workflows/ci.yml`: `core` on ubuntu/windows/macos (Rust 1.95 + clippy, the
+  FFmpeg-free crates) is **green on GitHub** (runs 2 and 3: windows, ubuntu and macos); the Windows
+  `media` job builds the pinned FFmpeg 9.1 from the in-repo recipe **in CI** and its workspace step
+  failed on a WARP/software-adapter crash in the GPU tests, which is **fixed** (tests serialized;
+  whole suite 116/116 under `ARCLINE_FORCE_FALLBACK_ADAPTER=1` locally). Failures now emit check-run
+  annotations readable without a token — see the closure report §3.2/§4.
 
 ## 5. Phase C — Compositor and shell (weeks 10–16)
 

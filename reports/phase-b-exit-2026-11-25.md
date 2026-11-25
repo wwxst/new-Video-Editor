@@ -88,6 +88,24 @@ the containment boundary).
 the import check. That requires a decoder-crash PoC and was not attempted, so the "crashing media
 is quarantined and the parent survives" half of the criterion is still unproven.
 
+### 2.1 The `Quarantined` branch (batch 3)
+
+The `Quarantined` outcome (import check crashed or timed out) now has a test:
+`crates/arc-media/tests/quarantine.rs` compiles a stub `ffmpeg.exe`/`ffprobe.exe` with `rustc` (the
+tool lookup is a runtime `ARCLINE_FFMPEG_DIR/bin` read, so no production hook is needed), points the
+process at that bundle, and the stub proxies to the real pinned tools unless an argument contains
+`STUB_MATCH`. One process then exercises:
+
+| Case | Stub behaviour | Expected outcome | Bound |
+|---|---|---|---|
+| crash | exits with NTSTATUS `0xC0000005` | `Quarantined { reason: "...Crashed..." }` | immediate |
+| hang | sleeps 120 s | `Quarantined { reason: "...TimedOut..." }` | killed at `PROBE_TIMEOUT` (20 s), measured under 35 s |
+| garbage | prints non-JSON, exits 0 | `Offline` (not `Quarantined`: "not media" vs "never decode in-process") | immediate |
+| mixed | real media between the bad cases | `Ok` before and after, same process | — |
+
+No panic and no abort: the test binary survives all four, and the timeout is asserted to be the
+documented `PROBE_TIMEOUT` cap.
+
 ## 3. Goal C — CI
 
 ### 3.1 Workflow
@@ -116,15 +134,29 @@ need repository admin rights). Runs, `https://github.com/wwxst/new-Video-Editor/
 | Run | Commit | Result |
 |---|---|---|
 | [#1](https://github.com/wwxst/new-Video-Editor/actions/runs/45643845772) | `a394f37` | `core (windows)` success; `core (ubuntu)`, `core (macos)` failed in `cargo test -p arc-core`; `media` failed in the FFmpeg build step |
-| [#2](https://github.com/wwxst/new-Video-Editor/actions/runs/45645526473) | `5a1a3ac` | **`core` success on windows, ubuntu and macos**; `media`: MSYS2 setup, cargo cache, the **FFmpeg 9.1 build (step 6) and Rust 1.95 (step 7) succeeded**, then the combined workspace build/test/clippy step failed (logs need repository admin rights) |
+| [#2](https://github.com/wwxst/new-Video-Editor/actions/runs/45645526473) | `5a1a3ac` | **`core` success on windows, ubuntu and macos**; `media`: MSYS2 setup, cargo cache, the **FFmpeg 9.1 build (step 6) and Rust 1.95 (step 7) succeeded**, then the combined workspace build/test/clippy step failed |
+| [#3](https://github.com/wwxst/new-Video-Editor/actions/runs/45649281563) | `ef4528e` | **`core` success on all three OSes again**; `media`: FFmpeg build and Rust 1.95 succeeded, the workspace step failed (split steps, so it is the Test/Clippy half) |
 
 The media job's FFmpeg build succeeding in CI is the important half: the in-repo recipe (source
 fetch + signature/SHA verification + configure profile) works on a clean `windows-latest` runner.
-The failing step runs the same suite that is green locally (115/115) on the reference machine; the
-remaining differences are the runner's **Rust 1.95** toolchain, its **GPU-less** environment
-(WARP/software adapter) and its MinGW/UCRT setup. This is the one constrained item of this batch
-(§4). The combined step was split into separate **Build**, **Test** and **Clippy** steps so the next
-run's step name tells which one fails, since the log body is not readable without admin rights.
+
+**Root cause of the failing workspace step (found locally, batch 3).** With
+`ARCLINE_FORCE_FALLBACK_ADAPTER=1` — exactly what the media job sets — wgpu selects
+`Microsoft Basic Render Driver (Dx12)` (WARP). `arc-render/tests/render.rs` has five GPU tests that
+each create their own wgpu device; with cargo's default parallelism the software driver crashes the
+test binary with **`STATUS_ACCESS_VIOLATION` (0xC0000005)**, so the whole workspace step fails. It is
+reproducible on the reference machine by exporting the same variable, and it is specific to the
+software adapter: the same suite is green on the real GPU and green under WARP with
+`--test-threads=1`.
+
+**Fix:** the five GPU tests are serialized with a process-wide mutex in their test binary
+(`GPU_SERIAL`), documented as a WARP workaround. Verified on the reference machine with
+`ARCLINE_FORCE_FALLBACK_ADAPTER=1`: `arc-render` tests pass three runs in a row and the **whole
+workspace suite is 116 passed / 0 failed / 1 ignored** under the software adapter.
+
+The workflow also now annotates failures (`::error` check-run annotations with the failing lines
+`FAILED|panicked at|STATUS_|error[` plus a step-summary tail), because job logs need repository admin
+rights but annotations are readable through the public API.
 
 Run 1 diagnosed two real problems, both fixed in `5a1a3ac`:
 
@@ -166,17 +198,18 @@ in §5. Its first cold build is the long pole; the result is recorded in the run
 - **Quarantine fixture.** The remaining Phase B gap is a crashing/hanging media sample. A fuzzed
   corpus (cargo-fuzz against the shim, `-fsanitize=address` where available) is the right way to
   produce one, and it also serves the "mutated-media corpus" wording of the criterion.
-- **`media` job is the constrained item.** Its FFmpeg build is green in CI; the workspace
-  build/test/clippy step is red and its log is unreadable without a repository token. Locally the
-  same package and suite are green (115/115). Next steps, in order: (1) read the log of the now
-  split Build/Test steps with `gh run view --log-failed` once `gh auth login` is available;
-  (2) if the failure is the GPU-less runner, either mark the GPU test binaries as skipped when
-  `ARCLINE_FORCE_FALLBACK_ADAPTER` cannot obtain an adapter (the renderer already has the seam) or
-  attach a self-hosted runner with a GPU; (3) if it is Rust 1.95, bump the CI pin to 1.100 — the
-  declared MSRV stays 1.95 but the tested toolchain is 1.100. The `core` matrix is green either way
-  and covers the deterministic core.
-- **Rust 1.95 in CI vs 1.100 locally.** The declared MSRV is 1.95; CI pins it. If a dependency
-  starts requiring newer, the `core` job will fail first and that is the intended signal.
+- **The `media` failure is a WARP/software-adapter crash, now fixed.** Five `arc-render` GPU tests
+  created wgpu devices concurrently; under `Microsoft Basic Render Driver (Dx12)` that crashes the
+  test binary with `0xC0000005`. The tests are serialized in their binary (three consecutive green
+  runs under the fallback adapter, whole suite 116 passed there). The next CI run confirms it on the
+  runner; the workflow now emits check-run annotations on failure, readable through the public API
+  without a token.
+- **Rust 1.95 locally is not installable in this environment.** `static.rust-lang.org` was throttled
+  to ~7 KB/s (4 MB downloaded in ~10 minutes of a 297 MB bundle), so the 1.95 compile of the media
+  crates could not be reproduced locally. The `core` matrix compiles and tests arc-core, arc-audio
+  and arc-render with 1.95 in CI; if a media crate needed a newer compiler, the CI **Build** step
+  (now a separate step with annotations) will name it. Fallback: pin the CI toolchain to 1.100 while
+  keeping `rust-version = "1.95"` as the declared MSRV.
 
 ## 5. Verification at this branch
 

@@ -1,0 +1,152 @@
+{
+    "bomFormat":  "CycloneDX",
+    "specVersion":  "1.5",
+    "version":  1,
+    "metadata":  {
+                     "timestamp":  "2026-11-25T08:54:50Z",
+                     "component":  {
+                                       "type":  "application",
+                                       "name":  "arcline-ffmpeg",
+                                       "version":  "9.1-arcline-f414c1c54e",
+                                       "hashes":  [
+                                                      {
+                                                          "alg":  "SHA-256",
+                                                          "content":  "6dfd2a28d285d600d6a99acaf5b9efcdfdf9d9622ff9f4f749ff05422294fa65"
+                                                      }
+                                                  ]
+                                   }
+                 },
+    "components":  [
+                       {
+                           "type":  "library",
+                           "name":  "FFmpeg",
+                           "version":  "9.1",
+                           "licences":  [
+                                            "LGPL-2.1-or-later"
+                                        ],
+                           "hashes":  [
+                                          {
+                                              "alg":  "SHA-256",
+                                              "content":  "1a4d394ae63d190a526cd052eb4415c156b5c5e2df37efab41a7de0b8fde2433"
+                                          }
+                                      ],
+                           "note":  "source tarball hash"
+                       },
+                       {
+                           "type":  "library",
+                           "name":  "dav1d",
+                           "version":  "1.5.5-1",
+                           "licences":  [
+                                            "BSD-2-Clause"
+                                        ],
+                           "hashes":  [
+                                          {
+                                              "alg":  "SHA-256",
+                                              "content":  "4f58c005ecc51dd689fca1670ed7fbcc090abc6c424babc30ca3a186e699b960"
+                                          }
+                                      ]
+                       },
+                       {
+                           "type":  "library",
+                           "name":  "SVT-AV1",
+                           "version":  "4.3.0-1",
+                           "licences":  [
+                                            "BSD-2-Clause-Patent"
+                                        ],
+                           "hashes":  [
+                                          {
+                                              "alg":  "SHA-256",
+                                              "content":  "4f40f05a3d7ee53fdaefd2179cfeae0a75ca90e8f66d72e515b0893802426fe1"
+                                          }
+                                      ]
+                       },
+                       {
+                           "type":  "library",
+                           "name":  "libvpl",
+                           "version":  "2.17.0-1",
+                           "licences":  [
+                                            "MIT"
+                                        ],
+                           "hashes":  [
+                                          {
+                                              "alg":  "SHA-256",
+                                              "content":  "88bd6fece68ebad05d3e78581455bb902cc1d3930018931d0830616097e74d73"
+                                          }
+                                      ]
+                       },
+                       {
+                           "type":  "library",
+                           "name":  "zlib",
+                           "version":  "1.4-2",
+                           "licences":  [
+                                            "Zlib"
+                                        ],
+                           "hashes":  [
+                                          {
+                                              "alg":  "SHA-256",
+                                              "content":  "934103c50623302548a1cf66fbc22f0029e4eb4556343252a505e2fc005e835f"
+                                          }
+                                      ]
+                       },
+                       {
+                           "type":  "library",
+                           "name":  "nv-codec-headers",
+                           "version":  "13.0.19.0-1",
+                           "licences":  [
+                                            "MIT"
+                                        ],
+                           "note":  "headers compiled into FFmpeg (NVENC)"
+                       },
+                       {
+                           "type":  "library",
+                           "name":  "AMF headers",
+                           "version":  "1.5.3-1",
+                           "licences":  [
+                                            "MIT"
+                                        ],
+                           "note":  "headers compiled into FFmpeg (AMF)"
+                       },
+                       {
+                           "type":  "library",
+                           "name":  "GCC Runtime Library (libgcc_s_seh-1)",
+                           "version":  "",
+                           "licences":  [
+                                            "GPL-3.0-or-later WITH GCC-exception-3.1"
+                                        ],
+                           "hashes":  [
+                                          {
+                                              "alg":  "SHA-256",
+                                              "content":  "44f6318f96eb2aaf6e90400bb1178ab6d55b01ae2cf24846d6b30d96e87e89dd"
+                                          }
+                                      ]
+                       },
+                       {
+                           "type":  "library",
+                           "name":  "libstdc++",
+                           "version":  "",
+                           "licences":  [
+                                            "GPL-3.0-or-later WITH GCC-exception-3.1"
+                                        ],
+                           "hashes":  [
+                                          {
+                                              "alg":  "SHA-256",
+                                              "content":  "098e4964e3c8179847f7a1c313d2e8020ca12df3f1d18878a417a8f54d41505a"
+                                          }
+                                      ]
+                       },
+                       {
+                           "type":  "library",
+                           "name":  "winpthreads",
+                           "version":  "14.0.0.r598.ge3d18511f-1",
+                           "licences":  [
+                                            "MIT"
+                                        ],
+                           "hashes":  [
+                                          {
+                                              "alg":  "SHA-256",
+                                              "content":  "94a9a4e2fe27b4bc827a4b209e9deb4cc3dc34bc025df06b849144f9d4c588f8"
+                                          }
+                                      ]
+                       }
+                   ]
+}

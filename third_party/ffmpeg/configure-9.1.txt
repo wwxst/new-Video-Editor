@@ -1,0 +1,42 @@
+# Arcline FFmpeg 9.1 configure profile (spec docs/specs/ffmpeg-9.1-upgrade.md §5.3).
+#
+# One argument per line; blank lines and #-comments are ignored by build.sh.
+# Decisions: D1 = LGPL v2.1+ (no --enable-version3), D2 = no Media Foundation (no h264_mf),
+# D3 = in-repo source build, D4 = P0 fixes landed first.
+--target-os=mingw32
+--arch=x86_64
+# Host note (recorded in manifest.json): this is a native MSYS2 UCRT64 build, not a cross build.
+# The UCRT64 toolchain installs prefixed GCC but only unprefixed binutils (nm/ar/ld), so the
+# spec's --cross-prefix=x86_64-w64-mingw32- is omitted; the compiler is the native UCRT one and
+# the output is still x86_64-w64-mingw32/UCRT. See docs/specs/ffmpeg-9.1-upgrade.md §5.2.
+--enable-shared
+--disable-static
+--disable-debug
+--disable-doc
+--disable-ffplay
+--disable-gpl
+--disable-nonfree
+--disable-autodetect
+--enable-w32threads
+--enable-zlib
+--enable-d3d11va
+--enable-d3d12va
+--enable-dxva2
+--enable-ffnvcodec
+--enable-nvenc
+--enable-amf
+--enable-libvpl
+--enable-libdav1d
+--enable-libsvtav1
+# Local files only: 9.1 adds libcurl and a Windows handle: protocol; none may exist (S1/S2/S3).
+--disable-network
+--disable-protocols
+--enable-protocol=file,pipe
+--disable-demuxer=hls,dash,concat,sdp,rtsp,rtp
+--disable-muxer=tee,segment,hls,dash
+--disable-indevs
+--enable-indev=lavfi
+--disable-outdevs
+# S7: mingw-w64 GCC 16.2 links libssp, so strong stack protection is available.
+--extra-cflags=-fstack-protector-strong
+--extra-ldflags=-fstack-protector-strong

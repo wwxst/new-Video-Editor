@@ -154,12 +154,17 @@ jobs:
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             $lines = Get-Content $log
-            $hits = $lines | Select-String -Pattern 'error\[|error:|warning: unused' | Select-Object -First 25
-            foreach ($h in $hits) {
-              $msg = ($h.Line.Trim() -replace '%', '%%') -replace "`r?`n", ' '
-              Write-Output "::error title=cargo build:: $msg"
+            # One annotation with the first error and its 40-line context (the build-script stderr
+            # block), because job logs need admin rights but annotations are readable.
+            $hit = $lines | Select-String -Pattern 'error\[|error:|failed to run custom build|Caused by' | Select-Object -First 1
+            if ($hit) {
+              $start = [Math]::Max(0, $hit[0].LineNumber - 1)
+              $end = [Math]::Min($lines.Count - 1, $start + 40)
+              $ctx = ($lines[$start..$end] | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ }) -join "`n"
+              $msg = ($ctx -replace '%', '%25') -replace "`r?`n", '%0A'
+              Write-Output "::error title=cargo build context::$msg"
             }
-            $tail = ($lines | Select-Object -Last 60) -join "`n"
+            $tail = ($lines | Select-Object -Last 80) -join "`n"
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### cargo build failed`n``````text`n$tail`n``````"
             exit $code
           }
@@ -179,10 +184,13 @@ jobs:
           $code = $LASTEXITCODE
           if ($code -ne 0) {
             $lines = Get-Content $log
-            $hits = $lines | Select-String -Pattern 'FAILED|panicked at|STATUS_|error\[|test result: FAILED' | Select-Object -First 25
-            foreach ($h in $hits) {
-              $msg = ($h.Line.Trim() -replace '%', '%%') -replace "`r?`n", ' '
-              Write-Output "::error title=cargo test:: $msg"
+            $hit = $lines | Select-String -Pattern 'FAILED|panicked at|STATUS_|error\[|test result: FAILED' | Select-Object -First 1
+            if ($hit) {
+              $start = [Math]::Max(0, $hit[0].LineNumber - 1)
+              $end = [Math]::Min($lines.Count - 1, $start + 60)
+              $ctx = ($lines[$start..$end] | ForEach-Object { $_.TrimEnd() } | Where-Object { $_ }) -join "`n"
+              $msg = ($ctx -replace '%', '%25') -replace "`r?`n", '%0A'
+              Write-Output "::error title=cargo test context::$msg"
             }
             $tail = ($lines | Select-Object -Last 80) -join "`n"
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "### cargo test failed`n``````text`n$tail`n``````"

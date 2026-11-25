@@ -1,6 +1,9 @@
 # FFmpeg 9.1 Upgrade Specification
 
-**Status:** Approved for implementation; not started. **Version:** 1.0, 2026-11-25.
+**Status:** Implemented 2026-11-25 (steps 0–3, plus the audit follow-ups). Acceptance evidence:
+[HANDOVER.md](../../HANDOVER.md) §9 and the AC-1…AC-15 table in
+[reports/ffmpeg-9.1-differential.md](../../reports/ffmpeg-9.1-differential.md). **Version:** 1.0,
+2026-11-25.
 **Audience:** DeepSeekHS, the implementer of this upgrade. ("DeepSeekHS" is not defined elsewhere in
 the repository; this document treats it as the party doing the work and assumes no context beyond
 the repository itself.)

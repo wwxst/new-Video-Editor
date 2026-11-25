@@ -6,8 +6,9 @@
 > Built by a single developer with AI assistance. Windows-first, portable by design.
 
 **Status:** Architecture v2 (post-review). Implementation in progress: Phases A and P are done, Phase B is
-functionally complete, and Phase F has started. See [HANDOVER.md](HANDOVER.md) for the current state and
-the [implementation audit](reports/audit-2026-11-25-88e0707.md) (2026-11-25) for open defects.
+functionally complete, the P0 audit defects are fixed, and FFmpeg 9.1 is the pinned media build (2026-11-25).
+Phase F has started. See [HANDOVER.md](HANDOVER.md) for the current state and the
+[implementation audit](reports/audit-2026-11-25-88e0707.md) (2026-11-25) for the remaining P2/P3 defects.
 **Base:** [architecture review](reports/architecture-review.md), 2026-11-24.
 
 ---

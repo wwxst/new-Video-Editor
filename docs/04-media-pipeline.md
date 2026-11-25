@@ -192,7 +192,15 @@ linked, with the LGPL compliance package (source, build scripts, relink instruct
 uses hardware encoders only; AV1 (SVT-AV1, BSD) is the royalty-free default for software encoding. This
 constrains Phase B deliverables and is a business decision, not a technical one.
 
-**Version pin (2026-11-25).** Development uses FFmpeg 8.1.3 (a BtbN prebuilt, LGPL v3; not the shippable
-configuration, [audit](../reports/audit-2026-11-25-88e0707.md) F-20). The upgrade to FFmpeg 9.1, with the
-in-repo build recipe, configure profile, version and licence checks, and the compliance package, is
-specified in [specs/ffmpeg-9.1-upgrade.md](specs/ffmpeg-9.1-upgrade.md).
+**Version pin (2026-11-25).** Development and release use **FFmpeg 9.1 "Gauss"**, built from the
+verified official tarball by the in-repo recipe in [third_party/ffmpeg](../../third_party/ffmpeg)
+(decision D1: LGPL version 2.1 or later; no GPL, nonfree, version-3 libraries or `libopenh264`;
+D2: no Media Foundation). The build has no network protocols and no Windows `handle:`/`libcurl`
+protocol — only `file` and `pipe` — and drops the HLS/DASH/concat demuxers and the tee/segment
+muxers ([spec §5.3](specs/ffmpeg-9.1-upgrade.md)). The shim and `build.rs` pin the ABI (lavu 61,
+lavc 63, lavf 63, sws 10, swr 7); the process checks the loaded version and licence at run time and
+refuses a mismatched build unless `ARCLINE_ALLOW_ANY_FFMPEG=1` is set for development (recorded in
+export reports). The previous 8.1.3 package stays installed for rollback (spec §11); audit F-20 and
+F-21 are closed by the build manifest, the compile-time pin and the runtime check.
+`scripts/dev-env.sh` prefers the 9.1 package and can be pointed at 8.1.3 with
+`ARCLINE_FFMPEG_DIR`.

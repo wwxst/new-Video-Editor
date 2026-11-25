@@ -1,0 +1,516 @@
+{
+  "baseline_ffmpeg": "ffmpeg version n8.1.3-41-ga8029b6528-20261124 Copyright (c) 2000-2026 the FFmpeg developers",
+  "corpus_dir": "C:\\Users\\ww\\.local\\toolchains\\arcline-corpus-8.1.3",
+  "current_ffmpeg": "ffmpeg version 9.1-arcline-f414c1c54e Copyright (c) 2000-2026 the FFmpeg developers",
+  "differences": [
+    {
+      "baseline": "3b9b3104fff1ad4abb858940146718880a67f0514e5f5ecf7f0752cbe27b0b07",
+      "current": "87f095323c7d1dd97530320e991bd7d8868a9c6408eb15cbd10b4f40aac2ceeb",
+      "path": "entries.audio_aac_noise.m4a.audio.blocks.hash",
+      "reason": "F-25/F-06 (P2): same mechanism as audio_aac_sine.m4a; AAC decoder history/priming after the shim's per-block re-seek differs between 8.1.3 and 9.1. Continuous decode is bit-identical; the block-pattern hash is not. Tracked as F-06."
+    },
+    {
+      "baseline": [
+        {
+          "got": 4097,
+          "hash": "bc3a163a9bda8bfc11e96848728662da8bbc3db6842616dfe1e85ecf61cbaa72",
+          "start": 0
+        },
+        {
+          "got": 4097,
+          "hash": "ce3211fa663e185ec208a1d81f7872a078bee98748cfa0d96f6f796f4ed3128a",
+          "start": 4096
+        },
+        {
+          "got": 4097,
+          "hash": "a64a4d402b73cae0788d47aa026f85b3f130d3e7b5ef53a10fa5332a865566cc",
+          "start": 8192
+        },
+        {
+          "got": 4097,
+          "hash": "7b2c39dc7c62a7540b6b973716603619e6e5cdac6d9c82a81a7d41b217da0d03",
+          "start": 12288
+        },
+        {
+          "got": 4097,
+          "hash": "4641e054d532e76a6815bfac5079b4586e829dba3bcccc330b0f18183178f827",
+          "start": 16384
+        },
+        {
+          "got": 4097,
+          "hash": "dda0b04caa647d2079358fff11fa3b68d3206f8b60136e2e83628e0a04d2ee02",
+          "start": 20480
+        },
+        {
+          "got": 4097,
+          "hash": "d342588427ea9f35af5a4fb1645f3590ae775318d56091168f41af610db52a97",
+          "start": 24576
+        },
+        {
+          "got": 4097,
+          "hash": "511a0df3ec0dd37ec3a688d0778a61e5c484dccc3122dfc9eb9300b2849a4816",
+          "start": 28672
+        },
+        {
+          "got": 4097,
+          "hash": "568dcf7b6ef68b20a6faf154dbd1e00180000be5e837d0f9c1dad8296ae2fa12",
+          "start": 32768
+        },
+        {
+          "got": 4097,
+          "hash": "be5c7630bd6ef0bdcbcaee815afea258b761cbd703d8a8452219567bb9438f30",
+          "start": 36864
+        },
+        {
+          "got": 4097,
+          "hash": "c8b5c0b64f806eb93ad9342b30f4368a059fb24daee583c2f0fcb8bfba3d0ace",
+          "start": 40960
+        },
+        {
+          "got": 4097,
+          "hash": "608bbba982926e07b4a93cecc7d15fb8c6c9f03385701741f0c704817a03e41f",
+          "start": 45056
+        },
+        {
+          "got": 4097,
+          "hash": "bf25e93d6c03619c8602f966172c43a657280d55eb59b46b0587ee149b5f2723",
+          "start": 49152
+        },
+        {
+          "got": 4097,
+          "hash": "769eb0ef953acd246791526a2bc0078d24b47b379f805e3ad25945fb7024debb",
+          "start": 53248
+        },
+        {
+          "got": 4097,
+          "hash": "c86e2349b861f79fd0851a00adde54e13bcd537266a525fa8bdb9f2469801301",
+          "start": 57344
+        },
+        {
+          "got": 4097,
+          "hash": "48e55166c149a8f18ef8474f024e49f4ea78b27e0254756556ed08f5fa4e5927",
+          "start": 61440
+        },
+        {
+          "got": 4097,
+          "hash": "97f88363de6fb8044ebaf86e7dc8b6aff0b8ac3541f1984c8a106ccd00500f97",
+          "start": 65536
+        },
+        {
+          "got": 4097,
+          "hash": "2ca1ef757c0c33093f834f6cd825d39a766fab9e0a5abdeb0fc598fc1b34fe59",
+          "start": 69632
+        },
+        {
+          "got": 4097,
+          "hash": "203ab1d27a1ce186831950e425d300f198320ff0573efeaec900cdb826877f40",
+          "start": 73728
+        },
+        {
+          "got": 4097,
+          "hash": "450087cdd06ab60dea284eb88424e3de752d583ee256fcef7d5c52309938a625",
+          "start": 77824
+        },
+        {
+          "got": 4097,
+          "hash": "ade74650412e9ef0c26add416e4ab10226badfc8840c9f4e5a9c9738d6ccba3a",
+          "start": 81920
+        },
+        {
+          "got": 4097,
+          "hash": "48efb707066591950a6801cfc7733bb068e4ae2068e20bd4df686e0f020a5c05",
+          "start": 86016
+        },
+        {
+          "got": 4097,
+          "hash": "b3c2863131d3afcbcf43334252c5e8450c103dab5c04488ca844cc8db7472a8d",
+          "start": 90112
+        },
+        {
+          "got": 2048,
+          "hash": "ad00bb99aab5b97493e871aa161af2473584c903bcbe0c52e997fff21a1ca78f",
+          "start": 94208
+        }
+      ],
+      "current": [
+        {
+          "got": 4097,
+          "hash": "bc3a163a9bda8bfc11e96848728662da8bbc3db6842616dfe1e85ecf61cbaa72",
+          "start": 0
+        },
+        {
+          "got": 4097,
+          "hash": "ce3211fa663e185ec208a1d81f7872a078bee98748cfa0d96f6f796f4ed3128a",
+          "start": 4096
+        },
+        {
+          "got": 4097,
+          "hash": "a64a4d402b73cae0788d47aa026f85b3f130d3e7b5ef53a10fa5332a865566cc",
+          "start": 8192
+        },
+        {
+          "got": 4097,
+          "hash": "7b2c39dc7c62a7540b6b973716603619e6e5cdac6d9c82a81a7d41b217da0d03",
+          "start": 12288
+        },
+        {
+          "got": 4097,
+          "hash": "4641e054d532e76a6815bfac5079b4586e829dba3bcccc330b0f18183178f827",
+          "start": 16384
+        },
+        {
+          "got": 4097,
+          "hash": "dda0b04caa647d2079358fff11fa3b68d3206f8b60136e2e83628e0a04d2ee02",
+          "start": 20480
+        },
+        {
+          "got": 4097,
+          "hash": "d342588427ea9f35af5a4fb1645f3590ae775318d56091168f41af610db52a97",
+          "start": 24576
+        },
+        {
+          "got": 4097,
+          "hash": "511a0df3ec0dd37ec3a688d0778a61e5c484dccc3122dfc9eb9300b2849a4816",
+          "start": 28672
+        },
+        {
+          "got": 4097,
+          "hash": "568dcf7b6ef68b20a6faf154dbd1e00180000be5e837d0f9c1dad8296ae2fa12",
+          "start": 32768
+        },
+        {
+          "got": 4097,
+          "hash": "be5c7630bd6ef0bdcbcaee815afea258b761cbd703d8a8452219567bb9438f30",
+          "start": 36864
+        },
+        {
+          "got": 4097,
+          "hash": "c8b5c0b64f806eb93ad9342b30f4368a059fb24daee583c2f0fcb8bfba3d0ace",
+          "start": 40960
+        },
+        {
+          "got": 4097,
+          "hash": "608bbba982926e07b4a93cecc7d15fb8c6c9f03385701741f0c704817a03e41f",
+          "start": 45056
+        },
+        {
+          "got": 4097,
+          "hash": "bf25e93d6c03619c8602f966172c43a657280d55eb59b46b0587ee149b5f2723",
+          "start": 49152
+        },
+        {
+          "got": 4097,
+          "hash": "769eb0ef953acd246791526a2bc0078d24b47b379f805e3ad25945fb7024debb",
+          "start": 53248
+        },
+        {
+          "got": 4097,
+          "hash": "c86e2349b861f79fd0851a00adde54e13bcd537266a525fa8bdb9f2469801301",
+          "start": 57344
+        },
+        {
+          "got": 4097,
+          "hash": "48e55166c149a8f18ef8474f024e49f4ea78b27e0254756556ed08f5fa4e5927",
+          "start": 61440
+        },
+        {
+          "got": 4097,
+          "hash": "97f88363de6fb8044ebaf86e7dc8b6aff0b8ac3541f1984c8a106ccd00500f97",
+          "start": 65536
+        },
+        {
+          "got": 4097,
+          "hash": "2ca1ef757c0c33093f834f6cd825d39a766fab9e0a5abdeb0fc598fc1b34fe59",
+          "start": 69632
+        },
+        {
+          "got": 4097,
+          "hash": "203ab1d27a1ce186831950e425d300f198320ff0573efeaec900cdb826877f40",
+          "start": 73728
+        },
+        {
+          "got": 4097,
+          "hash": "450087cdd06ab60dea284eb88424e3de752d583ee256fcef7d5c52309938a625",
+          "start": 77824
+        },
+        {
+          "got": 4097,
+          "hash": "ade74650412e9ef0c26add416e4ab10226badfc8840c9f4e5a9c9738d6ccba3a",
+          "start": 81920
+        },
+        {
+          "got": 4097,
+          "hash": "48efb707066591950a6801cfc7733bb068e4ae2068e20bd4df686e0f020a5c05",
+          "start": 86016
+        },
+        {
+          "got": 4097,
+          "hash": "b3c2863131d3afcbcf43334252c5e8450c103dab5c04488ca844cc8db7472a8d",
+          "start": 90112
+        },
+        {
+          "got": 1792,
+          "hash": "abaee8c73dd9b9ea540275dd8ad1913208801ec4fb17f60e7eef4d002c2cb4a1",
+          "start": 94208
+        }
+      ],
+      "path": "entries.audio_aac_noise.m4a.audio.blocks.list",
+      "reason": "F-25/F-06 (P2): same mechanism as audio_aac_sine.m4a; AAC decoder history/priming after the shim's per-block re-seek differs between 8.1.3 and 9.1. Continuous decode is bit-identical; the block-pattern hash is not. Tracked as F-06."
+    },
+    {
+      "baseline": "166ca852e65d5433071b05750400e3ed1507c8fbb61d403388661ed5b2bbaecf",
+      "current": "ee9dee7b9f4a1b25156d9ad25b52d1dde2dad190c23671f981ed42f1d23d4c05",
+      "path": "entries.audio_aac_sine.m4a.audio.blocks.hash",
+      "reason": "F-25/F-06 (P2): the shim re-seeks for every mixer block (the 4096+1 pattern), and FFmpeg 9.1 changed AAC seek/priming behaviour (APIchanges lavc 63.23.101/102). A continuous decode is bit-identical between 8.1.3 and 9.1 (independent CLI check: 0 differing samples in the first second and in 24 seek+4097-sample comparisons run through each version's CLI, which handles priming itself); only the shim's block-pattern hash differs. Tracked as F-06, not a regression of this upgrade."
+    },
+    {
+      "baseline": [
+        {
+          "got": 4097,
+          "hash": "3215ad5fb3bde3dd06c81ca2c321eb269d10c91a561380e01df290b7e54d34ca",
+          "start": 0
+        },
+        {
+          "got": 4097,
+          "hash": "9348a65a71a95945812776faa4333af06657c1f4e84f8733e1ab97b08b363ebf",
+          "start": 4096
+        },
+        {
+          "got": 4097,
+          "hash": "26a348e834a8f917a7925f8cc122816fe925d7378cac1f5481d89849ef17627d",
+          "start": 8192
+        },
+        {
+          "got": 4097,
+          "hash": "34056310fdfc735934666b70a6ca95d63ec6ea9c1dcacf78f4aeba4786e4b30f",
+          "start": 12288
+        },
+        {
+          "got": 4097,
+          "hash": "fc372b4af4fba179ee2a08f51d660b2bebead3bcaa888fc9b11bb916049b6634",
+          "start": 16384
+        },
+        {
+          "got": 4097,
+          "hash": "6eee6da0df77c2a02337b1df92912ceb5ccd98e1a7113ad7046f0e67eead71e2",
+          "start": 20480
+        },
+        {
+          "got": 4097,
+          "hash": "0b59ada4e73581d9e7f43248716057dd591a4ee2d4ab9db2a65b1372087dec83",
+          "start": 24576
+        },
+        {
+          "got": 4097,
+          "hash": "f804491572348b3619220fdb4b3b261ed58ce6d89d625f1a135e2b74ea28c3d3",
+          "start": 28672
+        },
+        {
+          "got": 4097,
+          "hash": "dfcecfd1d5deaaf008cf10130449c12f17a94147dad83e774fe92c1940dbd5ca",
+          "start": 32768
+        },
+        {
+          "got": 4097,
+          "hash": "15971b596963ac6ed2c92d7192dfcdd79491d9643bf4dd839b655269bc18b725",
+          "start": 36864
+        },
+        {
+          "got": 4097,
+          "hash": "23954993014b8f8be5c7b8e11ee897d791645b49a43756e7a13ff99405a339c5",
+          "start": 40960
+        },
+        {
+          "got": 4097,
+          "hash": "f0a9bde888faf9ecb73e2289f1a9fc0ba3309f36e2580570b7810ef413673a5b",
+          "start": 45056
+        },
+        {
+          "got": 4097,
+          "hash": "05156af3a493b35f12381bc7abd75c17a7b6dec7944e4a3e94d44bd38039c2ca",
+          "start": 49152
+        },
+        {
+          "got": 4097,
+          "hash": "27d2d10dc9de3d76c10fe6eae1b71d9bd2dd19de84e9ae8817543b38ff1abc13",
+          "start": 53248
+        },
+        {
+          "got": 4097,
+          "hash": "b0e643dbb8786e238834968fd9aeb5f98da1cff645b3fa2d6a0cbbbcd0cac042",
+          "start": 57344
+        },
+        {
+          "got": 4097,
+          "hash": "6ff28799f00e7331bd3352b3ee8fe1f96944bf746c57d05be50b607db758a339",
+          "start": 61440
+        },
+        {
+          "got": 4097,
+          "hash": "9f16eaaf4422a340c7907048ba4ed69a5d4ee486808b00657bcb4028934fe1a6",
+          "start": 65536
+        },
+        {
+          "got": 4097,
+          "hash": "8f172ec380aa19c00febd9f22a4ae94d35f7b28194edda0560672f483df6229b",
+          "start": 69632
+        },
+        {
+          "got": 4097,
+          "hash": "cc68e20b51d68c19df1d565aa4a2826ce0012107b019d8bebeb09763119342ae",
+          "start": 73728
+        },
+        {
+          "got": 4097,
+          "hash": "699a60a1e2f0ce11f49cdfc8319c4770f4e297b66cd072f00caa41ffdc2192a5",
+          "start": 77824
+        },
+        {
+          "got": 4097,
+          "hash": "f2c9b2d20d6b87b96586ddb7b6768c6352c5bafbb5281294f6ddb2b968ebd6fd",
+          "start": 81920
+        },
+        {
+          "got": 4097,
+          "hash": "c728cbed4567411c6e0463f77e6c20bb14f8577a312ef705a98a5f99eb9901a9",
+          "start": 86016
+        },
+        {
+          "got": 4097,
+          "hash": "4002b4d0fb29ef8758ab5febf012d5eef311f482daf414cc442892d93694ffd6",
+          "start": 90112
+        },
+        {
+          "got": 2048,
+          "hash": "6687ad061252ab47f8969b9a151f7290ed8eb27ae86ebb93aa9da074b2d26b79",
+          "start": 94208
+        }
+      ],
+      "current": [
+        {
+          "got": 4097,
+          "hash": "3215ad5fb3bde3dd06c81ca2c321eb269d10c91a561380e01df290b7e54d34ca",
+          "start": 0
+        },
+        {
+          "got": 4097,
+          "hash": "9348a65a71a95945812776faa4333af06657c1f4e84f8733e1ab97b08b363ebf",
+          "start": 4096
+        },
+        {
+          "got": 4097,
+          "hash": "26a348e834a8f917a7925f8cc122816fe925d7378cac1f5481d89849ef17627d",
+          "start": 8192
+        },
+        {
+          "got": 4097,
+          "hash": "34056310fdfc735934666b70a6ca95d63ec6ea9c1dcacf78f4aeba4786e4b30f",
+          "start": 12288
+        },
+        {
+          "got": 4097,
+          "hash": "fc372b4af4fba179ee2a08f51d660b2bebead3bcaa888fc9b11bb916049b6634",
+          "start": 16384
+        },
+        {
+          "got": 4097,
+          "hash": "6eee6da0df77c2a02337b1df92912ceb5ccd98e1a7113ad7046f0e67eead71e2",
+          "start": 20480
+        },
+        {
+          "got": 4097,
+          "hash": "0b59ada4e73581d9e7f43248716057dd591a4ee2d4ab9db2a65b1372087dec83",
+          "start": 24576
+        },
+        {
+          "got": 4097,
+          "hash": "f804491572348b3619220fdb4b3b261ed58ce6d89d625f1a135e2b74ea28c3d3",
+          "start": 28672
+        },
+        {
+          "got": 4097,
+          "hash": "dfcecfd1d5deaaf008cf10130449c12f17a94147dad83e774fe92c1940dbd5ca",
+          "start": 32768
+        },
+        {
+          "got": 4097,
+          "hash": "15971b596963ac6ed2c92d7192dfcdd79491d9643bf4dd839b655269bc18b725",
+          "start": 36864
+        },
+        {
+          "got": 4097,
+          "hash": "23954993014b8f8be5c7b8e11ee897d791645b49a43756e7a13ff99405a339c5",
+          "start": 40960
+        },
+        {
+          "got": 4097,
+          "hash": "f0a9bde888faf9ecb73e2289f1a9fc0ba3309f36e2580570b7810ef413673a5b",
+          "start": 45056
+        },
+        {
+          "got": 4097,
+          "hash": "05156af3a493b35f12381bc7abd75c17a7b6dec7944e4a3e94d44bd38039c2ca",
+          "start": 49152
+        },
+        {
+          "got": 4097,
+          "hash": "27d2d10dc9de3d76c10fe6eae1b71d9bd2dd19de84e9ae8817543b38ff1abc13",
+          "start": 53248
+        },
+        {
+          "got": 4097,
+          "hash": "b0e643dbb8786e238834968fd9aeb5f98da1cff645b3fa2d6a0cbbbcd0cac042",
+          "start": 57344
+        },
+        {
+          "got": 4097,
+          "hash": "6ff28799f00e7331bd3352b3ee8fe1f96944bf746c57d05be50b607db758a339",
+          "start": 61440
+        },
+        {
+          "got": 4097,
+          "hash": "9f16eaaf4422a340c7907048ba4ed69a5d4ee486808b00657bcb4028934fe1a6",
+          "start": 65536
+        },
+        {
+          "got": 4097,
+          "hash": "8f172ec380aa19c00febd9f22a4ae94d35f7b28194edda0560672f483df6229b",
+          "start": 69632
+        },
+        {
+          "got": 4097,
+          "hash": "cc68e20b51d68c19df1d565aa4a2826ce0012107b019d8bebeb09763119342ae",
+          "start": 73728
+        },
+        {
+          "got": 4097,
+          "hash": "699a60a1e2f0ce11f49cdfc8319c4770f4e297b66cd072f00caa41ffdc2192a5",
+          "start": 77824
+        },
+        {
+          "got": 4097,
+          "hash": "f2c9b2d20d6b87b96586ddb7b6768c6352c5bafbb5281294f6ddb2b968ebd6fd",
+          "start": 81920
+        },
+        {
+          "got": 4097,
+          "hash": "c728cbed4567411c6e0463f77e6c20bb14f8577a312ef705a98a5f99eb9901a9",
+          "start": 86016
+        },
+        {
+          "got": 4097,
+          "hash": "4002b4d0fb29ef8758ab5febf012d5eef311f482daf414cc442892d93694ffd6",
+          "start": 90112
+        },
+        {
+          "got": 1792,
+          "hash": "421d3bc1f3f903e50b82f97d0f920f56a7b007947cc74adf561763b548797b14",
+          "start": 94208
+        }
+      ],
+      "path": "entries.audio_aac_sine.m4a.audio.blocks.list",
+      "reason": "F-25/F-06 (P2): the shim re-seeks for every mixer block (the 4096+1 pattern), and FFmpeg 9.1 changed AAC seek/priming behaviour (APIchanges lavc 63.23.101/102). A continuous decode is bit-identical between 8.1.3 and 9.1 (independent CLI check: 0 differing samples in the first second and in 24 seek+4097-sample comparisons run through each version's CLI, which handles priming itself); only the shim's block-pattern hash differs. Tracked as F-06, not a regression of this upgrade."
+    }
+  ],
+  "unexplained": 0
+}

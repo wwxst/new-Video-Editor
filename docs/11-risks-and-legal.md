@@ -51,6 +51,18 @@ build GPL. Arcline's posture:
   and provide the LGPL compliance package: exact source, build scripts, modification list, relink
   instructions — published per release.
 - Pin the FFmpeg version; track CVEs weekly; treat decoder crash rates as a tracked metric.
+- **Shipped build (2026-11-25):** FFmpeg 9.1, LGPL v2.1+ only, from the verified official tarball
+  by the recipe in [third_party/ffmpeg](../../third_party/ffmpeg) (D1–D4 recorded in its
+  `manifest.json` and in [HANDOVER](../../HANDOVER.md)). No `--enable-version3`, GPL, nonfree,
+  `libopenh264` or Media Foundation; only the `file` and `pipe` protocols, no HLS/DASH/concat
+  demuxers. The package bundles the runtime DLLs of its dynamically linked dependencies and the
+  third-party notice set in `third_party/ffmpeg/licenses/`; the CycloneDX SBOM is committed next to
+  the manifest.
+- **Runtime enforcement:** the shim is pinned at compile time (ABI and versions) and the process
+  checks the loaded libraries' versions and licences once at startup; a mismatch is refused unless
+  the user sets `ARCLINE_ALLOW_ANY_FFMPEG=1` (the LGPL relinking allowance), and the override is
+  recorded in every export report. CLI tools are resolved from the bundle only and verified against
+  the manifest ident (`ARCLINE_ALLOW_PATH_FFMPEG=1` in a debug build is a development aid).
 - On Linux (post-1.0), prefer system FFmpeg via distro/Flatpak packaging.
 - **Current state (2026-11-25):** development uses a BtbN FFmpeg 8.1.3 build that is LGPL **v3**
   (`--enable-version3`) with about 60 bundled external libraries and network protocols. It is not the

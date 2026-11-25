@@ -1,0 +1,15 @@
+{
+  "comment": "Differences between the FFmpeg 8.1.3 baseline and the 9.1 build that are explained and accepted (AC-7). Every other difference must fail the harness. Kept next to the baseline so the comparison is reproducible.",
+  "allowed": [
+    {
+      "entry": "audio_aac_sine.m4a",
+      "field": "audio.blocks",
+      "reason": "F-25/F-06 (P2): the shim re-seeks for every mixer block (the 4096+1 pattern), and FFmpeg 9.1 changed AAC seek/priming behaviour (APIchanges lavc 63.23.101/102). A continuous decode is bit-identical between 8.1.3 and 9.1 (independent CLI check: 0 differing samples in the first second and in 24 seek+4097-sample comparisons run through each version's CLI, which handles priming itself); only the shim's block-pattern hash differs. Tracked as F-06, not a regression of this upgrade."
+    },
+    {
+      "entry": "audio_aac_noise.m4a",
+      "field": "audio.blocks",
+      "reason": "F-25/F-06 (P2): same mechanism as audio_aac_sine.m4a; AAC decoder history/priming after the shim's per-block re-seek differs between 8.1.3 and 9.1. Continuous decode is bit-identical; the block-pattern hash is not. Tracked as F-06."
+    }
+  ]
+}

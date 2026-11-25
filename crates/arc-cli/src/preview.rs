@@ -7,6 +7,7 @@
 //! lands with the viewer texture in C3. The GUI only uploads the returned pixels; it never decodes
 //! or composes, so preview and export cannot drift apart silently.
 
+use crate::export::resolve;
 use arc_core::ids::AssetId;
 use arc_core::model::Project;
 use arc_core::time::Time;
@@ -101,9 +102,6 @@ struct FrameKey {
     asset: AssetId,
     time: Time,
 }
-
-use crate::export::resolve;
-
 
 fn push_warning(warnings: &mut Vec<String>, message: String) {
     if !warnings.contains(&message) {

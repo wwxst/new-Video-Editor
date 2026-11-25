@@ -75,6 +75,10 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf
             make
             diffutils
+            sed
+            gawk
+            xz
+            tar
             git
             gnupg
             curl

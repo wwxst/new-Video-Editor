@@ -185,6 +185,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "arc-media"
+version = "0.1.0"
+dependencies = [
+ "arc-core",
+ "cc",
+ "pkg-config",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "arc-render"
 version = "0.1.0"
 dependencies = [

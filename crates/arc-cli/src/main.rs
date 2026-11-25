@@ -16,7 +16,7 @@ use arc_core::{Command, CommandError, FrameRate};
 use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 #[derive(Parser, Debug)]
@@ -98,7 +98,7 @@ fn durability(cli: &Cli) -> Durability {
     }
 }
 
-fn open(path: &PathBuf, d: Durability) -> Result<EngineHost, Fail> {
+fn open(path: &Path, d: Durability) -> Result<EngineHost, Fail> {
     EngineHost::open(path, arc_render::builtin::catalog(), d).map_err(|e| match e {
         arc_core::runtime::HostError::Store(arc_core::store::StoreError::Locked(_)) => {
             fail("project_locked", e)

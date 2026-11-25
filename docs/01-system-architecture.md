@@ -198,7 +198,7 @@ inverses; the remaining methods read state, save, or run jobs ([02 §4](02-domai
 ### 6.2 Semantics
 
 - **Revisions.** Every committed batch increments `revision` by one. A stale `base_revision` fails with
-  `409 stale_revision` and the current revision. Optimistic concurrency, no locks.
+  `stale_revision` and the current revision. Optimistic concurrency, no locks.
 - **Batches are atomic.** The whole batch is validated against a simulated snapshot before the first
   mutation; it applies fully or not at all.
 - **Idempotency.** A repeated key returns the original result; retries after timeouts are safe.

@@ -1,7 +1,10 @@
 # ADR-0003 — FFmpeg for media I/O, in-process preview decode in v1
 
 **Status:** Accepted, revised 2026-11-24 after architecture review. Clarified 2026-11-24: `catch_unwind`
-limits and the practical isolation strategy.
+limits and the practical isolation strategy. Clarified 2026-11-25 (no change to the decision): the import
+check filters media but does not make the shim safe, so the shim must handle mid-stream parameter changes
+and open local files only ([audit](../../reports/audit-2026-11-25-88e0707.md) F-02, F-03, F-09; [04 §1.2](../04-media-pipeline.md)).
+Version pin and upgrade procedure: [specs/ffmpeg-9.1-upgrade.md](../specs/ffmpeg-9.1-upgrade.md).
 
 ## Context
 

@@ -123,6 +123,8 @@ the [Phase B closure report](../reports/phase-b-exit-2026-11-25.md))
 
 **Goal:** the editor exists: timeline, preview, multi-track compositing.
 
+**Status (2026-11-26):** plan written ([docs/specs/phase-c-plan.md](specs/phase-c-plan.md)); first slice **C1** (headless preview frame pipeline, `arc_cli::preview`) implemented with pixel parity to the export path - see [reports/phase-c-c1-2026-11-26.md](../reports/phase-c-c1-2026-11-26.md). Next: C2 scheduler, then C3 shell/viewer.
+
 Deliverables
 
 - Direct compositor: tracks, transforms, effects chain, transitions, overlays.

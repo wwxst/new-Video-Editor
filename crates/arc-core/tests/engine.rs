@@ -324,6 +324,39 @@ fn replay_reproduces_revisions() {
     assert_eq!(a.revision(), b.revision());
     // history rebuilt: redo works after replay
     b.redo(Source::Human).expect("redo after replay");
+}
+
+/// F-12: replaying a redo must pop the redo stack, exactly like `Engine::redo` does live.
+/// Replaying it used to push a fresh undo entry and leave the redo stack intact, so a second redo
+/// after recovery re-applied an already-applied batch (audit F-12, experiment E).
+#[test]
+fn replayed_redo_does_not_leave_a_phantom_redo() {
+    let mut a = engine_with_media();
+    let base = (*a.snapshot()).clone();
+    let base_rev = a.revision();
+    let mut entries = Vec::new();
+    entries.push(
+        a.apply(req(cmds(json!([
+            {"op":"timeline.add_clip","id":"cl_1","track":"tr_v1","asset":"as_a","start":{"num":0,"den":1},"duration":{"num":2,"den":1}}
+        ]))))
+        .expect("add")
+        .entry,
+    );
+    entries.push(a.undo(Source::Human).expect("undo").entry);
+    entries.push(a.redo(Source::Human).expect("redo").entry);
+    assert!(!a.can_redo(), "live redo consumed the redo stack");
+    assert!(a.can_undo());
+
+    let mut b = arc_core::Engine::new(base, base_rev, catalog()).expect("b");
+    for en in &entries {
+        b.replay(en).expect("replay");
+    }
+    assert_eq!(a.snapshot().canonical_hash(), b.snapshot().canonical_hash());
+    assert_eq!(a.revision(), b.revision());
+    assert!(!b.can_redo(), "a replayed redo must not leave a phantom redo");
+    assert!(b.can_undo());
+    let err = b.redo(Source::Human).expect_err("nothing left to redo");
+    assert_eq!(err.kind, arc_core::ErrorKind::NothingToRedo);
     let _ = Command::ProjectRename {
         name: String::new(),
     };

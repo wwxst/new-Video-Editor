@@ -439,14 +439,28 @@ impl Engine {
         validate_project(&work, self.catalog.as_ref())?;
         // Rebuild history so undo works after recovery.
         match entry.kind {
-            EntryKind::Edit | EntryKind::Redo => {
+            EntryKind::Edit => {
                 let inverse = inverse_of(&before, &work);
                 self.state.undo.push_back(Arc::new(HistoryEntry {
                     forward: cmds,
                     inverse,
                 }));
-                if entry.kind == EntryKind::Edit {
-                    self.state.redo.clear();
+                self.state.redo.clear();
+            }
+            EntryKind::Redo => {
+                // Mirror Engine::redo: the entry leaves the redo stack and becomes the undo entry
+                // again. Pushing a fresh forward entry instead left a phantom redo behind, so a
+                // second redo after recovery re-applied an already-applied batch (audit F-12).
+                match self.state.redo.pop_back() {
+                    Some(e) => self.state.undo.push_back(e),
+                    None => {
+                        // A redo without its undo (truncated history): keep the forward batch.
+                        let inverse = inverse_of(&before, &work);
+                        self.state.undo.push_back(Arc::new(HistoryEntry {
+                            forward: cmds,
+                            inverse,
+                        }));
+                    }
                 }
             }
             EntryKind::Undo => {

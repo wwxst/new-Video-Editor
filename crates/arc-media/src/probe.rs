@@ -184,18 +184,64 @@ fn test_decode(path: &Path, seek: Option<Time>) -> Result<tools::Output, String>
     tools::run(cmd, PROBE_TIMEOUT).map_err(|e| e.to_string())
 }
 
-/// Frames the test decode produced, from ffmpeg's `-progress` output.
-fn decoded_frames(o: &tools::Output) -> Option<u64> {
+/// Last value of a key in ffmpeg's `-progress` output (`key=value` lines).
+fn progress_value(o: &tools::Output, key: &str) -> Option<String> {
     let text = String::from_utf8_lossy(&o.stdout);
     let mut last = None;
     for line in text.lines() {
-        if let Some(v) = line.strip_prefix("frame=")
-            && let Ok(n) = v.trim().parse::<u64>()
+        if let Some(v) = line.strip_prefix(key)
+            && let Some(v) = v.strip_prefix('=')
         {
-            last = Some(n);
+            last = Some(v.trim().to_string());
         }
     }
     last
+}
+
+/// Frames the test decode produced, from ffmpeg's `-progress` output.
+fn decoded_frames(o: &tools::Output) -> Option<u64> {
+    progress_value(o, "frame").and_then(|v| v.parse().ok())
+}
+
+/// Decoded output time in microseconds, from ffmpeg's `-progress` output.
+fn decoded_out_time_us(o: &tools::Output) -> Option<i64> {
+    progress_value(o, "out_time_us").and_then(|v| v.parse().ok())
+}
+
+/// Why a successful test decode still shows the media is shorter than the probe promised.
+///
+/// Video is judged by decoded frames: a truncated container yields zero frames while ffmpeg still
+/// exits 0. Audio-only media has no frames to count, so it is judged by the decoded output time
+/// against the window that was requested (the probe's remaining duration, at most one second); this
+/// keeps a short but valid audio file from being classified as truncated. Images are not judged.
+fn decode_shortfall(
+    kind: AssetKind,
+    seek: Option<Time>,
+    duration: Time,
+    frames: Option<u64>,
+    out_time_us: Option<i64>,
+) -> Option<&'static str> {
+    if kind == AssetKind::Image {
+        return None;
+    }
+    if kind == AssetKind::Video {
+        return (frames == Some(0))
+            .then_some("test decode produced no video frames (truncated or unreadable media)");
+    }
+    let seek_us = seek
+        .map(|t| (t.to_f64_lossy() * 1_000_000.0) as i64)
+        .unwrap_or(0);
+    let duration_us = (duration.to_f64_lossy() * 1_000_000.0) as i64;
+    let expected_us = (duration_us - seek_us).clamp(0, 1_000_000);
+    if expected_us < 100_000 {
+        return None; // shorter than 0.1 s: not enough signal to judge
+    }
+    match out_time_us {
+        Some(t) if t * 2 >= expected_us => None,
+        _ => Some(
+            "test decode produced no audio output for the expected window (truncated or unreadable media)",
+        ),
+    }
 }
 
 /// The subprocess import check (docs/04 §1.2 step 1): probe, then test-decode the start, the
@@ -227,10 +273,11 @@ pub fn import_check(path: &Path) -> ImportOutcome {
         match test_decode(path, p) {
             Ok(o) => match o.exit {
                 Exit::Ok => {
-                    if decoded_frames(&o).is_some_and(|n| n == 0) {
+                    if let Some(reason) =
+                        decode_shortfall(kind, p, d, decoded_frames(&o), decoded_out_time_us(&o))
+                    {
                         return ImportOutcome::Offline {
-                            reason: "test decode produced no frames (truncated or unreadable media)"
-                                .into(),
+                            reason: reason.into(),
                         };
                     }
                 }
@@ -292,5 +339,24 @@ mod tests {
         assert_eq!(vi.rotation, -90);
         assert!(!vi.vfr);
         assert_eq!(p.audio.expect("audio").sample_rate, 48_000);
+    }
+
+    /// P3-1: the "short decode" gate is video-only for frames; audio-only media is judged by its
+    /// decoded output time against the requested window, and images are never judged.
+    #[test]
+    fn decode_shortfall_gates_video_frames_and_audio_output_time() {
+        let secs = Time::secs;
+        // Video: zero frames means truncated; any frame is accepted.
+        assert!(decode_shortfall(AssetKind::Video, None, secs(4), Some(0), None).is_some());
+        assert!(decode_shortfall(AssetKind::Video, None, secs(4), Some(30), None).is_none());
+        // Audio: no output at all, or much less than the promised second, is truncated.
+        assert!(decode_shortfall(AssetKind::Audio, None, secs(4), None, None).is_some());
+        assert!(decode_shortfall(AssetKind::Audio, None, secs(4), None, Some(1_000_000)).is_none());
+        assert!(decode_shortfall(AssetKind::Audio, None, secs(4), None, Some(200_000)).is_some());
+        // A short but valid audio file is judged against its own duration, not a full second.
+        let half = Time::new(1, 2).expect("t");
+        assert!(decode_shortfall(AssetKind::Audio, None, half, None, Some(500_000)).is_none());
+        // Images are not judged (a still is a single frame; no duration).
+        assert!(decode_shortfall(AssetKind::Image, None, Time::ZERO, Some(0), None).is_none());
     }
 }

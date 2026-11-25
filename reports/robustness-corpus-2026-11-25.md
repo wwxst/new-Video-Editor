@@ -36,10 +36,14 @@ refused by the import check.
 1. **Import check** (`arc_media::probe::import_check`) classifies every unreadable file as
    `Offline { reason }` (or `Quarantined { reason, .. }` when the child process crashed or timed
    out). The session layer refuses to import such a file, so it never becomes an asset.
-2. **Truncation detection (new).** The test decode now runs ffmpeg with `-progress pipe:1` and
-   reads the `frame=` counter: a decode that produces **no frames** at the start, middle or last
-   second is `Offline` ("test decode produced no frames"). Before this change a truncated container
-   whose header still parsed was accepted, because ffmpeg exits 0 when a seek lands past the data.
+2. **Truncation detection (video and audio, P3-1).** The test decode runs ffmpeg with
+   `-progress pipe:1`. For a **video** asset a decode that produces **zero frames** at the start,
+   middle or last second is `Offline` ("no video frames"). For **audio-only** media there are no
+   frames to count, so the decoded `out_time_us` is compared with the window the probe promised
+   (`min(1 s, remaining duration)`): less than half of it is `Offline` ("no audio output for the
+   expected window"). A short but valid audio file is judged against its own duration, and images
+   are not judged at all. Before this change a truncated container whose header still parsed was
+   accepted, because ffmpeg exits 0 when a seek lands past the data.
 3. **Decode boundary** (`VideoDecoder::open` / `frame_at`, `AudioDecoder::open` / `read`) returns
    `Result<_, MediaError>`; `MediaError::Decode(String)` carries the libav error text,
    `MediaError::EndOfStream` is an exhausted stream, `MediaError::Path` a refused path. No media

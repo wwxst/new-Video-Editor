@@ -198,3 +198,57 @@ fn usage_and_frame_rate_errors() {
     let (code, _) = cli(&["frobnicate"], None);
     assert_eq!(code, 64);
 }
+/// P3-3: `render --help` and the codec parser share one list, so `hevc` must appear in both.
+#[test]
+fn render_help_and_parse_offer_the_same_codecs() {
+    let (code, out) = cli(&["render", "--help"], None);
+    assert_eq!(code, 0, "{out}");
+    for name in ["ffv1", "h264", "hevc", "av1", "prores", "dnxhd"] {
+        assert!(out.contains(name), "{name} missing from --help: {out}");
+    }
+    let (code, out) = cli(&["render", "unused.arcline", "-o", "out.mkv", "--codec", "bogus"], None);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("codec must be one of"), "{out}");
+    assert!(out.contains("hevc"), "{out}");
+}
+/// P3-7: the no-encoder path is testable without hardware. `ARCLINE_ENCODER_CANDIDATES` (a debug
+/// build aid) replaces the candidate list, so a `--codec hevc` render must fail with the typed
+/// "no working encoder" message instead of silently choosing something else.
+#[test]
+fn render_without_a_usable_hevc_encoder_reports_no_encoder() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let p = dir.path().join("noenc.arcline");
+    let ps = p.to_str().expect("utf8");
+    let (code, out) = cli(&["new", ps, "--name", "NoEnc", "--fps", "30"], None);
+    assert_eq!(code, 0, "{out}");
+    let batch = json!([
+        {"op":"track.add","id":"tr_v1","kind":"video"},
+        {"op":"asset.import","id":"as_a","path":"media/a.mov","kind":"video","probe":{"duration":{"num":1,"den":1}}},
+        {"op":"timeline.add_clip","id":"cl_1","track":"tr_v1","asset":"as_a","start":"00:00:00:00","duration":"00:00:00:10"}
+    ]);
+    let (code, out) = cli(&["apply", ps], Some(&batch.to_string()));
+    assert_eq!(code, 0, "{out}");
+
+    let output = dir.path().join("noenc.mkv");
+    let child = Command::new(env!("CARGO_BIN_EXE_arcline-cli"))
+        .args([
+            "render",
+            ps,
+            "-o",
+            output.to_str().expect("utf8"),
+            "--codec",
+            "hevc",
+            "--from",
+            "00:00:00:00",
+            "--to",
+            "00:00:00:01",
+        ])
+        .env("ARCLINE_ENCODER_CANDIDATES", "definitely_not_an_encoder")
+        .output()
+        .expect("run render");
+    assert_eq!(child.status.code(), Some(2));
+    let text = String::from_utf8_lossy(&child.stdout);
+    assert!(text.contains("\"kind\":\"render_failed\""), "{text}");
+    assert!(text.contains("no working encoder"), "{text}");
+    assert!(text.contains("definitely_not_an_encoder"), "{text}");
+}

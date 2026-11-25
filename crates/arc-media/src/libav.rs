@@ -570,7 +570,7 @@ mod tests {
         l[3] = "LGPL version 3 or later".into();
         assert!(validate_runtime(&b, &b, &l).iter().any(|p| p.contains("approved")));
     }
-}
+
     /// Malformed headers can claim absurd frame sizes; the decoder must refuse them before
     /// allocating the RGBA buffer instead of aborting on the allocation.
     #[test]
@@ -581,3 +581,4 @@ mod tests {
         assert!(check_dimensions(65535, 65535).is_err());
         assert!(check_dimensions(u32::MAX, 2).is_err());
     }
+}

@@ -396,3 +396,35 @@ fn changing_an_asset_path_reopens_the_decoder() {
     assert_ne!(before, after, "the new source must be decoded, not the old one");
     assert_eq!(e.stats().decodes, 2);
 }
+/// P3-4: a file repaired in place (same path) must be picked up, not served from the stale
+/// "unavailable" verdict. No project edit is needed: the file fingerprint changed.
+#[test]
+fn repairing_the_file_at_the_same_path_is_picked_up() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().expect("tmp");
+    let project = project_with_clip(dir.path());
+    let media = dir.path().join("counter.mkv");
+    std::fs::remove_file(&media).expect("remove media");
+
+    let mut e = engine(&project, dir.path());
+    let missing = e.frame(0).expect("frame with a missing source");
+    assert!(
+        missing.warnings.iter().any(|w| w.contains("unavailable")),
+        "{:?}",
+        missing.warnings
+    );
+    assert!(missing.rgba.iter().enumerate().all(|(i, b)| i % 4 == 3 || *b == 0));
+
+    // The same path gets a valid file again (different size and mtime).
+    write_counter_video(&media, 20, FrameRate::Fps30.rate(), 320, 180, false).expect("repaired");
+    let repaired = e.frame(0).expect("frame after repair");
+    assert!(repaired.warnings.is_empty(), "{:?}", repaired.warnings);
+    assert!(
+        repaired
+            .rgba
+            .iter()
+            .enumerate()
+            .any(|(i, b)| i % 4 != 3 && *b != 0),
+        "the repaired source must be decoded"
+    );
+}

@@ -520,7 +520,7 @@ fn mixed_media_export_survives_an_unreadable_asset() {
     }
     let f = d.frame_at(rate.time_of_frame(45)).expect("broken-frame slot");
     assert!(
-        f.rgba.chunks_exact(4).all(|px| px[0] == 0 && px[1] == 0 && px[2] == 0),
+        f.rgba.iter().enumerate().all(|(i, b)| i % 4 == 3 || *b == 0),
         "an unavailable source renders black, not a stale frame"
     );
 

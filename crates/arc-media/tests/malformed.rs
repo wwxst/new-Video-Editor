@@ -7,7 +7,6 @@
 //! test. The mixed-media export test in `arc-cli/tests/render_e2e.rs` proves the engine keeps
 //! rendering when one asset is unavailable.
 
-use arc_core::model::AssetKind;
 use arc_core::time::FrameRate;
 use arc_media::fixtures::write_counter_video;
 use arc_media::probe::{ImportOutcome, import_check};

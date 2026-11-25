@@ -189,10 +189,10 @@ fn decoded_frames(o: &tools::Output) -> Option<u64> {
     let text = String::from_utf8_lossy(&o.stdout);
     let mut last = None;
     for line in text.lines() {
-        if let Some(v) = line.strip_prefix("frame=") {
-            if let Ok(n) = v.trim().parse::<u64>() {
-                last = Some(n);
-            }
+        if let Some(v) = line.strip_prefix("frame=")
+            && let Ok(n) = v.trim().parse::<u64>()
+        {
+            last = Some(n);
         }
     }
     last

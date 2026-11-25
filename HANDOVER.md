@@ -199,6 +199,12 @@ Fold these into docs/02–06 (or an ADR) when convenient; none contradicts an AD
 
     The full list (F-01 to F-33) is in the audit.
 
+11. **UNC asset paths are trusted.** A project file received from someone else can point at a UNC
+    path (or a mapped network drive), and the in-process decoder will open it, which can trigger
+    outbound SMB authentication (NTLM credential leak). Network-share media is intentionally
+    supported, so this is bounded with the `--root`/`--output-root` allow-list work (audit F-10),
+    not by rejecting UNC paths now.
+
 ## 7. Next steps (in roadmap order)
 
 **P0 — before Phase C** (audit §10)

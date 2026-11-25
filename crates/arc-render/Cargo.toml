@@ -1,6 +1,6 @@
 [package]
 name = "arc-render"
-description = "Arcline renderer: wgpu device, direct compositor, built-in effects, text. No FFmpeg, no UI."
+description = "Arcline renderer: wgpu device, direct compositor, built-in effects, frame planning. No FFmpeg, no UI."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,6 +9,14 @@ repository.workspace = true
 
 [dependencies]
 arc-core.workspace = true
+# Same major as egui-wgpu so the GUI can share its device with the compositor.
+wgpu = "30"
+pollster.workspace = true
+bytemuck.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

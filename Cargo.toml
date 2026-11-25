@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/arc-core",
     "crates/arc-media",
+    "crates/arc-audio",
     "crates/arc-render",
     "crates/arc-cli",
     "crates/arc-app",

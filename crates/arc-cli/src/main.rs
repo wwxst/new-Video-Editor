@@ -67,6 +67,29 @@ enum Cmd {
         #[arg(long)]
         base_revision: Option<u64>,
     },
+    /// Run the subprocess import check on a media file (JSON)
+    Probe { media: PathBuf },
+    /// Import media files into a project (import check + probe), then save
+    Import { path: PathBuf, media: Vec<PathBuf> },
+    /// Render the project (last saved state, or --snapshot) to a file and write <output>.report.json
+    Render {
+        path: PathBuf,
+        #[arg(short, long)]
+        output: PathBuf,
+        /// ffv1 | h264 | av1 | prores
+        #[arg(long, default_value = "h264")]
+        codec: String,
+        /// Start timecode (inclusive)
+        #[arg(long)]
+        from: Option<String>,
+        /// End timecode (exclusive)
+        #[arg(long)]
+        to: Option<String>,
+        /// Render this document snapshot (JSON) instead of the saved project, e.g. one written by
+        /// the GUI or job.submit while the project is open
+        #[arg(long)]
+        snapshot: Option<PathBuf>,
+    },
 }
 
 struct Fail {
@@ -149,6 +172,31 @@ fn read_commands(file: &Option<PathBuf>) -> Result<Vec<Command>, Fail> {
     serde_json::from_value(list).map_err(|e| fail("invalid_command", e))
 }
 
+fn outcome_json(o: &arc_media::probe::ImportOutcome) -> Value {
+    use arc_media::probe::ImportOutcome::*;
+    match o {
+        Ok { kind, probe } => json!({"status": "ok", "kind": kind, "probe": probe}),
+        Quarantined {
+            reason,
+            kind,
+            probe,
+        } => json!({"status": "quarantined", "reason": reason, "kind": kind, "probe": probe}),
+        Offline { reason } => json!({"status": "offline", "reason": reason}),
+    }
+}
+
+/// Store media paths relative to the project folder when the media lives below it.
+fn project_relative(project: &Path, media: &Path) -> String {
+    let abs = std::fs::canonicalize(media).unwrap_or_else(|_| media.to_path_buf());
+    let root = project.parent().and_then(|p| std::fs::canonicalize(p).ok());
+    let rel = root
+        .as_ref()
+        .and_then(|r| abs.strip_prefix(r).ok())
+        .map(Path::to_path_buf);
+    let s = rel.unwrap_or(abs).to_string_lossy().replace('\\', "/");
+    s.strip_prefix("//?/").map(str::to_string).unwrap_or(s)
+}
+
 fn run(cli: Cli) -> Result<String, Fail> {
     let d = durability(&cli);
     match &cli.cmd {
@@ -211,6 +259,119 @@ fn run(cli: Cli) -> Result<String, Fail> {
                 host.shutdown();
             }
             Ok(serde_json::to_string(&r).unwrap_or_default())
+        }
+        Cmd::Probe { media } => {
+            Ok(outcome_json(&arc_media::probe::import_check(media)).to_string())
+        }
+        Cmd::Import { path, media } => {
+            use arc_media::probe::ImportOutcome;
+            let mut commands = Vec::new();
+            let mut outcomes = Vec::new();
+            for m in media {
+                let o = arc_media::probe::import_check(m);
+                outcomes.push(json!({"path": m, "result": outcome_json(&o)}));
+                let rel = project_relative(path, m);
+                let (kind, probe, status) = match o {
+                    ImportOutcome::Ok { kind, probe } => {
+                        (kind, Some(probe), arc_core::model::AssetStatus::Ok)
+                    }
+                    ImportOutcome::Quarantined { kind, probe, .. } => (
+                        kind.unwrap_or(arc_core::model::AssetKind::Video),
+                        probe,
+                        arc_core::model::AssetStatus::Quarantined,
+                    ),
+                    ImportOutcome::Offline { .. } => (
+                        arc_core::model::AssetKind::Video,
+                        None,
+                        arc_core::model::AssetStatus::Offline,
+                    ),
+                };
+                commands.push(Command::AssetImport {
+                    id: None,
+                    path: rel,
+                    kind,
+                    probe,
+                    status,
+                });
+            }
+            let host = open(path, d)?;
+            let r = host.apply(ApplyRequest {
+                commands,
+                source: Some(Source::Client("arcline-cli".into())),
+                ..Default::default()
+            });
+            let r = match r {
+                Ok(r) => r,
+                Err(e) => {
+                    host.shutdown();
+                    return Err(e.into());
+                }
+            };
+            finish(host)?;
+            Ok(
+                json!({"revision": r.revision, "imported": r.resulting, "checks": outcomes})
+                    .to_string(),
+            )
+        }
+        Cmd::Render {
+            path,
+            output,
+            codec,
+            from,
+            to,
+            snapshot,
+        } => {
+            let codec = arc_media::encode::VideoCodec::parse(codec)
+                .ok_or_else(|| fail("invalid_value", "codec must be ffv1, h264, av1, or prores"))?;
+            let project = match snapshot {
+                Some(s) => {
+                    let bytes = std::fs::read(s).map_err(|e| fail("io_error", e))?;
+                    arc_core::store::parse_document(&bytes)
+                        .map_err(|e| fail("invalid_document", e))?
+                }
+                None => {
+                    arc_core::store::load_container(path)
+                        .map_err(|e| fail("io_error", e))?
+                        .0
+                }
+            };
+            let rate = project
+                .sequence()
+                .map(|s| s.frame_rate())
+                .ok_or_else(|| fail("invalid_document", "no sequence"))?;
+            let frame = |tc: &Option<String>| -> Result<Option<i64>, Fail> {
+                tc.as_ref()
+                    .map(|t| {
+                        rate.parse_timecode(t)
+                            .map_err(|e| Fail::from(CommandError::from(e)))
+                    })
+                    .transpose()
+            };
+            let spec = arc_cli::export::ExportSpec {
+                output: output.clone(),
+                codec,
+                from: frame(from)?,
+                to: frame(to)?,
+                media_root: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+            };
+            let report = arc_cli::export::export(&project, &spec, |done, total| {
+                if done == total || done % 30 == 0 {
+                    eprintln!(
+                        "{}",
+                        json!({"progress": {"frames_done": done, "frames_total": total}})
+                    );
+                }
+            })
+            .map_err(|e| fail("render_failed", e))?;
+            let report_json = serde_json::to_value(&report).unwrap_or_default();
+            let mut rp = output.clone().into_os_string();
+            rp.push(".report.json");
+            std::fs::write(
+                &rp,
+                serde_json::to_vec_pretty(&report_json).unwrap_or_default(),
+            )
+            .map_err(|e| fail("io_error", e))?;
+            Ok(report_json.to_string())
         }
     }
 }

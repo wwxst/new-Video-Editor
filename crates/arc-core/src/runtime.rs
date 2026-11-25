@@ -355,6 +355,10 @@ impl EngineState {
     fn on_written(&mut self, revision: u64, ok: bool, error: Option<String>) {
         if ok {
             self.engine.confirm(revision);
+            // Publish the confirmed state before replying: a client that reads `published()`
+            // after its reply must see its own revision acknowledged (found by
+            // `acknowledgement_and_notifications` under parallel test load).
+            self.publish();
             if let Some((reply, result, source)) = self.pending.remove(&revision) {
                 let diff = result.diff.clone();
                 let _ = reply.send(Ok(result));

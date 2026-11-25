@@ -156,11 +156,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "arc-cli"
+name = "arc-audio"
 version = "0.1.0"
 dependencies = [
  "arc-core",
+ "serde_json",
+]
+
+[[package]]
+name = "arc-cli"
+version = "0.1.0"
+dependencies = [
+ "arc-audio",
+ "arc-core",
+ "arc-media",
  "arc-render",
+ "blake3",
  "clap",
  "serde",
  "serde_json",
@@ -202,6 +213,11 @@ name = "arc-render"
 version = "0.1.0"
 dependencies = [
  "arc-core",
+ "bytemuck",
+ "pollster",
+ "serde_json",
+ "thiserror 2.0.21",
+ "wgpu",
 ]
 
 [[package]]

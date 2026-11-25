@@ -361,3 +361,48 @@ fn replayed_redo_does_not_leave_a_phantom_redo() {
         name: String::new(),
     };
 }
+
+/// F-13: a clip with speed != 1 splits and trims in at any frame.
+///
+/// `source_in` is derived as `timeline offset x speed`, which is not on a sequence frame boundary
+/// for most positions, and `validate_clip` used to reject it (audit F-13, experiment B). Derived
+/// source times are exact rationals, so the rule now allows them when the clip plays at speed != 1
+/// and keeps the frame-grid requirement at speed 1.
+#[test]
+fn speed_not_one_clips_split_and_trim_at_any_frame() {
+    let mut e = engine_with_media();
+    e.apply(req(cmds(json!([{
+        "op":"timeline.add_clip","id":"cl_s","track":"tr_v1","asset":"as_a",
+        "start":{"num":0,"den":1},"duration":{"num":2,"den":1},"speed":{"num":1,"den":2}
+    }]))))
+    .expect("half-speed clip");
+    // frame 31 of 30 fps: source_in = 31/60 s, half a frame between boundaries
+    e.apply(req(cmds(json!([{
+        "op":"timeline.split_clip","clip":"cl_s","at":{"num":31,"den":30},"new_id":"cl_s2"
+    }]))))
+    .expect("split at an odd frame");
+    let snapshot = (*e.snapshot()).clone();
+    let seq = snapshot.sequence().expect("seq");
+    let right = seq.clip(&"cl_s2".parse_clip()).expect("right part");
+    assert_eq!(right.source_in, Time::new(31, 60).expect("t"));
+    // in-edge trim by one more frame at half speed
+    e.apply(req(cmds(json!([{
+        "op":"timeline.trim_clip","clip":"cl_s2","edge":"in","to":{"num":32,"den":30}
+    }]))))
+    .expect("in-edge trim at an odd frame");
+    let snapshot = (*e.snapshot()).clone();
+    let seq = snapshot.sequence().expect("seq");
+    assert_eq!(
+        seq.clip(&"cl_s2".parse_clip()).expect("right").source_in,
+        Time::new(32, 60).expect("t")
+    );
+    // a speed-1 clip still requires a frame-aligned source_in
+    let err = e
+        .apply(req(cmds(json!([{
+            "op":"timeline.add_clip","id":"cl_f","track":"tr_v2","asset":"as_a",
+            "start":{"num":0,"den":1},"duration":{"num":1,"den":1},
+            "source_in":{"num":1,"den":60}
+        }]))))
+        .expect_err("sub-frame source_in at speed 1");
+    assert_eq!(err.kind, ErrorKind::OffFrameBoundary);
+}

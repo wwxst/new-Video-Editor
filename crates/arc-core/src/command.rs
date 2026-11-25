@@ -1384,12 +1384,17 @@ fn validate_clip(
             cp("clip ends past the 24 h sequence limit"),
         ));
     }
-    for (name, v) in [
-        ("start", c.start),
-        ("duration", c.duration),
-        ("source_in", c.source_in),
+    // `start` and `duration` are timeline values and must stay on the frame grid. `source_in` is a
+    // *source* time: when the clip plays at speed ≠ 1 it is derived from a frame-aligned timeline
+    // position and is generally not on a sequence frame boundary (audit F-13). It is still an exact
+    // rational, so the time model is unchanged; at speed 1 the frame grid is required as before
+    // (docs/02 §2.3).
+    for (name, v, requires_boundary) in [
+        ("start", c.start, true),
+        ("duration", c.duration, true),
+        ("source_in", c.source_in, c.speed == Ratio::ONE),
     ] {
-        if !rate.is_on_boundary(v) {
+        if requires_boundary && !rate.is_on_boundary(v) {
             return Err(err(
                 ErrorKind::OffFrameBoundary,
                 cp(&format!(

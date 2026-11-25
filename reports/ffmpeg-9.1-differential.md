@@ -28,6 +28,12 @@ GCC 16.2.0 rev7 for the FFmpeg build).
 | SBOM | [sbom.cyclonedx.json](../third_party/ffmpeg/sbom.cyclonedx.json) (CycloneDX 1.5; FFmpeg + dav1d, SVT-AV1, oneVPL, zlib, nv-codec-headers, AMF headers, GCC runtime, libstdc++, winpthreads) |
 | Notices | [licenses/](../third_party/ffmpeg/licenses/) — LGPL v2.1 text, FFmpeg `LICENSE.md`, every third-party notice, GCC Runtime Library Exception, MinGW-w64 notices, IJG credit note |
 
+`third_party/ffmpeg/verify.sh` resolves `objdump` from `OBJDUMP`, then the PATH (any binutils
+distribution, including Git's/WinLibs'), then the pinned MSYS2 location, and fails clearly when
+none is found — so the AC-4 PE checks also run outside MSYS2. Both paths were exercised: MSYS2
+exit 0 with `objdump: objdump`, and a dev-shell PATH (WinLibs objdump) exit 0 with 40 `ok` checks;
+a missing/bogus `OBJDUMP` exits 1 with `FAIL objdump not found; set OBJDUMP=<path> …`.
+
 The export report's `ffmpeg.build_id` is the SHA-256 of `manifest.json`
 (`6dfd2a28d285d600d6a99acaf5b9efcdfdf9d9622ff9f4f749ff05422294fa65` at the time of the build;
 verified equal by an actual export). The manifest and SBOM are written as UTF-8 without BOM and
@@ -169,20 +175,22 @@ or `hevc_mf` (D2). All shipped binaries carry the three required PE flags.
 
 | Run | Command | Result |
 |---|---|---|
-| 1 | `cargo test --workspace` | **95 passed, 0 failed, 1 ignored** |
-| 2 | `cargo test --workspace` | **95 passed, 0 failed, 1 ignored** |
-| 3 | `cargo test --workspace` | **95 passed, 0 failed, 1 ignored** |
+| 1 | `cargo test --workspace` | **96 passed, 0 failed, 1 ignored** |
+| 2 | `cargo test --workspace` | **96 passed, 0 failed, 1 ignored** |
+| 3 | `cargo test --workspace` | **96 passed, 0 failed, 1 ignored** |
 | clippy | `cargo clean -p … && CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets` | exit 0, **0 lints** (only the pre-existing unused-workspace-dependency manifest warning) |
 | build | `cargo build --workspace --all-targets` | exit 0 |
 
-All 65 original tests are still present and pass unchanged; the additional 30 tests are the P0
+All 65 original tests are still present and pass unchanged; the additional 31 tests are the P0
 regressions and the upgrade's runtime/encoder/fixture tests.
 
 - **AC-8:** on this machine `--codec h264` selects **`h264_qsv`** (10/10 frames, verified by an
   actual render); `libsvtav1` encodes and the output decodes (`libsvtav1_encodes_and_the_result_decodes`);
   `render_is_frame_exact_with_audio` verifies every FFV1 output frame and `render_range_and_h264`
   verifies the H.264 output frame; `av1_and_prores_exports_are_decodable` verifies AV1 and
-  `prores_ks` outputs decode. Encoder selection is unchanged from 8.1.3 (`h264_qsv` first available).
+  `prores_ks` outputs decode; `dnxhd_exports_are_decodable` renders a 1920×1080 DNxHD (SMPTE VC-3)
+  `.mov` and decodes it back, as spec §8.4 requires. Encoder selection is unchanged from 8.1.3
+  (`h264_qsv` first available).
 - **AC-11:** `cargo test -p arc-media --test param_change` — 2 passed. The F-02 test checks both
   the byte-concatenated TS fixture (sequential, 120 frames) and the audited continuous-timestamp
   MKV fixture (sequential, ≥110 of 120 frames, plus fresh-decoder random access). The MKV fixture is
@@ -249,9 +257,9 @@ default when the 9.1 directory is absent.
 | AC-3 | 9.x imports only; mismatched DLLs/tools refused; report block | `objdump -p arcline-cli.exe`; fake 8.1 tool bundle + `probe`; export report | ✅ avcodec-63/format-63/util-61/sws-10/swr-7, no 8.x; exit 2 `ffmpeg_unavailable` with pinned ident; report block with manifest SHA |
 | AC-4 | Shipped build: LGPL, no GPL/nonfree/version3, file+pipe only, no hls/dash/concat, no libopenh264/h264_mf, PE flags | `third_party/ffmpeg/verify.sh` | ✅ exit 0, 40 checks ok (see §3) |
 | AC-5 | `http:`, `handle:`, `concat:` etc. fail before network/handle in shim and CLI | `cargo test -p arc-media --test paths`; CLI/RPC import rejection tests | ✅ all refused (`MediaError::Path` / `invalid_value`) |
-| AC-6 | All existing tests pass 3×; clippy clean | 3 × `cargo test --workspace`; clippy | ✅ 95/95/95 passed, 0 failed, 1 ignored; 0 lints |
+| AC-6 | All existing tests pass 3×; clippy clean | 3 × `cargo test --workspace`; clippy | ✅ 96/96/96 passed, 0 failed, 1 ignored; 0 lints |
 | AC-7 | No unexplained 8.1.3-vs-9.1 difference | differential harness + allow-list | ✅ 4 differences (2 AAC block patterns ×2 paths), 0 unexplained; see §2 |
-| AC-8 | Encoder selection unchanged; AV1/libsvtav1; FFV1+H.264 frame-exact | `render_e2e`; manual `--codec h264`; `libsvtav1` test | ✅ h264_qsv; libsvtav1 encodes/decodes; FFV1/H.264 frame-exact; AV1/ProRes decode |
+| AC-8 | Encoder selection unchanged; AV1/libsvtav1; FFV1+H.264 frame-exact; ProRes/DNxHD decodable | `render_e2e`; manual `--codec h264`; `libsvtav1` test | ✅ h264_qsv; libsvtav1 encodes/decodes; FFV1/H.264 frame-exact; AV1/ProRes/DNxHD decode |
 | AC-9 | `Probe` results equal baseline | differential report | ✅ identical for all 22 entries |
 | AC-10 | Import-check outcomes equal baseline | differential report | ✅ identical for all 22 entries |
 | AC-11 | Corpus J/K neither crash nor wrong data | `cargo test -p arc-media --test param_change` | ✅ 2 passed, both fixture shapes + both audio read patterns |

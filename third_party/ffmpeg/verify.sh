@@ -60,7 +60,21 @@ for dll in libdav1d-7.dll libSvtAv1Enc-4.dll libvpl-2.dll libz-1.dll libgcc_s_se
 done
 
 echo "== PE security flags (DYNAMIC_BASE 0x40, HIGH_ENTROPY_VA 0x20, NX_COMPAT 0x100)"
-OBJDUMP=${OBJDUMP:-/ucrt64/bin/objdump.exe}
+# Resolve objdump portably: explicit OBJDUMP wins, then PATH (MSYS2 UCRT64, Git's binutils, a
+# MinGW distribution), then the pinned MSYS2 location. Fail clearly if none exists.
+if [ -z "${OBJDUMP:-}" ]; then
+    for candidate in objdump x86_64-w64-mingw32-objdump /ucrt64/bin/objdump.exe; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            OBJDUMP=$candidate
+            break
+        fi
+    done
+fi
+if [ -z "${OBJDUMP:-}" ] || ! command -v "$OBJDUMP" >/dev/null 2>&1; then
+    echo "FAIL objdump not found; set OBJDUMP=<path> (MSYS2 UCRT64: /ucrt64/bin/objdump.exe)" >&2
+    exit 1
+fi
+echo "objdump: $OBJDUMP"
 for f in "$BIN"/*.dll "$BIN"/*.exe; do
     flags=$("$OBJDUMP" -p "$f" 2>/dev/null | awk '/DllCharacteristics/{print $2}')
     if [ -z "$flags" ]; then bad "$(basename "$f"): no DllCharacteristics"; continue; fi

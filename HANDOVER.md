@@ -2,7 +2,7 @@
 
 Checkpoint date: 2026-11-25. Supersedes the earlier WIP handover of `720a99a`.
 
-**State: the workspace builds against the pinned FFmpeg 9.1 package, clippy is clean, and 95 tests
+**State: the workspace builds against the pinned FFmpeg 9.1 package, clippy is clean, and 96 tests
 pass** (Windows 11, Intel integrated GPU; see §3 for the exact counts and the three-run evidence in
 `reports/ffmpeg-9.1-differential.md`). All P0 audit defects are fixed and the FFmpeg 8.1.3 → 9.1
 upgrade is implemented (spec steps 0–3); the remaining audit findings are P2/P3 work items. Every
@@ -117,7 +117,7 @@ JSON-RPC methods implemented: `project.open` (incl. `create`), `project.describe
 Missing versus docs/06 §4.1: `history.list`, `inspect.frame`, `control.request`, `control.release`, and pushed
 notifications.
 
-## 3. Test results (all green, 95 tests, 1 ignored)
+## 3. Test results (all green, 96 tests, 1 ignored)
 
 Three consecutive full `cargo test --workspace` runs and a clean clippy run on the FFmpeg 9.1 switch
 are recorded in [reports/ffmpeg-9.1-differential.md](reports/ffmpeg-9.1-differential.md) §5; the
@@ -138,7 +138,7 @@ per-crate table below is the current suite.
 | arc-media `tests/differential.rs` | 1 | FFmpeg 8.1.3-vs-9.1 corpus harness (skipped unless `ARCLINE_CORPUS_DIR` is set; step-1 baseline committed) |
 | arc-render unit + `tests/plan.rs` + `tests/render.rs` | 1 + 1 + 5 | Manifests; frame planning incl. dissolve weights and handles; GPU bit-exact determinism, 1-LSB pass-through, color correct within 2 LSB of the CPU reference, transforms, linear-light opacity/dissolve, every effect runs or is reported |
 | arc-audio unit | 3 | **Block-size parity** (1…4096 identical) with a synthetic source, positions/gain/pan/fades/varispeed, WAV header. Parity through the real decoder for AAC/MP3/Opus/resampled media still shows the P2 F-06 defect |
-| arc-cli `tests/cli.rs`, `render_e2e.rs`, `rpc.rs` | 4 + 3 + 4 | CLI contract incl. `new --overwrite`; import checks and scheme/device rejection; **end-to-end: every output frame verified exact** (FFV1, H.264, ranges) with audio and the §4.5 `ffmpeg` report block; AV1/ProRes decode; RPC semantics, create/locked/existing, out-of-process render job |
+| arc-cli `tests/cli.rs`, `render_e2e.rs`, `rpc.rs` | 4 + 4 + 4 | CLI contract incl. `new --overwrite`; import checks and scheme/device rejection; **end-to-end: every output frame verified exact** (FFV1, H.264, ranges) with audio and the §4.5 `ffmpeg` report block; AV1/ProRes/DNxHD decode; RPC semantics, create/locked/existing, out-of-process render job |
 
 Not part of `cargo test`: the embedding PoC (`--example embed_host`). Run it manually; result recorded in
 `docs/poc/embedding-poc-2026-11-25.md`.

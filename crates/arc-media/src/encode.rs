@@ -22,6 +22,9 @@ pub enum VideoCodec {
     H264,
     Av1,
     ProRes,
+    /// SMPTE VC-3 / DNxHD (89/145/220 Mbit/s family; the encoder picks the profile from the size
+    /// and the 36 Mbit/s rate used here).
+    DnxHd,
 }
 
 impl VideoCodec {
@@ -31,6 +34,7 @@ impl VideoCodec {
             "h264" => Some(VideoCodec::H264),
             "av1" => Some(VideoCodec::Av1),
             "prores" => Some(VideoCodec::ProRes),
+            "dnxhd" => Some(VideoCodec::DnxHd),
             _ => None,
         }
     }
@@ -48,6 +52,7 @@ impl VideoCodec {
             ],
             VideoCodec::Av1 => &["av1_nvenc", "av1_qsv", "av1_amf", "libsvtav1"],
             VideoCodec::ProRes => &["prores_ks"],
+            VideoCodec::DnxHd => &["dnxhd"],
         }
     }
 
@@ -56,6 +61,7 @@ impl VideoCodec {
             VideoCodec::Ffv1 => "bgr0",
             VideoCodec::H264 | VideoCodec::Av1 => "yuv420p",
             VideoCodec::ProRes => "yuv422p10le",
+            VideoCodec::DnxHd => "yuv422p",
         }
     }
 
@@ -114,6 +120,12 @@ pub enum EncodeError {
 }
 
 fn trial(encoder: &str, codec: VideoCodec) -> bool {
+    // DNxHD only accepts the SMPTE VC-3 frame sizes (1920x1080 etc.), so its trial uses one; the
+    // other candidates can be tried cheaply at 256x144.
+    let size = match codec {
+        VideoCodec::DnxHd => "1920x1080",
+        _ => "256x144",
+    };
     let mut cmd = Command::new(tools::ffmpeg());
     cmd.args([
         "-hide_banner",
@@ -123,17 +135,13 @@ fn trial(encoder: &str, codec: VideoCodec) -> bool {
         "-f",
         "lavfi",
         "-i",
-        "color=c=gray:s=256x144:d=0.2:r=30",
+        &format!("color=c=gray:s={size}:d=0.2:r=30"),
     ])
-    .args([
-        "-c:v",
-        encoder,
-        "-pix_fmt",
-        codec.pix_fmt(),
-        "-f",
-        "null",
-        "-",
-    ]);
+    .args(["-c:v", encoder, "-pix_fmt", codec.pix_fmt()]);
+    if codec == VideoCodec::DnxHd {
+        cmd.args(["-b:v", "36M"]);
+    }
+    cmd.args(["-f", "null", "-"]);
     matches!(
         tools::run(cmd, Duration::from_secs(30)).map(|o| o.exit),
         Ok(Exit::Ok)
@@ -238,6 +246,10 @@ impl Encoder {
             }
             VideoCodec::ProRes => {
                 cmd.args(["-profile:v", "3"]);
+            }
+            VideoCodec::DnxHd => {
+                // SMPTE VC-3: the DNxHD profile follows from the frame size and this rate.
+                cmd.args(["-b:v", "36M"]);
             }
             _ => {}
         }

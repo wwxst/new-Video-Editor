@@ -211,6 +211,60 @@ fn av1_and_prores_exports_are_decodable() {
     assert_eq!((f.width, f.height), (320, 180));
 }
 
+/// Spec §8.4: DNxHD exports (SMPTE VC-3) produce decodable files. The DNxHD encoder only accepts
+/// the standard VC-3 frame sizes, so this uses a 1920x1080 project.
+#[test]
+fn dnxhd_exports_are_decodable() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let media = dir.path().join("counter1080.mkv");
+    write_counter_video(
+        &media,
+        15,
+        FrameRate::Fps30.rate(),
+        1920,
+        1080,
+        false,
+    )
+    .expect("fixture");
+    let p = dir.path().join("dnx.arcline");
+    let ps = p.to_str().expect("utf8");
+    let (code, out, err) = cli(
+        &["new", ps, "--fps", "30", "--res", "1920x1080", "--name", "DNx"],
+        None,
+    );
+    assert_eq!(code, 0, "{out} {err}");
+    let batch = json!([
+        {"op":"asset.import","id":"as_d","path":media.to_str().expect("utf8"),"kind":"video"},
+        {"op":"track.add","id":"tr_v1","kind":"video"},
+        {"op":"timeline.add_clip","id":"cl_d","track":"tr_v1","asset":"as_d","start":"00:00:00:00","duration":"00:00:00:10"}
+    ]);
+    let (code, out, err) = cli(&["apply", ps], Some(&batch.to_string()));
+    assert_eq!(code, 0, "{out} {err}");
+
+    let output = dir.path().join("out.mov");
+    let (code, stdout, err) = cli(
+        &[
+            "render",
+            ps,
+            "-o",
+            output.to_str().expect("utf8"),
+            "--codec",
+            "dnxhd",
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{stdout} {err}");
+    let r = j(&stdout);
+    assert_eq!(r["encoder"], json!("dnxhd"), "{r}");
+    assert_eq!(r["frames"], json!(10));
+    assert_eq!(r["ffmpeg"]["override"], json!(false));
+
+    let mut d = VideoDecoder::open(&output).expect("decode dnxhd output");
+    assert_eq!((d.info().width, d.info().height), (1920, 1080));
+    let f = d.frame_at(arc_core::Time::ZERO).expect("dnxhd frame");
+    assert_eq!((f.width, f.height), (1920, 1080));
+}
+
 #[test]
 fn render_range_and_h264() {
     let dir = tempfile::tempdir().expect("tmp");

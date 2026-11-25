@@ -1,10 +1,10 @@
-//! `arcline-cli` — headless Arcline (docs/06 §2).
+//! `arcline-cli` ??headless Arcline (docs/06 ?2).
 //!
 //! Output contract: stdout carries exactly one JSON document (or the text timeline for
 //! `timeline`). Errors print `{"error": {...}}` with a stable `kind` and exit with code 2;
 //! usage errors exit with code 64.
 //!
-//! Each invocation is one session; undo history does not persist across sessions (docs/02 §5),
+//! Each invocation is one session; undo history does not persist across sessions (docs/02 ?5),
 //! so undo/redo live in the JSON-RPC session (`arcline-cli rpc`, Phase F), not here.
 
 use arc_cli::inspect;
@@ -26,7 +26,7 @@ use std::process::ExitCode;
     about = "Headless Arcline: create, inspect, and edit projects"
 )]
 struct Cli {
-    /// fsync every journal record before acknowledging (docs/08 §4.4)
+    /// fsync every journal record before acknowledging (docs/08 ?4.4)
     #[arg(long, global = true)]
     durable: bool,
     #[command(subcommand)]
@@ -71,7 +71,7 @@ enum Cmd {
         #[arg(long)]
         base_revision: Option<u64>,
     },
-    /// Serve a JSON-RPC 2.0 session on stdin/stdout (docs/06 §4)
+    /// Serve a JSON-RPC 2.0 session on stdin/stdout (docs/06 ?4)
     Rpc {
         /// Client id recorded as the source of every edit
         #[arg(long, default_value = "rpc")]
@@ -162,13 +162,14 @@ fn parse_resolution(s: &str) -> Result<Resolution, Fail> {
     Ok(Resolution { w, h })
 }
 
-/// Media arguments must be local paths, never URLs or protocol strings (audit F-09).
-fn reject_scheme(p: &Path) -> Result<(), Fail> {
+/// Media arguments must be local paths, never URLs, protocol strings or device namespaces
+/// (audit F-09).
+fn reject_non_local(p: &Path) -> Result<(), Fail> {
     let s = p.to_string_lossy();
-    if arc_cli::media::has_url_scheme(&s) {
+    if arc_cli::media::has_url_scheme(&s) || arc_cli::media::is_device_path(&s) {
         return Err(fail(
             "invalid_value",
-            format!("media path must be a local file path, not a URL or protocol: {s}"),
+            format!("media path must be a local file path, not a URL, protocol or device: {s}"),
         ));
     }
     Ok(())
@@ -288,7 +289,7 @@ fn run(cli: Cli) -> Result<String, Fail> {
             Ok(serde_json::to_string(&r).unwrap_or_default())
         }
         Cmd::Probe { media } => {
-            reject_scheme(media)?;
+            reject_non_local(media)?;
             Ok(outcome_json(&arc_media::probe::import_check(media)).to_string())
         }
         Cmd::Import { path, media } => {
@@ -296,7 +297,7 @@ fn run(cli: Cli) -> Result<String, Fail> {
             let mut commands = Vec::new();
             let mut outcomes = Vec::new();
             for m in media {
-                reject_scheme(m)?;
+                reject_non_local(m)?;
                 let o = arc_media::probe::import_check(m);
                 outcomes.push(json!({"path": m, "result": outcome_json(&o)}));
                 let rel = arc_cli::media::project_relative(path, m);
@@ -429,3 +430,4 @@ fn main() -> ExitCode {
         }
     }
 }
+

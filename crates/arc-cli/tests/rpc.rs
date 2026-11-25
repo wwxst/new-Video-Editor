@@ -207,6 +207,8 @@ fn apply_checks_client_imports_and_rejects_urls() {
 
     let url = json!({"commands": [{"op":"asset.import","path":"handle:1","kind":"video","status":"ok"}]});
     assert_eq!(s.kind("project.apply", url), "invalid_value");
+    let device = json!({"commands": [{"op":"asset.import","path":"//./pipe/arcline","kind":"video","status":"ok"}]});
+    assert_eq!(s.kind("project.apply", device), "invalid_value");
     assert_eq!(s.ok("project.describe", json!({}))["assets"], json!([]));
 
     let r = s.ok(

@@ -64,10 +64,13 @@ pub fn resolve_imports(project_path: &Path, commands: &mut [Command]) -> Result<
         else {
             continue;
         };
-        if has_url_scheme(path) {
+        if has_url_scheme(path) || is_device_path(path) {
             return Err(CommandError::new(
                 ErrorKind::InvalidValue,
-                format!("asset path must be a local file path, not a URL or protocol: {path}"),
+                format!(
+                    "asset path must be a local file path, not a URL, protocol, device or \
+                     verbatim path: {path}"
+                ),
             )
             .at(format!("commands[{i}].path")));
         }
@@ -100,6 +103,17 @@ pub fn resolve_imports(project_path: &Path, commands: &mut [Command]) -> Result<
     Ok(())
 }
 
+    /// True when `s` uses a Windows device-namespace or verbatim prefix (`\\.\pipe\x`,
+    /// `\\?\GLOBALROOT\...`, `//./...`, `//?/...`); these are handle-style accesses, not media files.
+    pub fn is_device_path(s: &str) -> bool {
+        let lower = s.to_ascii_lowercase();
+        [
+            r"\\.\", r"\\?\", r"\.\", r"\?\", "//./", "//?/",
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p))
+    }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,6 +138,28 @@ mod tests {
             "\\\\server\\share\\x.mkv",
         ] {
             assert!(!has_url_scheme(s), "{s}");
+        }
+    }
+
+    #[test]
+    fn device_namespaces_are_rejected_but_unc_is_not() {
+        for s in [
+            r"\\.\pipe\arcline",
+            r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\x.mp4",
+            r"\.\pipe\x",
+            r"\?\C:\x",
+            "//./pipe/arcline",
+            "//?/C:/x.mp4",
+        ] {
+            assert!(is_device_path(s), "{s}");
+        }
+        for s in [
+            r"C:\media\x.mkv",
+            "C:/media/x.mkv",
+            r"\\server\share\x.mkv",
+            "media/x.mkv",
+        ] {
+            assert!(!is_device_path(s), "{s}");
         }
     }
 

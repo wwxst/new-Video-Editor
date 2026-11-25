@@ -35,6 +35,8 @@ typedef struct ArcAv {
     int dst_w, dst_h;     /* stream dimensions reported in ArcAvInfo: the RGBA destination size */
     struct SwrContext *swr;
     int out_rate;
+    int swr_in_fmt, swr_in_rate;  /* input parameters of the current resampler */
+    AVChannelLayout swr_in_layout;
     int64_t last_pts;     /* pts of the last delivered video frame, INT64_MIN if none */
     int eof_sent;
     /* buffered resampled audio (interleaved stereo f32) */
@@ -66,6 +68,7 @@ void arc_av_close(ArcAv *a) {
     if (!a) return;
     if (a->sws) sws_freeContext(a->sws);
     if (a->swr) swr_free(&a->swr);
+    av_channel_layout_uninit(&a->swr_in_layout);
     if (a->held) av_frame_free(&a->held);
     if (a->cur) av_frame_free(&a->cur);
     if (a->frame) av_frame_free(&a->frame);
@@ -266,24 +269,6 @@ int arc_av_video_at(ArcAv *a, int64_t target_pts, uint8_t *dst, int stride, int6
 
 /* ---- audio ---------------------------------------------------------------------------------- */
 
-static int ensure_swr(ArcAv *a, const AVFrame *f, int out_rate) {
-    if (a->swr && a->out_rate == out_rate) return 0;
-    if (a->swr) swr_free(&a->swr);
-    AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
-    AVChannelLayout in;
-    if (av_channel_layout_copy(&in, &f->ch_layout) < 0 || in.nb_channels == 0) av_channel_layout_default(&in, 2);
-    int r = swr_alloc_set_opts2(&a->swr, &stereo, AV_SAMPLE_FMT_FLT, out_rate, &in, f->format, f->sample_rate, 0, NULL);
-    av_channel_layout_uninit(&in);
-    if (r < 0) return r;
-    /* high quality, deterministic resampler */
-    av_opt_set_int(a->swr, "filter_size", 32, 0);
-    av_opt_set_int(a->swr, "phase_shift", 10, 0);
-    r = swr_init(a->swr);
-    if (r < 0) return r;
-    a->out_rate = out_rate;
-    return 0;
-}
-
 static int abuf_push(ArcAv *a, int frames) {
     int need = (a->abuf_len + frames) * 2;
     if (need > a->abuf_cap) {
@@ -293,6 +278,57 @@ static int abuf_push(ArcAv *a, int frames) {
         a->abuf = n;
         a->abuf_cap = cap;
     }
+    return 0;
+}
+
+/* Flush the samples still buffered inside the current resampler into `abuf`, so a rebuild on an
+ * input parameter change does not create a gap or repeat samples (F-03). */
+static int swr_drain(ArcAv *a) {
+    if (!a->swr) return 0;
+    int maxo = swr_get_out_samples(a->swr, 0);
+    if (maxo <= 0) return 0;
+    if (abuf_push(a, maxo) < 0) return AVERROR(ENOMEM);
+    uint8_t *outp = (uint8_t *)(a->abuf + (size_t)a->abuf_len * 2);
+    int got = swr_convert(a->swr, &outp, maxo, NULL, 0);
+    if (got < 0) return got;
+    a->abuf_len += got;
+    return 0;
+}
+
+/*
+ * Configure the resampler for this frame's input parameters. Any change of format, sample rate or
+ * channel layout rebuilds it, and the old one is drained first: frames can change parameters
+ * mid-stream and feeding a mono frame to a stereo resampler is invalid (audit F-03).
+ */
+static int ensure_swr(ArcAv *a, const AVFrame *f, int out_rate) {
+    AVChannelLayout in;
+    if (av_channel_layout_copy(&in, &f->ch_layout) < 0) return AVERROR(ENOMEM);
+    if (in.nb_channels == 0) av_channel_layout_default(&in, 2);
+    if (a->swr && a->out_rate == out_rate && a->swr_in_fmt == f->format &&
+        a->swr_in_rate == f->sample_rate && av_channel_layout_compare(&a->swr_in_layout, &in) == 0) {
+        av_channel_layout_uninit(&in);
+        return 0;
+    }
+    if (a->swr) {
+        int d = swr_drain(a);
+        if (d < 0) { av_channel_layout_uninit(&in); return d; }
+        swr_free(&a->swr);
+    }
+    av_channel_layout_uninit(&a->swr_in_layout);
+    AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
+    int r = swr_alloc_set_opts2(&a->swr, &stereo, AV_SAMPLE_FMT_FLT, out_rate, &in, f->format, f->sample_rate, 0, NULL);
+    if (r >= 0) {
+        /* high quality, deterministic resampler */
+        av_opt_set_int(a->swr, "filter_size", 32, 0);
+        av_opt_set_int(a->swr, "phase_shift", 10, 0);
+        r = swr_init(a->swr);
+    }
+    if (r >= 0) r = av_channel_layout_copy(&a->swr_in_layout, &in);
+    av_channel_layout_uninit(&in);
+    if (r < 0) { swr_free(&a->swr); return r; }
+    a->swr_in_fmt = f->format;
+    a->swr_in_rate = f->sample_rate;
+    a->out_rate = out_rate;
     return 0;
 }
 
@@ -354,7 +390,6 @@ int arc_av_audio_read(ArcAv *a, int out_rate, int64_t start, int frames, float *
         int r = next_frame(a, err, errlen);
         if (r < 0) return r;
         if (r == 1) break;
-        if (ensure_swr(a, a->frame, out_rate) < 0) { set_err(err, errlen, "resampler", 0); return -1; }
         if (a->audio_next_sample < 0) {
             AVStream *s = a->fmt->streams[a->stream];
             int64_t pts = frame_pts(a->frame);
@@ -362,6 +397,8 @@ int arc_av_audio_read(ArcAv *a, int out_rate, int64_t start, int frames, float *
             a->audio_next_sample = pts == AV_NOPTS_VALUE ? 0 : av_rescale_q(pts - base, s->time_base, (AVRational){1, out_rate});
             if (a->audio_next_sample < 0) a->audio_next_sample = 0;
         }
+        /* May drain the previous resampler into abuf before rebuilding it. */
+        if (ensure_swr(a, a->frame, out_rate) < 0) { set_err(err, errlen, "resampler", 0); return -1; }
         int maxo = swr_get_out_samples(a->swr, a->frame->nb_samples);
         if (abuf_push(a, maxo) < 0) { set_err(err, errlen, "out of memory", 0); return -1; }
         uint8_t *outp = (uint8_t *)(a->abuf + (size_t)a->abuf_len * 2);

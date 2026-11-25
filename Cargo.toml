@@ -2,6 +2,8 @@
 resolver = "3"
 members = [
     "crates/arc-core",
+    "crates/arc-render",
+    "crates/arc-cli",
 ]
 
 [workspace.package]

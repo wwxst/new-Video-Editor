@@ -1,0 +1,14 @@
+[package]
+name = "arc-render"
+description = "Arcline renderer: wgpu device, direct compositor, built-in effects, text. No FFmpeg, no UI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+arc-core.workspace = true
+
+[lints]
+workspace = true

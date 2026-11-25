@@ -1,8 +1,8 @@
 # ADR-0014 — Three integration levels; full native editor embedding as the goal
 
 **Status:** Accepted, 2026-11-24. Supersedes in part [ADR-0013](0013-product-modes-and-live-sessions.md)
-(decision 5: "no native in-window embedding"). Mechanism confirmation pending the embedding PoC
-([13 §2.4](../13-product-modes-and-live-sessions.md)).
+(decision 5: "no native in-window embedding"). **Mechanism confirmed by the embedding PoC on
+2026-11-25: GO** — see [PoC result](../poc/embedding-poc-2026-11-25.md).
 
 ## Context
 
@@ -48,3 +48,12 @@ interactive editor inside the agent client**; a preview panel is not an acceptab
 - **Shared-texture composition as the primary mechanism**: no window-hierarchy hazards, but requires the host to
   composite GPU textures and forward all input; kept as the no-go fallback.
 - **Reparenting into hosts without cooperation**: unsupportable; rejected.
+
+## PoC outcome (2026-11-25)
+
+All automated go criteria passed on Windows 11 with an integrated Intel GPU: embedded frame pacing matched
+top-level (p95 17.35 vs 17.25 ms), the child was correctly parented and followed host resizes, a 3 s child
+hang left the host responsive (11.7 ms max loop gap) and was detected by the watchdog at 2.0 s, and a
+killed child left the host intact. The shared-texture fallback is not needed. Still to verify manually:
+keyboard focus round-trip, IME placement, DPI change across monitors, and an Electron host
+([details](../poc/embedding-poc-2026-11-25.md)).

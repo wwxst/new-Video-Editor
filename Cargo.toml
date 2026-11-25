@@ -4,6 +4,7 @@ members = [
     "crates/arc-core",
     "crates/arc-render",
     "crates/arc-cli",
+    "crates/arc-app",
 ]
 
 [workspace.package]

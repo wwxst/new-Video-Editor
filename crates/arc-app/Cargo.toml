@@ -1,0 +1,28 @@
+[package]
+name = "arc-app"
+description = "Arcline desktop app: egui shell on egui-winit + egui-wgpu; top-level or embedded child window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "arcline"
+path = "src/main.rs"
+
+[dependencies]
+egui = "0.37"
+egui-winit = { version = "0.37", default-features = false, features = ["clipboard", "links"] }
+egui-wgpu = { version = "0.37", features = ["winit"] }
+# Same version egui-winit uses; listed directly for `with_parent_window` and the event loop.
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
+pollster.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[lints]
+workspace = true

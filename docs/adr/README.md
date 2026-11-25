@@ -20,4 +20,4 @@ a new ADR references the old one, and the old file's status changes to `Supersed
 | [0011](0011-windows-first.md) | Windows-first release strategy (v1.0 Windows, v1.1 macOS, Linux post-1.0) | Accepted 2026-11-24 |
 | [0012](0012-project-interchange-export.md) | Cross-editor project export (FCPXML, FCP7 XML, OTIO) | Accepted 2026-11-24 |
 | [0013](0013-product-modes-and-live-sessions.md) | Two product modes; live GUI sessions, takeover, Agent panel in v1 | Accepted; superseded in part by 0014 |
-| [0014](0014-integration-levels-and-native-embedding.md) | Three integration levels; full native editor embedding as the goal | Accepted 2026-11-24 (PoC pending) |
+| [0014](0014-integration-levels-and-native-embedding.md) | Three integration levels; full native editor embedding as the goal | Accepted 2026-11-24; PoC GO 2026-11-25 |

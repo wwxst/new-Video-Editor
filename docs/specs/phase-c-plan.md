@@ -54,6 +54,8 @@ own GPU textures.
 
 A request scheduler between the UI thread and the pipeline: latest-wins coalescing, half quality
 while scrubbing, full quality when the playhead settles, bounded queue, no UI-thread blocking.
+**Status:** implemented in `arc_cli::preview_scheduler` (commit set for this slice; see
+[reports/phase-c-c2-2026-11-26.md](../reports/phase-c-c2-2026-11-26.md)).
 
 **Acceptance criteria**
 1. With a fired sequence of playhead positions, only the latest pending position is rendered.

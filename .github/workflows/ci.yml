@@ -11,9 +11,11 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Do not cancel a push-to-main run: its media job can spend up to an hour building FFmpeg, and a
+# documentation commit should not throw that away. Superseded pull-request runs are cancelled.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always

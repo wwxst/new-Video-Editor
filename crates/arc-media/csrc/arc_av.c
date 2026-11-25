@@ -266,66 +266,106 @@ static int to_rgba(ArcAv *a, const AVFrame *f, uint8_t *dst, int stride) {
     return sws_scale(a->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, planes, strides) == a->dst_h ? 0 : -1;
 }
 
+/* Stream start in stream ticks; the earliest position a seek can usefully ask for. */
+static int64_t stream_start_ticks(const ArcAv *a) {
+    const AVStream *s = a->fmt->streams[a->stream];
+    return s->start_time == AV_NOPTS_VALUE ? 0 : s->start_time;
+}
+
+/* Seek to `target` and drop the decoder and look-ahead state. */
+static int video_seek(ArcAv *a, int64_t target, char *err, int errlen) {
+    /* A target at or before the stream start must rewind to the first packet: a timestamp seek in
+     * an unindexed container (MPEG-TS) can land after the target even for position 0. The
+     * global (stream_index -1) form takes AV_TIME_BASE and is the reliable "rewind" (F-08). */
+    int r = target <= stream_start_ticks(a)
+                ? av_seek_frame(a->fmt, -1, 0, AVSEEK_FLAG_BACKWARD)
+                : av_seek_frame(a->fmt, a->stream, target, AVSEEK_FLAG_BACKWARD);
+    if (r < 0) { set_err(err, errlen, "seek", r); return -1; }
+    avcodec_flush_buffers(a->dec);
+    a->eof_sent = 0;
+    a->drained = 0;
+    av_frame_unref(a->cur);
+    av_frame_unref(a->held);
+    return 0;
+}
+
 /*
  * Frame-accurate video decode: deliver the frame whose interval contains `target_pts`
  * (the last frame with pts <= target). Sequential and repeated requests are served without
  * seeking; backward or far-forward requests seek to the preceding keyframe and decode forward.
  * `dst` must hold width*height*4 bytes. `got_pts` receives the delivered frame's pts.
+ *
+ * A single seek is not enough on every container (audit F-08): the MP4 index is keyed by DTS, so
+ * a seek for a frame just before a keyframe can land past it, and MPEG-TS has no index at all.
+ * When the first decoded frame is later than the target, seek again further back and decode
+ * forward; only a target at or before the stream start may resolve to the stream's first frame.
  */
 int arc_av_video_at(ArcAv *a, int64_t target_pts, uint8_t *dst, int stride, int64_t *got_pts, char *err, int errlen) {
     if (a->is_audio) { set_err(err, errlen, "not a video decoder", 0); return -1; }
     AVStream *s = a->fmt->streams[a->stream];
-    int have_cur = a->cur->buf[0] != NULL;
-    int have_held = a->held->buf[0] != NULL;
-    int64_t cur_pts = have_cur ? frame_pts(a->cur) : INT64_MIN;
-    int64_t held_pts = have_held ? frame_pts(a->held) : INT64_MAX;
-
-    /* 1. the current frame still covers the target */
-    if (have_cur && cur_pts <= target_pts && (have_held ? target_pts < held_pts : a->drained)) {
-        if (to_rgba(a, a->cur, dst, stride) < 0) { set_err(err, errlen, "convert", 0); return -1; }
-        *got_pts = cur_pts;
-        return 0;
-    }
-    /* 2. seek if going backwards or far ahead */
+    const int64_t start = stream_start_ticks(a);
     int64_t ahead_limit = av_rescale_q(2 * AV_TIME_BASE, AV_TIME_BASE_Q, s->time_base);
-    int64_t pos = have_cur ? cur_pts : (have_held ? held_pts : INT64_MIN);
-    int need_seek = (!have_cur && !have_held) || target_pts < pos || target_pts - pos > ahead_limit;
-    if (need_seek) {
-        int r = av_seek_frame(a->fmt, a->stream, target_pts, AVSEEK_FLAG_BACKWARD);
-        if (r < 0) { set_err(err, errlen, "seek", r); return -1; }
-        avcodec_flush_buffers(a->dec);
-        a->eof_sent = 0;
-        a->drained = 0;
-        av_frame_unref(a->cur);
-        av_frame_unref(a->held);
-        have_cur = have_held = 0;
-    }
-    /* 3. advance: the look-ahead frame becomes current if it is not past the target */
-    if (have_held && frame_pts(a->held) <= target_pts) {
-        av_frame_unref(a->cur);
-        av_frame_move_ref(a->cur, a->held);
-        have_cur = 1;
-        have_held = 0;
-    }
-    while (!have_held) {
-        int r = next_frame(a, err, errlen);
-        if (r < 0) return r;
-        if (r == 1) break;
-        int64_t pts = frame_pts(a->frame);
-        if (pts == AV_NOPTS_VALUE) { av_frame_unref(a->frame); continue; }
-        if (pts <= target_pts) {
-            av_frame_unref(a->cur);
-            av_frame_move_ref(a->cur, a->frame);
-            have_cur = 1;
-        } else {
-            av_frame_move_ref(a->held, a->frame);
-            have_held = 1;
+    int64_t seek_to = target_pts;
+    int retry = 0;
+    for (;;) {
+        int have_cur = a->cur->buf[0] != NULL;
+        int have_held = a->held->buf[0] != NULL;
+        int64_t cur_pts = have_cur ? frame_pts(a->cur) : INT64_MIN;
+        int64_t held_pts = have_held ? frame_pts(a->held) : INT64_MAX;
+
+        /* 1. the current frame still covers the target */
+        if (!retry && have_cur && cur_pts <= target_pts && (have_held ? target_pts < held_pts : a->drained)) {
+            if (to_rgba(a, a->cur, dst, stride) < 0) { set_err(err, errlen, "convert", 0); return -1; }
+            *got_pts = cur_pts;
+            a->last_pts = cur_pts;
+            return 0;
         }
-    }
-    if (!have_cur) {
-        if (!have_held) return 1;           /* no frames at all */
-        av_frame_move_ref(a->cur, a->held); /* target precedes the first frame */
-        have_held = 0;
+        /* 2. seek if going backwards, far ahead, or retrying an overshooting seek */
+        int64_t pos = have_cur ? cur_pts : (have_held ? held_pts : INT64_MIN);
+        int need_seek = retry || (!have_cur && !have_held) || target_pts < pos ||
+                        target_pts - pos > ahead_limit;
+        if (need_seek) {
+            if (video_seek(a, seek_to, err, errlen) < 0) return -1;
+            have_cur = have_held = 0;
+        }
+        /* 3. advance: the look-ahead frame becomes current if it is not past the target */
+        if (have_held && frame_pts(a->held) <= target_pts) {
+            av_frame_unref(a->cur);
+            av_frame_move_ref(a->cur, a->held);
+            have_cur = 1;
+            have_held = 0;
+        }
+        while (!have_held) {
+            int r = next_frame(a, err, errlen);
+            if (r < 0) return r;
+            if (r == 1) break;
+            int64_t pts = frame_pts(a->frame);
+            if (pts == AV_NOPTS_VALUE) { av_frame_unref(a->frame); continue; }
+            if (pts <= target_pts) {
+                av_frame_unref(a->cur);
+                av_frame_move_ref(a->cur, a->frame);
+                have_cur = 1;
+            } else {
+                av_frame_move_ref(a->held, a->frame);
+                have_held = 1;
+            }
+        }
+        if (have_cur) break;
+        /* A seek can land past the last decodable frame (unindexed MPEG-TS): back off and retry
+         * instead of reporting end of stream. Only a target at the stream start may resolve to the
+         * first frame when the first decoded frame is already later than it. */
+        if (seek_to <= start) {
+            if (!have_held) return 1;           /* no frames from the start: end of stream */
+            av_frame_move_ref(a->cur, a->held);
+            have_held = 0;
+            break;
+        }
+        /* The seek landed after the target: back off and decode across the target frame. */
+        retry++;
+        int64_t backoff = av_rescale_q((int64_t)500000 << (retry > 6 ? 6 : retry - 1),
+                                       AV_TIME_BASE_Q, s->time_base);
+        seek_to = target_pts > start + backoff ? target_pts - backoff : start;
+        if (retry > 12) { set_err(err, errlen, "seek: no frame at or before the target", 0); return -1; }
     }
     if (to_rgba(a, a->cur, dst, stride) < 0) { set_err(err, errlen, "convert", 0); return -1; }
     *got_pts = frame_pts(a->cur);

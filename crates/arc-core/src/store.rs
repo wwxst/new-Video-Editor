@@ -226,6 +226,20 @@ pub struct SessionLock {
     _file: File,
 }
 
+/// Only a Windows sharing violation means "another process holds this project"; any other failure
+/// to open the lock file (a read-only folder, a directory in its place) is a permission problem
+/// (audit F-24).
+fn map_lock_error(path: &Path, e: io::Error) -> StoreError {
+    if e.raw_os_error() == Some(32) {
+        StoreError::Locked(path.to_path_buf())
+    } else {
+        StoreError::Io {
+            path: path.to_path_buf(),
+            source: e,
+        }
+    }
+}
+
 impl SessionLock {
     pub fn acquire(path: &Path) -> Result<SessionLock, StoreError> {
         let mut opts = OpenOptions::new();
@@ -250,17 +264,7 @@ impl SessionLock {
         }
         let mut f = match opts.open(path) {
             Ok(f) => f,
-            Err(e)
-                if e.raw_os_error() == Some(32) || e.kind() == io::ErrorKind::PermissionDenied =>
-            {
-                return Err(StoreError::Locked(path.to_path_buf()));
-            }
-            Err(e) => {
-                return Err(StoreError::Io {
-                    path: path.to_path_buf(),
-                    source: e,
-                });
-            }
+            Err(e) => return Err(map_lock_error(path, e)),
         };
         let _ = writeln!(f, "{} {}", std::process::id(), APP_VERSION);
         let _ = f.sync_all();
@@ -615,4 +619,24 @@ fn open_journal(path: &Path, valid_len: u64) -> Result<File, StoreError> {
         .map_err(io_err(path))?;
     journal::JournalFile::truncate_to(&mut f, valid_len).map_err(io_err(path))?;
     Ok(f)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F-24: the lock error kind must distinguish "held by another process" from "cannot be
+    /// opened", which the CLI reports as `project_locked` and `io_error` respectively.
+    #[test]
+    fn lock_errors_distinguish_a_held_lock_from_a_permission_problem() {
+        let p = Path::new("project.arcline.lock");
+        assert!(matches!(
+            map_lock_error(p, io::Error::from_raw_os_error(32)),
+            StoreError::Locked(_)
+        ));
+        assert!(matches!(
+            map_lock_error(p, io::Error::from(io::ErrorKind::PermissionDenied)),
+            StoreError::Io { .. }
+        ));
+    }
 }

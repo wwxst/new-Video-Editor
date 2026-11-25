@@ -138,7 +138,8 @@ need repository admin rights). Runs, `https://github.com/wwxst/new-Video-Editor/
 | [#3](https://github.com/wwxst/new-Video-Editor/actions/runs/45649281563) | `ef4528e` | **`core` success on all three OSes again**; `media`: FFmpeg build and Rust 1.95 succeeded, the workspace step failed (split steps: the Test/Clippy half) |
 | [#5](https://github.com/wwxst/new-Video-Editor/actions/runs/45651118343) | `0eafb40` | core success 3/3; media failed at **Build the whole workspace**; the new annotation identified `arc-media`'s build script |
 | [#6](https://github.com/wwxst/new-Video-Editor/actions/runs/45653879005) | `bb75198` | core success 3/3; the build-context annotation pinned the cause: the FFmpeg package was installed under the MSYS2 home, so `include/libavutil` was missing at the expected path |
-| [#7](https://github.com/wwxst/new-Video-Editor/actions/runs/45656189098) | `4b4be80` | verification of the HOME fix (in progress at the time of writing; its media job rebuilds FFmpeg because run 5's cache save had failed) |
+| [#7](https://github.com/wwxst/new-Video-Editor/actions/runs/45656189098) | `4b4be80` | **all four jobs success** — the HOME fix restored the FFmpeg package to the cached path, the workspace build/test/clippy passed under Rust 1.95 + WARP |
+| [#9](https://github.com/wwxst/new-Video-Editor/actions/runs/45661978288) | `1ea91e2` | **all four jobs success** again (the Phase C merge), which confirms the CI state on current `main` |
 
 The media job's FFmpeg build succeeding in CI is the important half: the in-repo recipe (source
 fetch + signature/SHA verification + configure profile) works on a clean `windows-latest` runner.
@@ -210,14 +211,15 @@ in §5. Its first cold build is the long pole; the result is recorded in the run
 - **Quarantine fixture.** The remaining Phase B gap is a crashing/hanging media sample. A fuzzed
   corpus (cargo-fuzz against the shim, `-fsanitize=address` where available) is the right way to
   produce one, and it also serves the "mutated-media corpus" wording of the criterion.
-- **The `media` job had two independent failures, both fixed.** (1) The CI-built FFmpeg package was
-  installed under the MSYS2 `$HOME` while the workflow cached/exported `C:\Users\<user>\.local`, so
-  `arc-media`'s build script found no headers; the MSYS2 steps now export
-  `HOME="$(cygpath "$USERPROFILE")"`. (2) Five `arc-render` GPU tests created wgpu devices
-  concurrently, which crashes under `Microsoft Basic Render Driver (Dx12)` with `0xC0000005`; the
-  tests are serialized (three green runs under the fallback adapter, whole suite 116/116 there). Run 7
-  verifies the first fix on the runner; the workflow now emits check-run annotations on failure,
-  readable through the public API without a token.
+- **The `media` job had two independent failures, both fixed and now verified green in CI.** (1) The
+  CI-built FFmpeg package was installed under the MSYS2 `$HOME` while the workflow
+  cached/exported `C:\Users\<user>\.local`, so `arc-media`'s build script found no headers; the MSYS2
+  steps now export `HOME="$(cygpath "$USERPROFILE")"`. (2) Five `arc-render` GPU tests created wgpu
+  devices concurrently, which crashes under `Microsoft Basic Render Driver (Dx12)` with
+  `0xC0000005`; the tests are serialized (three green runs under the fallback adapter, whole suite
+  116/116 there). Both runs #7 (`4b4be80`) and #9 (`1ea91e2`, current `main`) finished with **all four
+  jobs green**, so the media job is no longer a constraint. The workflow emits check-run annotations
+  on failure, readable through the public API without a token.
 - **Rust 1.95 locally is not installable in this environment.** `static.rust-lang.org` was throttled
   to ~7 KB/s (4 MB downloaded in ~10 minutes of a 297 MB bundle), so the 1.95 compile of the media
   crates could not be reproduced locally. The `core` matrix compiles and tests arc-core, arc-audio

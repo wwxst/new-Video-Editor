@@ -100,24 +100,25 @@ the [Phase B closure report](../reports/phase-b-exit-2026-11-25.md))
   HEVC encoder** (libx265 is GPL and excluded by D1), so a machine without a hardware HEVC encoder
   gets a typed `NoEncoder` error naming the candidates; the assertions skip on such machines (CI
   runners have no GPU).
-- **Partially met** — a corrupt file produces a clean per-clip error; a file that crashes or hangs
-  `ffprobe`/`ffmpeg` in the import check is quarantined and the parent process survives
-  (mutated-media corpus). The generated corpus (`arc-media/tests/malformed.rs`, nine fixtures under
-  2 MB) is refused by the import check (truncation is now detected through a frame-count check) and
-  converges to typed `MediaError`s, and a mixed good/broken export completes with the broken asset
-  named as unavailable (`render_e2e::mixed_media_export_survives_an_unreadable_asset`). **Still
-  missing:** a fixture that crashes or hangs the import check, so the quarantine/parent-survival
-  half is unproven.
+- **Met** — a corrupt file produces a clean per-clip error; a file that crashes or hangs
+  `ffprobe`/`ffmpeg` in the import check is quarantined and the parent process survives. The
+  generated corpus (`arc-media/tests/malformed.rs`, nine fixtures under 2 MB) is refused by the
+  import check (truncation is detected through a frame-count check) and converges to typed
+  `MediaError`s; a mixed good/broken export completes with the broken asset named as unavailable
+  (`render_e2e::mixed_media_export_survives_an_unreadable_asset`). The quarantine branch itself is
+  covered by `arc-media/tests/quarantine.rs`: a generated stub tool crashes (NTSTATUS 0xC0000005),
+  hangs (killed at the 20 s probe timeout) and prints garbage, and the check returns
+  `Quarantined`/`Offline` in bounded time while real media still imports in the same process. A
+  *real* crashing-media fixture (fuzzed decoder output) remains future work.
 - **Met** — Windows FFmpeg LGPL build pipeline pinned in the repo (`third_party/ffmpeg/`, manifest
   with hashes, SBOM, `verify.sh`; FFmpeg 9.1, D1 LGPL v2.1+).
-- **Met** — `.github/workflows/ci.yml`: `core` on ubuntu/windows/macos (Rust 1.95 + clippy, the
-  FFmpeg-free crates) is **green on GitHub** (runs 2 and 3: windows, ubuntu and macos); the Windows
-  `media` job builds the pinned FFmpeg 9.1 from the in-repo recipe **in CI** and its workspace step
-  failed on two independent causes, both **fixed**: the CI-built FFmpeg package landed under the
-  MSYS2 home instead of the cached `C:\Users\<user>\.local` path, and the GPU tests crashed under the
-  WARP/software adapter (now serialized; whole suite 116/116 under
-  `ARCLINE_FORCE_FALLBACK_ADAPTER=1` locally). Failures now emit check-run annotations readable
-  without a token; run 7 (`4b4be80`) verifies the fix — see the closure report §3.2/§4.
+- **Met** — `.github/workflows/ci.yml`: on GitHub, **all four jobs are green** (runs 7 and 9):
+  `core` on ubuntu/windows/macos (Rust 1.95 + clippy, the FFmpeg-free crates) and the Windows
+  `media` job (MSYS2 + the in-repo FFmpeg 9.1 build with caching, then the full workspace
+  build/test/clippy under Rust 1.95 + the WARP software adapter). The two media causes found in
+  batch 3 are fixed: the FFmpeg package now installs where the cache/`ARCLINE_FFMPEG_DIR` expect it
+  (`HOME="$(cygpath "$USERPROFILE")"`), and the GPU tests are serialized per test binary. Failures
+  emit check-run annotations readable without a token — see the closure report §3.2/§4.
 
 ## 5. Phase C — Compositor and shell (weeks 10–16)
 

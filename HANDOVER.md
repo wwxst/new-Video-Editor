@@ -92,7 +92,7 @@ scripts/dev-env.sh
 |---|---|---|
 | **A Spine** | **Done** (dependency-rule CI check still missing) | Exit criteria met: 10,000-case property test, timecode boundary tests, `new` + `apply` produce valid containers |
 | **P Embedding PoC** | **Done — GO** | All automated criteria pass (docs/poc, ADR-0014 outcome) |
-| **B Headless pipeline** | **Exit criteria met** | Frame-exact `import → edit → render` through FFV1, H.264 (`h264_qsv`), HEVC (`hevc_qsv`), AV1 (`libsvtav1`), ProRes and DNxHD; long-GOP/B-frame/MPEG-TS random access is frame-exact (F-08) and lossy/resampled audio survives the mixer's block pattern (F-06/F-07); a generated malformed corpus converges to typed errors and a mixed good/broken export completes (goal B); CI runs on ubuntu/windows/macos with the pinned FFmpeg on Windows (goal C). The `Quarantined` branch is covered by a generated stub tool (crash/hang/garbage, bounded time) — see [Phase B closure](reports/phase-b-exit-2026-11-25.md) |
+| **B Headless pipeline** | **Exit criteria met** | Frame-exact `import → edit → render` through FFV1, H.264 (`h264_qsv`), HEVC (`hevc_qsv`), AV1 (`libsvtav1`), ProRes and DNxHD; long-GOP/B-frame/MPEG-TS random access is frame-exact (F-08) and lossy/resampled audio survives the mixer's block pattern (F-06/F-07); a generated malformed corpus converges to typed errors and a mixed good/broken export completes (goal B); CI is green on all four jobs — core on ubuntu/windows/macos and the Windows media job — in runs 7 and 9 (goal C). The `Quarantined` branch is covered by a generated stub tool (crash/hang/garbage, bounded time) — see [Phase B closure](reports/phase-b-exit-2026-11-25.md) |
 | **C Compositor + shell** | Compositor done; **preview pipeline (C1) done; GUI editor not started** | C1: `arc_cli::preview` composes frames identical to the export path, with a byte-bounded decoded-source cache; plan and slice report in [reports/phase-c-c1-2026-11-26.md](reports/phase-c-c1-2026-11-26.md); `arc-app` still shows the PoC workload |
 | **D Audio** | Mixer + export done; **real-time playback (cpal) not started** | |
 | **E Lifecycle** | Journal, recovery, atomic saves, forced-kill done; **crash breadcrumbs, quarantine on relaunch, hang watchdog, relink not started** | |
@@ -213,14 +213,12 @@ Fold these into docs/02–06 (or an ADR) when convenient; none contradicts an AD
    `CARGO_INCREMENTAL=0 cargo clippy …`, or `cargo clean -p arc-core`. Builds and tests are unaffected.
 2. **MSVC target untested.** The shim should compile with `cl /std:c11` (compound literals are used); `build.rs`
    passes `-std=c11` only where supported — add `/std:c11` for MSVC if needed.
-3. **CI exists** (`.github/workflows/ci.yml`, ADR-0011): `core` on ubuntu/windows/macos (Rust 1.95 + clippy,
-   FFmpeg-free crates) is green on GitHub (runs 2 and 3); `media` on Windows builds the pinned FFmpeg 9.1
-   from the in-repo recipe (cached) and runs the full workspace build/test/clippy with
-   `ARCLINE_FORCE_FALLBACK_ADAPTER=1`. Its workspace step had two causes, both fixed: the CI-built FFmpeg
-   package was installed under the MSYS2 `$HOME` instead of the cached `C:\Users\<user>\.local` path
-   (both MSYS2 steps now export `HOME="$(cygpath "$USERPROFILE")"`), and the `arc-render` GPU tests
-   crash under the WARP/software adapter when their devices are created concurrently (now serialized;
-   whole suite 116/116 green under the fallback adapter locally). Failures emit check-run annotations,
+3. **CI is green** (`.github/workflows/ci.yml`, ADR-0011): runs 7 (`4b4be80`) and 9 (`1ea91e2`, current
+   `main`) finished with **all four jobs success** — `core` on ubuntu/windows/macos (Rust 1.95 + clippy,
+   FFmpeg-free crates) and the Windows `media` job (MSYS2 + the in-repo FFmpeg 9.1 build with caching,
+   then the full workspace build/test/clippy under Rust 1.95 and the WARP software adapter). The two media
+   causes from batch 3 are fixed: the FFmpeg package now installs where the cache/`ARCLINE_FFMPEG_DIR`
+   expect it, and the GPU tests are serialized per test binary. Failures emit check-run annotations,
    readable without a token. The hardware-encoder tests skip themselves on machines without a GPU.
    Run links: [Phase B closure](reports/phase-b-exit-2026-11-25.md) §3.2.
 4. **GPU tests need an adapter.** They ran on Intel integrated graphics here; on CI use the fallback adapter.

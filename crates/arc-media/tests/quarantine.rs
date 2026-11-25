@@ -32,7 +32,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mode = std::env::var("STUB_MODE").unwrap_or_else(|_| "pass".into());
     let matcher = std::env::var("STUB_MATCH").unwrap_or_default();
-    let matched = !matcher.is_empty() && args.iter().any(|a| a.contains(&matcher));
+    let bad_tool = std::env::var("STUB_BAD_TOOL").unwrap_or_default();
+    let matched = !matcher.is_empty()
+        && args.iter().any(|a| a.contains(&matcher))
+        && (bad_tool.is_empty() || bad_tool == tool);
     if matched {
         match mode.as_str() {
             // Windows NTSTATUS 0xC0000005: tools::run classifies this as Crashed.
@@ -93,19 +96,20 @@ fn stub_bundle(dir: &Path) -> PathBuf {
     dir.join("bundle")
 }
 
-fn set_mode(mode: &str, matcher: &str) {
+fn set_mode(mode: &str, matcher: &str, bad_tool: &str) {
     // SAFETY: the test is single-threaded at this point and these variables are read by the child
     // tools this process spawns.
     unsafe {
         std::env::set_var("STUB_MODE", mode);
         std::env::set_var("STUB_MATCH", matcher);
+        std::env::set_var("STUB_BAD_TOOL", bad_tool);
     }
 }
 
 fn assert_quarantined(name: &str, outcome: ImportOutcome, expect: &str) {
     match outcome {
         ImportOutcome::Quarantined { reason, .. } => assert!(
-            reason.contains(expect),
+            reason.to_lowercase().contains(&expect.to_lowercase()),
             "{name}: reason {reason:?} does not contain {expect:?}"
         ),
         other => panic!("{name}: expected Quarantined, got {other:?}"),
@@ -113,14 +117,16 @@ fn assert_quarantined(name: &str, outcome: ImportOutcome, expect: &str) {
 }
 
 /// One process exercises the whole contract: real media, a crashing tool, a hanging tool, a tool
-/// that prints garbage, and real media again. A panic or an abort fails the test; the hang case
-/// proves the timeout is enforced (the import check returns within the cap).
+/// that prints garbage, a crash and a hang confined to the decode phase, and real media again. A
+/// panic or an abort fails the test; the hang cases prove the timeout is enforced (the import check
+/// returns within the cap).
 #[test]
 fn quarantine_covers_crash_hang_and_garbage_and_the_process_survives() {
-    if Command::new("rustc").arg("--version").output().is_err() {
-        eprintln!("skipping: rustc is not on PATH, cannot build the tool stub");
-        return;
-    }
+    // The stub needs rustc; a silent skip would make the quarantine contract unverified, so fail.
+    assert!(
+        Command::new("rustc").arg("--version").output().is_ok(),
+        "rustc is required to build the tool stub for this test"
+    );
     let dir = tempfile::tempdir().expect("tmp");
     let real = real_bin_dir();
     let bundle = stub_bundle(dir.path());
@@ -142,21 +148,21 @@ fn quarantine_covers_crash_hang_and_garbage_and_the_process_survives() {
     }
 
     // 1. real media through the proxied real tools
-    set_mode("pass", "");
+    set_mode("pass", "", "");
     match import_check(&good) {
         ImportOutcome::Ok { .. } => {}
         other => panic!("good media must import through the stub proxy: {other:?}"),
     }
 
     // 2. a crashing tool is quarantined, with a bounded, typed reason
-    set_mode("crash", "quarantine_crash.mkv");
+    set_mode("crash", "quarantine_crash.mkv", "");
     let started = Instant::now();
     let outcome = import_check(&crashing);
     assert!(started.elapsed() < Duration::from_secs(10), "crash path was not immediate");
     assert_quarantined("crash", outcome, "Crashed");
 
     // 3. a hanging tool is quarantined at the probe timeout, not left running
-    set_mode("hang", "quarantine_hang.mkv");
+    set_mode("hang", "quarantine_hang.mkv", "");
     let started = Instant::now();
     let outcome = import_check(&hanging);
     let elapsed = started.elapsed();
@@ -166,16 +172,43 @@ fn quarantine_covers_crash_hang_and_garbage_and_the_process_survives() {
         "hang must hit the {PROBE_TIMEOUT:?} cap and return, took {elapsed:?}"
     );
 
-    // 4. a tool that prints garbage is Offline, not Quarantined (the distinction matters: offline
+    // 4. the same crash/hang confined to the *decode* phase: ffprobe proxies normally, ffmpeg
+    //    (test_decode) crashes or hangs, so the probe succeeds and the quarantine must come from
+    //    the test decode (P2-1).
+    let decode_crash = dir.path().join("quarantine_decode_crash.mkv");
+    let decode_hang = dir.path().join("quarantine_decode_hang.mkv");
+    for copy in [&decode_crash, &decode_hang] {
+        std::fs::copy(&good, copy).expect("copy fixture");
+    }
+    set_mode("crash", "quarantine_decode_crash.mkv", "ffmpeg");
+    let started = Instant::now();
+    let outcome = import_check(&decode_crash);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "decode crash must be immediate"
+    );
+    assert_quarantined("decode crash", outcome, "crashed");
+
+    set_mode("hang", "quarantine_decode_hang.mkv", "ffmpeg");
+    let started = Instant::now();
+    let outcome = import_check(&decode_hang);
+    let elapsed = started.elapsed();
+    assert_quarantined("decode hang", outcome, "timed out");
+    assert!(
+        elapsed >= PROBE_TIMEOUT && elapsed < PROBE_TIMEOUT + Duration::from_secs(15),
+        "decode hang must hit the {PROBE_TIMEOUT:?} cap and return, took {elapsed:?}"
+    );
+
+    // 5. a tool that prints garbage is Offline, not Quarantined (the distinction matters: offline
     //    is "not media", quarantined is "must never be decoded in-process")
-    set_mode("garbage", "quarantine_garbage.mkv");
+    set_mode("garbage", "quarantine_garbage.mkv", "");
     match import_check(&garbage) {
         ImportOutcome::Offline { reason } => assert!(!reason.is_empty()),
         other => panic!("garbage output must be Offline, got {other:?}"),
     }
 
-    // 5. mixed use: real media still works after the failures, in the same process
-    set_mode("pass", "");
+    // 6. mixed use: real media still works after the failures, in the same process
+    set_mode("pass", "", "");
     match import_check(&good) {
         ImportOutcome::Ok { .. } => {}
         other => panic!("good media must still import after the quarantined attempts: {other:?}"),

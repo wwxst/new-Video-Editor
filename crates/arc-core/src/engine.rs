@@ -123,10 +123,19 @@ pub struct Engine {
 
 impl Engine {
     /// Start a session at `revision` (0 for a new project; recovered revision otherwise).
-    pub fn new(project: Project, revision: u64, catalog: Arc<dyn EffectCatalog>) -> CmdResult<Engine> {
+    pub fn new(
+        project: Project,
+        revision: u64,
+        catalog: Arc<dyn EffectCatalog>,
+    ) -> CmdResult<Engine> {
         validate_project(&project, catalog.as_ref())?;
         Ok(Engine {
-            state: State { current: Arc::new(project), revision, undo: im::Vector::new(), redo: im::Vector::new() },
+            state: State {
+                current: Arc::new(project),
+                revision,
+                undo: im::Vector::new(),
+                redo: im::Vector::new(),
+            },
             pending: VecDeque::new(),
             confirmed_revision: revision,
             catalog,
@@ -171,9 +180,10 @@ impl Engine {
                 Ok(())
             }
             (Source::Client(c), Control::Agent(holder)) if c == holder => Ok(()),
-            (Source::Client(_), _) => {
-                Err(CommandError::new(ErrorKind::NotInControl, "another participant holds control of this session"))
-            }
+            (Source::Client(_), _) => Err(CommandError::new(
+                ErrorKind::NotInControl,
+                "another participant holds control of this session",
+            )),
         }
     }
 
@@ -197,21 +207,39 @@ impl Engine {
             }
         }
         if req.commands.is_empty() {
-            return Err(CommandError::new(ErrorKind::EmptyBatch, "batch contains no commands"));
+            return Err(CommandError::new(
+                ErrorKind::EmptyBatch,
+                "batch contains no commands",
+            ));
         }
         if req.commands.len() > MAX_BATCH {
-            return Err(CommandError::new(ErrorKind::BatchTooLarge, format!("batch exceeds {MAX_BATCH} commands")));
+            return Err(CommandError::new(
+                ErrorKind::BatchTooLarge,
+                format!("batch exceeds {MAX_BATCH} commands"),
+            ));
         }
         if source != Source::System {
-            if let Some((i, _)) = req.commands.iter().enumerate().find(|(_, c)| matches!(c, Command::InternalRestore { .. })) {
-                return Err(CommandError::new(ErrorKind::ForbiddenOp, "internal.restore is engine-only").at(format!("commands[{i}]")));
+            if let Some((i, _)) = req
+                .commands
+                .iter()
+                .enumerate()
+                .find(|(_, c)| matches!(c, Command::InternalRestore { .. }))
+            {
+                return Err(CommandError::new(
+                    ErrorKind::ForbiddenOp,
+                    "internal.restore is engine-only",
+                )
+                .at(format!("commands[{i}]")));
             }
         }
         if let Some(base) = req.base_revision {
             if base != self.state.revision {
                 return Err(CommandError::new(
                     ErrorKind::StaleRevision,
-                    format!("base_revision {base} is not the current revision {}", self.state.revision),
+                    format!(
+                        "base_revision {base} is not the current revision {}",
+                        self.state.revision
+                    ),
                 )
                 .with_details(serde_json::json!({"current_revision": self.state.revision})));
             }
@@ -225,7 +253,8 @@ impl Engine {
         let mut commands = req.commands;
         let mut resulting = Vec::with_capacity(commands.len());
         for (i, cmd) in commands.iter_mut().enumerate() {
-            let r = apply_command(&mut work, cmd, self.catalog.as_ref()).map_err(|e| e.at(format!("commands[{i}]")))?;
+            let r = apply_command(&mut work, cmd, self.catalog.as_ref())
+                .map_err(|e| e.at(format!("commands[{i}]")))?;
             resulting.push(r);
         }
         validate_project(&work, self.catalog.as_ref())?;
@@ -234,8 +263,21 @@ impl Engine {
         let applied = commands.len();
         if req.dry_run {
             return Ok(Committed {
-                result: ApplyResult { revision: self.state.revision, applied, resulting, warnings: vec![], diff, dry_run: true },
-                entry: JournalEntry { revision: self.state.revision, kind: EntryKind::Edit, source, commands, comment: req.comment },
+                result: ApplyResult {
+                    revision: self.state.revision,
+                    applied,
+                    resulting,
+                    warnings: vec![],
+                    diff,
+                    dry_run: true,
+                },
+                entry: JournalEntry {
+                    revision: self.state.revision,
+                    kind: EntryKind::Edit,
+                    source,
+                    commands,
+                    comment: req.comment,
+                },
                 snapshot: before,
             });
         }
@@ -246,13 +288,23 @@ impl Engine {
         let snapshot = Arc::new(work);
         self.state.current = snapshot.clone();
         self.state.revision = revision;
-        self.state.undo.push_back(Arc::new(HistoryEntry { forward: commands.clone(), inverse }));
+        self.state.undo.push_back(Arc::new(HistoryEntry {
+            forward: commands.clone(),
+            inverse,
+        }));
         if self.state.undo.len() > MAX_UNDO {
             self.state.undo.pop_front();
         }
         self.state.redo.clear();
 
-        let result = ApplyResult { revision, applied, resulting, warnings: vec![], diff, dry_run: false };
+        let result = ApplyResult {
+            revision,
+            applied,
+            resulting,
+            warnings: vec![],
+            diff,
+            dry_run: false,
+        };
         if let Some(key) = req.idempotency_key {
             self.idempotency.push_back((key, result.clone()));
             if self.idempotency.len() > IDEMPOTENCY_CACHE {
@@ -261,7 +313,13 @@ impl Engine {
         }
         Ok(Committed {
             result,
-            entry: JournalEntry { revision, kind: EntryKind::Edit, source, commands, comment: req.comment },
+            entry: JournalEntry {
+                revision,
+                kind: EntryKind::Edit,
+                source,
+                commands,
+                comment: req.comment,
+            },
             snapshot,
         })
     }
@@ -306,13 +364,31 @@ impl Engine {
         self.state.redo.pop_back();
         self.state.undo.push_back(entry);
         Ok(Committed {
-            result: ApplyResult { revision, applied: cmds.len(), resulting, warnings: vec![], diff: d, dry_run: false },
-            entry: JournalEntry { revision, kind: EntryKind::Redo, source, commands: cmds, comment: None },
+            result: ApplyResult {
+                revision,
+                applied: cmds.len(),
+                resulting,
+                warnings: vec![],
+                diff: d,
+                dry_run: false,
+            },
+            entry: JournalEntry {
+                revision,
+                kind: EntryKind::Redo,
+                source,
+                commands: cmds,
+                comment: None,
+            },
             snapshot,
         })
     }
 
-    fn apply_internal(&mut self, cmd: &mut Command, kind: EntryKind, source: Source) -> CmdResult<Committed> {
+    fn apply_internal(
+        &mut self,
+        cmd: &mut Command,
+        kind: EntryKind,
+        source: Source,
+    ) -> CmdResult<Committed> {
         let before = self.state.current.clone();
         let mut work: Project = (*before).clone();
         let r = apply_command(&mut work, cmd, self.catalog.as_ref())?;
@@ -324,8 +400,21 @@ impl Engine {
         self.state.current = snapshot.clone();
         self.state.revision = revision;
         Ok(Committed {
-            result: ApplyResult { revision, applied: 1, resulting: vec![r], warnings: vec![], diff: d, dry_run: false },
-            entry: JournalEntry { revision, kind, source, commands: vec![cmd.clone()], comment: None },
+            result: ApplyResult {
+                revision,
+                applied: 1,
+                resulting: vec![r],
+                warnings: vec![],
+                diff: d,
+                dry_run: false,
+            },
+            entry: JournalEntry {
+                revision,
+                kind,
+                source,
+                commands: vec![cmd.clone()],
+                comment: None,
+            },
             snapshot,
         })
     }
@@ -335,7 +424,10 @@ impl Engine {
         if entry.revision != self.state.revision + 1 {
             return Err(CommandError::new(
                 ErrorKind::StaleRevision,
-                format!("journal revision {} does not follow {}", entry.revision, self.state.revision),
+                format!(
+                    "journal revision {} does not follow {}",
+                    entry.revision, self.state.revision
+                ),
             ));
         }
         let before = self.state.current.clone();
@@ -349,7 +441,10 @@ impl Engine {
         match entry.kind {
             EntryKind::Edit | EntryKind::Redo => {
                 let inverse = inverse_of(&before, &work);
-                self.state.undo.push_back(Arc::new(HistoryEntry { forward: cmds, inverse }));
+                self.state.undo.push_back(Arc::new(HistoryEntry {
+                    forward: cmds,
+                    inverse,
+                }));
                 if entry.kind == EntryKind::Edit {
                     self.state.redo.clear();
                 }
@@ -367,7 +462,8 @@ impl Engine {
     }
 
     fn push_pending(&mut self) {
-        self.pending.push_back((self.state.revision + 1, self.state.clone()));
+        self.pending
+            .push_back((self.state.revision + 1, self.state.clone()));
     }
 
     /// The journal record for `revision` was completely written: acknowledge it and all before it.
@@ -387,7 +483,8 @@ impl Engine {
         }
         self.pending.clear();
         // drop idempotency results for rolled-back revisions
-        self.idempotency.retain(|(_, r)| !revs.contains(&r.revision));
+        self.idempotency
+            .retain(|(_, r)| !revs.contains(&r.revision));
         revs
     }
 }

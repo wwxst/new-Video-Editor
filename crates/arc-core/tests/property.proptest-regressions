@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b3b200e7749c2525eac853847b763677436ee15d52fd3d08427e0edde247b02e # shrinks to batches = [[AddClip { track: 0, start: 184, dur: 39, src: 125 }], [Effect { pick: 0, exposure: 0 }], [Split { pick: 0, at: 185 }]]

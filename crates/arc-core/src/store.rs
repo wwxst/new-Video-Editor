@@ -29,7 +29,9 @@ pub enum StoreError {
     BadContainer(String),
     #[error("checksum mismatch in {0}")]
     Checksum(String),
-    #[error("project schema {found} is newer than this build supports ({supported}); update Arcline")]
+    #[error(
+        "project schema {found} is newer than this build supports ({supported}); update Arcline"
+    )]
     FutureSchema { found: u32, supported: u32 },
     #[error("project schema {0} is not supported")]
     UnsupportedSchema(u32),
@@ -40,7 +42,10 @@ pub enum StoreError {
 }
 
 fn io_err(path: &Path) -> impl FnOnce(io::Error) -> StoreError + '_ {
-    move |source| StoreError::Io { path: path.to_path_buf(), source }
+    move |source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,7 +75,10 @@ pub struct ProjectPaths {
 impl ProjectPaths {
     pub fn new(container: impl Into<PathBuf>) -> Self {
         let container = container.into();
-        let mut name = container.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        let mut name = container
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
         name.push(".autosave");
         let sidecar = container.with_file_name(name);
         ProjectPaths { container, sidecar }
@@ -90,8 +98,14 @@ impl ProjectPaths {
 
 /// Write `bytes` to `path` atomically: temp file in the same directory → fsync → rename.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
-    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    let mut tmp_name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let mut tmp_name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
     tmp_name.push(".tmp");
     let tmp = dir.join(tmp_name);
     {
@@ -113,7 +127,10 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
 pub fn encode_container(project: &Project, revision: u64) -> Result<Vec<u8>, StoreError> {
     let doc = project.canonical_json();
     let mut checksums = std::collections::BTreeMap::new();
-    checksums.insert("project.json".to_string(), blake3::hash(&doc).to_hex().to_string());
+    checksums.insert(
+        "project.json".to_string(),
+        blake3::hash(&doc).to_hex().to_string(),
+    );
     let manifest = Manifest {
         schema_version: SCHEMA_VERSION,
         app_version: APP_VERSION.to_string(),
@@ -121,17 +138,20 @@ pub fn encode_container(project: &Project, revision: u64) -> Result<Vec<u8>, Sto
         revision,
         checksums,
     };
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest).map_err(|e| StoreError::Document(e.to_string()))?;
+    let manifest_bytes =
+        serde_json::to_vec_pretty(&manifest).map_err(|e| StoreError::Document(e.to_string()))?;
     let mut buf = io::Cursor::new(Vec::new());
     {
         let mut zip = zip::ZipWriter::new(&mut buf);
-        let opts: zip::write::SimpleFileOptions =
-            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
         let zerr = |e: zip::result::ZipError| StoreError::BadContainer(e.to_string());
         zip.start_file("manifest.json", opts).map_err(zerr)?;
-        zip.write_all(&manifest_bytes).map_err(|e| StoreError::BadContainer(e.to_string()))?;
+        zip.write_all(&manifest_bytes)
+            .map_err(|e| StoreError::BadContainer(e.to_string()))?;
         zip.start_file("project.json", opts).map_err(zerr)?;
-        zip.write_all(&doc).map_err(|e| StoreError::BadContainer(e.to_string()))?;
+        zip.write_all(&doc)
+            .map_err(|e| StoreError::BadContainer(e.to_string()))?;
         zip.finish().map_err(zerr)?;
     }
     Ok(buf.into_inner())
@@ -143,11 +163,12 @@ pub fn decode_container(bytes: &[u8]) -> Result<(Project, Manifest), StoreError>
     let mut read = |name: &str| -> Result<Vec<u8>, StoreError> {
         let mut f = zip.by_name(name).map_err(bad)?;
         let mut v = Vec::new();
-        f.read_to_end(&mut v).map_err(|e| StoreError::BadContainer(e.to_string()))?;
+        f.read_to_end(&mut v)
+            .map_err(|e| StoreError::BadContainer(e.to_string()))?;
         Ok(v)
     };
-    let manifest: Manifest =
-        serde_json::from_slice(&read("manifest.json")?).map_err(|e| StoreError::BadContainer(e.to_string()))?;
+    let manifest: Manifest = serde_json::from_slice(&read("manifest.json")?)
+        .map_err(|e| StoreError::BadContainer(e.to_string()))?;
     let doc = read("project.json")?;
     if let Some(sum) = manifest.checksums.get("project.json") {
         if blake3::hash(&doc).to_hex().as_str() != sum {
@@ -160,10 +181,17 @@ pub fn decode_container(bytes: &[u8]) -> Result<(Project, Manifest), StoreError>
 
 /// Parse and migrate a project document (forward-only migrations, docs/02 §7).
 pub fn parse_document(doc: &[u8]) -> Result<Project, StoreError> {
-    let mut v: serde_json::Value = serde_json::from_slice(doc).map_err(|e| StoreError::Document(e.to_string()))?;
-    let found = v.get("schema_version").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let mut v: serde_json::Value =
+        serde_json::from_slice(doc).map_err(|e| StoreError::Document(e.to_string()))?;
+    let found = v
+        .get("schema_version")
+        .and_then(|x| x.as_u64())
+        .unwrap_or(0) as u32;
     if found > SCHEMA_VERSION {
-        return Err(StoreError::FutureSchema { found, supported: SCHEMA_VERSION });
+        return Err(StoreError::FutureSchema {
+            found,
+            supported: SCHEMA_VERSION,
+        });
     }
     v = migrate(v, found)?;
     serde_json::from_value(v).map_err(|e| StoreError::Document(e.to_string()))
@@ -207,7 +235,11 @@ impl SessionLock {
         }
         #[cfg(not(windows))]
         if let Ok(s) = fs::read_to_string(path) {
-            if let Some(pid) = s.split_whitespace().next().and_then(|p| p.parse::<u32>().ok()) {
+            if let Some(pid) = s
+                .split_whitespace()
+                .next()
+                .and_then(|p| p.parse::<u32>().ok())
+            {
                 let alive = Path::new(&format!("/proc/{pid}")).exists();
                 if alive && pid != std::process::id() {
                     return Err(StoreError::Locked(path.to_path_buf()));
@@ -216,14 +248,24 @@ impl SessionLock {
         }
         let mut f = match opts.open(path) {
             Ok(f) => f,
-            Err(e) if e.raw_os_error() == Some(32) || e.kind() == io::ErrorKind::PermissionDenied => {
+            Err(e)
+                if e.raw_os_error() == Some(32) || e.kind() == io::ErrorKind::PermissionDenied =>
+            {
                 return Err(StoreError::Locked(path.to_path_buf()));
             }
-            Err(e) => return Err(StoreError::Io { path: path.to_path_buf(), source: e }),
+            Err(e) => {
+                return Err(StoreError::Io {
+                    path: path.to_path_buf(),
+                    source: e,
+                });
+            }
         };
         let _ = writeln!(f, "{} {}", std::process::id(), APP_VERSION);
         let _ = f.sync_all();
-        Ok(SessionLock { path: path.to_path_buf(), _file: f })
+        Ok(SessionLock {
+            path: path.to_path_buf(),
+            _file: f,
+        })
     }
 }
 
@@ -272,13 +314,20 @@ fn latest_snapshot(paths: &ProjectPaths) -> Option<(u64, Project)> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let n = e.file_name().to_string_lossy().to_string();
-            n.strip_prefix("snapshot-")?.strip_suffix(".json")?.parse().ok()
+            n.strip_prefix("snapshot-")?
+                .strip_suffix(".json")?
+                .parse()
+                .ok()
         })
         .collect();
     revs.sort_unstable();
     for rev in revs.into_iter().rev() {
-        let Ok(bytes) = fs::read(paths.snapshot(rev)) else { continue };
-        let Ok(s) = serde_json::from_slice::<SnapshotFile>(&bytes) else { continue };
+        let Ok(bytes) = fs::read(paths.snapshot(rev)) else {
+            continue;
+        };
+        let Ok(s) = serde_json::from_slice::<SnapshotFile>(&bytes) else {
+            continue;
+        };
         if s.revision == rev && s.project.canonical_hash() == s.hash {
             return Some((rev, s.project));
         }
@@ -288,7 +337,11 @@ fn latest_snapshot(paths: &ProjectPaths) -> Option<(u64, Project)> {
 
 impl ProjectStore {
     /// Create a new project on disk and open it.
-    pub fn create(path: &Path, project: &Project, durability: Durability) -> Result<ProjectStore, StoreError> {
+    pub fn create(
+        path: &Path,
+        project: &Project,
+        durability: Durability,
+    ) -> Result<ProjectStore, StoreError> {
         let paths = ProjectPaths::new(path);
         save_container(path, project, 0)?;
         fs::create_dir_all(&paths.sidecar).map_err(io_err(&paths.sidecar))?;
@@ -314,7 +367,9 @@ impl ProjectStore {
 
         let snap = latest_snapshot(&paths);
         let (base, base_revision, from_sidecar, saved_revision) = match (container, snap) {
-            (Ok((p, m)), Some((rev, sp))) if rev >= m.revision => (sp, rev, rev > m.revision, m.revision),
+            (Ok((_p, m)), Some((rev, sp))) if rev >= m.revision => {
+                (sp, rev, rev > m.revision, m.revision)
+            }
             (Ok((p, m)), _) => (p, m.revision, false, m.revision),
             (Err(_), Some((rev, sp))) => (sp, rev, true, 0),
             (Err(e), None) => return Err(e),
@@ -338,7 +393,14 @@ impl ProjectStore {
             saved_revision,
         };
         let from_sidecar = from_sidecar || !decoded.entries.is_empty();
-        Ok(Opened { store, base, base_revision, entries: decoded.entries, tail: decoded.tail, from_sidecar })
+        Ok(Opened {
+            store,
+            base,
+            base_revision,
+            entries: decoded.entries,
+            tail: decoded.tail,
+            from_sidecar,
+        })
     }
 
     pub fn paths(&self) -> &ProjectPaths {
@@ -368,7 +430,11 @@ impl ProjectStore {
 
     /// Autosave snapshot at `rev`; starts a new journal and deletes the previous pair.
     pub fn write_snapshot(&mut self, project: &Project, rev: u64) -> Result<(), StoreError> {
-        let file = SnapshotFile { revision: rev, hash: project.canonical_hash(), project: project.clone() };
+        let file = SnapshotFile {
+            revision: rev,
+            hash: project.canonical_hash(),
+            project: project.clone(),
+        };
         let bytes = serde_json::to_vec(&file).map_err(|e| StoreError::Document(e.to_string()))?;
         let path = self.paths.snapshot(rev);
         write_atomic(&path, &bytes)?;
@@ -404,7 +470,13 @@ impl ProjectStore {
 }
 
 fn open_journal(path: &Path, valid_len: u64) -> Result<File, StoreError> {
-    let mut f = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path).map_err(io_err(path))?;
+    let mut f = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(io_err(path))?;
     journal::JournalFile::truncate_to(&mut f, valid_len).map_err(io_err(path))?;
     Ok(f)
 }

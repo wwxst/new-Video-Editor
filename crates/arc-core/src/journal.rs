@@ -26,7 +26,11 @@ const fn crc_table() -> [u32; 256] {
         let mut c = i as u32;
         let mut k = 0;
         while k < 8 {
-            c = if c & 1 != 0 { 0x82F6_3B78 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0x82F6_3B78 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
             k += 1;
         }
         t[i] = c;
@@ -59,7 +63,8 @@ pub enum JournalError {
 /// Encode one entry as a complete record.
 pub fn encode(entry: &JournalEntry) -> Result<Vec<u8>, JournalError> {
     let mut payload = Vec::new();
-    ciborium::ser::into_writer(entry, &mut payload).map_err(|e| JournalError::Encode(e.to_string()))?;
+    ciborium::ser::into_writer(entry, &mut payload)
+        .map_err(|e| JournalError::Encode(e.to_string()))?;
     let len = HEADER + payload.len() + TRAILER;
     if len > MAX_RECORD {
         return Err(JournalError::TooLarge);
@@ -98,34 +103,65 @@ pub struct Decoded {
 pub fn decode(bytes: &[u8]) -> Decoded {
     let mut entries = Vec::new();
     let mut off = 0usize;
-    let u32_at = |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+    let u32_at =
+        |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
     while off < bytes.len() {
         if bytes.len() - off < HEADER + TRAILER {
-            return Decoded { entries, valid_len: off, tail: Some(TailError::Torn) };
+            return Decoded {
+                entries,
+                valid_len: off,
+                tail: Some(TailError::Torn),
+            };
         }
         if u32_at(off) != MAGIC {
-            return Decoded { entries, valid_len: off, tail: Some(TailError::BadMagic) };
+            return Decoded {
+                entries,
+                valid_len: off,
+                tail: Some(TailError::BadMagic),
+            };
         }
         let len = u32_at(off + 4) as usize;
         if !(HEADER + TRAILER..=MAX_RECORD).contains(&len) {
-            return Decoded { entries, valid_len: off, tail: Some(TailError::BadLength) };
+            return Decoded {
+                entries,
+                valid_len: off,
+                tail: Some(TailError::BadLength),
+            };
         }
         if off + len > bytes.len() {
-            return Decoded { entries, valid_len: off, tail: Some(TailError::Torn) };
+            return Decoded {
+                entries,
+                valid_len: off,
+                tail: Some(TailError::Torn),
+            };
         }
         let rec = &bytes[off..off + len];
         let crc = u32::from_le_bytes([rec[len - 4], rec[len - 3], rec[len - 2], rec[len - 1]]);
         if crc32c(&rec[..len - 4]) != crc {
-            return Decoded { entries, valid_len: off, tail: Some(TailError::BadCrc) };
+            return Decoded {
+                entries,
+                valid_len: off,
+                tail: Some(TailError::BadCrc),
+            };
         }
         let payload = &rec[HEADER..len - TRAILER];
         match ciborium::de::from_reader::<JournalEntry, _>(payload) {
             Ok(e) => entries.push(e),
-            Err(e) => return Decoded { entries, valid_len: off, tail: Some(TailError::BadPayload(e.to_string())) },
+            Err(e) => {
+                return Decoded {
+                    entries,
+                    valid_len: off,
+                    tail: Some(TailError::BadPayload(e.to_string())),
+                };
+            }
         }
         off += len;
     }
-    Decoded { entries, valid_len: off, tail: None }
+    Decoded {
+        entries,
+        valid_len: off,
+        tail: None,
+    }
 }
 
 /// The file operations the writer needs; implemented for `std::fs::File` and fault injectors.
@@ -176,14 +212,23 @@ pub struct JournalWriter<F: JournalFile> {
 
 impl<F: JournalFile> std::fmt::Debug for JournalWriter<F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("JournalWriter").field("end", &self.end).field("failed", &self.failed).finish()
+        f.debug_struct("JournalWriter")
+            .field("end", &self.end)
+            .field("failed", &self.failed)
+            .finish()
     }
 }
 
 impl<F: JournalFile> JournalWriter<F> {
     /// `end` is the current valid length of the file (after recovery truncation).
     pub fn new(file: F, end: u64, durability: Durability) -> Self {
-        JournalWriter { file, end, durability, unflushed: false, failed: false }
+        JournalWriter {
+            file,
+            end,
+            durability,
+            unflushed: false,
+            failed: false,
+        }
     }
 
     pub fn is_failed(&self) -> bool {
@@ -200,14 +245,19 @@ impl<F: JournalFile> JournalWriter<F> {
     /// any partial bytes. Once a write fails the writer refuses further appends.
     pub fn append(&mut self, record: &[u8]) -> Result<WriteOutcome, JournalError> {
         if self.failed {
-            return Err(JournalError::Write(io::Error::other("journal is in failed state")));
+            return Err(JournalError::Write(io::Error::other(
+                "journal is in failed state",
+            )));
         }
         let start = self.end;
         let mut written = 0usize;
         while written < record.len() {
             match self.file.write_some(&record[written..]) {
                 Ok(0) => {
-                    return Err(self.fail(start, io::Error::new(io::ErrorKind::WriteZero, "write returned 0 bytes")));
+                    return Err(self.fail(
+                        start,
+                        io::Error::new(io::ErrorKind::WriteZero, "write returned 0 bytes"),
+                    ));
                 }
                 Ok(n) => written += n, // partial writes simply continue
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -281,7 +331,10 @@ impl JournalFile for FaultyFile {
         }
         if let Some(limit) = self.fail_after_bytes {
             if self.data.len() >= limit {
-                return Err(io::Error::new(io::ErrorKind::StorageFull, "injected: disk full"));
+                return Err(io::Error::new(
+                    io::ErrorKind::StorageFull,
+                    "injected: disk full",
+                ));
             }
             n = n.min(limit - self.data.len());
         }

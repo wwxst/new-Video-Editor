@@ -43,7 +43,10 @@ pub enum ErrorKind {
 
 impl ErrorKind {
     pub fn as_str(self) -> String {
-        serde_json::to_value(self).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default()
+        serde_json::to_value(self)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_default()
     }
 }
 
@@ -61,7 +64,12 @@ pub struct CommandError {
 
 impl CommandError {
     pub fn new(kind: ErrorKind, message: impl Into<String>) -> Self {
-        CommandError { kind, message: message.into(), path: None, details: None }
+        CommandError {
+            kind,
+            message: message.into(),
+            path: None,
+            details: None,
+        }
     }
     pub fn at(mut self, path: impl Into<String>) -> Self {
         if self.path.is_none() {

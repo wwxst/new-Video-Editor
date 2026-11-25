@@ -99,15 +99,24 @@ impl Time {
         Self::from_i128(n, self.den as i128 * o.den as i128)
     }
     pub fn checked_sub(self, o: Time) -> Result<Time, TimeError> {
-        self.checked_add(Time { num: -o.num, den: o.den })
+        self.checked_add(Time {
+            num: -o.num,
+            den: o.den,
+        })
     }
     /// Multiply by an exact ratio (e.g. a clip speed).
     pub fn checked_mul(self, r: Ratio) -> Result<Time, TimeError> {
-        Self::from_i128(self.num as i128 * r.num as i128, self.den as i128 * r.den as i128)
+        Self::from_i128(
+            self.num as i128 * r.num as i128,
+            self.den as i128 * r.den as i128,
+        )
     }
     /// Divide by an exact ratio.
     pub fn checked_div(self, r: Ratio) -> Result<Time, TimeError> {
-        Self::from_i128(self.num as i128 * r.den as i128, self.den as i128 * r.num as i128)
+        Self::from_i128(
+            self.num as i128 * r.den as i128,
+            self.den as i128 * r.num as i128,
+        )
     }
 
     /// Lossy conversion for display and DSP only. Never use for timing decisions.
@@ -146,7 +155,11 @@ pub struct RationalWire {
 
 impl Serialize for Time {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        RationalWire { num: self.num, den: self.den as i64 }.serialize(s)
+        RationalWire {
+            num: self.num,
+            den: self.den as i64,
+        }
+        .serialize(s)
     }
 }
 impl<'de> Deserialize<'de> for Time {
@@ -167,7 +180,10 @@ impl Ratio {
     pub const ONE: Ratio = Ratio { num: 1, den: 1 };
     pub fn new(num: i64, den: i64) -> Result<Ratio, TimeError> {
         let t = Time::new(num, den)?;
-        Ok(Ratio { num: t.num, den: t.den })
+        Ok(Ratio {
+            num: t.num,
+            den: t.den,
+        })
     }
     pub fn num(self) -> i64 {
         self.num
@@ -204,7 +220,11 @@ impl PartialOrd for Ratio {
 }
 impl Serialize for Ratio {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        RationalWire { num: self.num, den: self.den as i64 }.serialize(s)
+        RationalWire {
+            num: self.num,
+            den: self.den as i64,
+        }
+        .serialize(s)
     }
 }
 impl<'de> Deserialize<'de> for Ratio {
@@ -259,7 +279,10 @@ impl TryFrom<RationalWire> for FrameRate {
 impl From<FrameRate> for RationalWire {
     fn from(f: FrameRate) -> Self {
         let r = f.rate();
-        RationalWire { num: r.num, den: r.den as i64 }
+        RationalWire {
+            num: r.num,
+            den: r.den as i64,
+        }
     }
 }
 
@@ -293,7 +316,10 @@ impl FrameRate {
     /// Exact seconds per frame (the stored timebase).
     pub fn frame_duration(self) -> Time {
         let r = self.rate();
-        Time { num: r.den as i64, den: r.num as u32 }
+        Time {
+            num: r.den as i64,
+            den: r.num as u32,
+        }
     }
 
     /// Integer frames per timecode second.
@@ -346,14 +372,22 @@ impl FrameRate {
             _ => {}
         }
         if let Some((n, d)) = s.split_once('/') {
-            let n: i64 = n.trim().parse().map_err(|_| TimeError::UnsupportedFrameRate(s.into()))?;
-            let d: i64 = d.trim().parse().map_err(|_| TimeError::UnsupportedFrameRate(s.into()))?;
+            let n: i64 = n
+                .trim()
+                .parse()
+                .map_err(|_| TimeError::UnsupportedFrameRate(s.into()))?;
+            let d: i64 = d
+                .trim()
+                .parse()
+                .map_err(|_| TimeError::UnsupportedFrameRate(s.into()))?;
             return FrameRate::from_ratio(Ratio::new(n, d)?);
         }
         if s.contains('.') {
             return Err(TimeError::InexactFrameRate(s.into()));
         }
-        let n: i64 = s.parse().map_err(|_| TimeError::UnsupportedFrameRate(s.into()))?;
+        let n: i64 = s
+            .parse()
+            .map_err(|_| TimeError::UnsupportedFrameRate(s.into()))?;
         FrameRate::from_ratio(Ratio::new(n, 1)?)
     }
 
@@ -385,7 +419,8 @@ impl FrameRate {
     /// Maximum frame count for the 24 h sequence cap.
     pub fn max_frames(self) -> i64 {
         // floor(24h * rate)
-        self.frame_at(Time::secs(MAX_SEQUENCE_SECONDS), Round::Floor).unwrap_or(0)
+        self.frame_at(Time::secs(MAX_SEQUENCE_SECONDS), Round::Floor)
+            .unwrap_or(0)
     }
 
     // ---- timecode -------------------------------------------------------------------------
@@ -400,7 +435,14 @@ impl FrameRate {
         let s = total_s % 60;
         let m = (total_s / 60) % 60;
         let h = total_s / 3600;
-        format!("{}{:02}:{:02}:{:02}:{:02}", if neg { "-" } else { "" }, h, m, s, ff)
+        format!(
+            "{}{:02}:{:02}:{:02}:{:02}",
+            if neg { "-" } else { "" },
+            h,
+            m,
+            s,
+            ff
+        )
     }
 
     /// Drop-frame label `HH:MM:SS;FF`. Errors at non-DF rates.
@@ -412,6 +454,13 @@ impl FrameRate {
         let nom = self.nominal();
         let fpm = nom * 60 - drop;
         let fp10m = nom * 600 - drop * 9;
+        if frame >= fp10m * 6 * 24 {
+            // 24 h of wall-clock time is slightly longer than the DF label range
+            // (e.g. 2,589,410 vs 2,589,408 frames at 29.97); no label exists past 23:59:59;FF.
+            return Err(TimeError::InvalidTimecode(format!(
+                "frame {frame} is past the drop-frame label range"
+            )));
+        }
         let d = frame / fp10m;
         let m = frame % fp10m;
         let label_frames = if m > drop {
@@ -510,7 +559,12 @@ mod tests {
         }
         assert_eq!(acc, Time::secs(1001));
         assert!(t(1, 3) < t(1, 2));
-        assert_eq!(t(1, 2).checked_mul(Ratio::new(2, 1).expect("r")).expect("m"), Time::secs(1));
+        assert_eq!(
+            t(1, 2)
+                .checked_mul(Ratio::new(2, 1).expect("r"))
+                .expect("m"),
+            Time::secs(1)
+        );
     }
 
     #[test]
@@ -525,9 +579,18 @@ mod tests {
         assert_eq!(FrameRate::parse("30000/1001"), Ok(FrameRate::Fps29_97));
         assert_eq!(FrameRate::parse("60000/1001"), Ok(FrameRate::Fps59_94));
         assert_eq!(FrameRate::parse("25"), Ok(FrameRate::Fps25));
-        assert!(matches!(FrameRate::parse("29.976"), Err(TimeError::InexactFrameRate(_))));
-        assert!(matches!(FrameRate::parse("30.0"), Err(TimeError::InexactFrameRate(_))));
-        assert!(matches!(FrameRate::parse("48"), Err(TimeError::UnsupportedFrameRate(_))));
+        assert!(matches!(
+            FrameRate::parse("29.976"),
+            Err(TimeError::InexactFrameRate(_))
+        ));
+        assert!(matches!(
+            FrameRate::parse("30.0"),
+            Err(TimeError::InexactFrameRate(_))
+        ));
+        assert!(matches!(
+            FrameRate::parse("48"),
+            Err(TimeError::UnsupportedFrameRate(_))
+        ));
         for f in FrameRate::ALL {
             let r = f.rate();
             let d = f.frame_duration();
@@ -546,12 +609,30 @@ mod tests {
         let b = f.time_of_frame(10);
         let tick = t(1, 1_000_000);
         assert_eq!(f.frame_at(b, Round::Exact), Ok(10));
-        assert_eq!(f.frame_at(b.checked_sub(tick).expect("s"), Round::Floor), Ok(9));
-        assert_eq!(f.frame_at(b.checked_sub(tick).expect("s"), Round::Ceil), Ok(10));
-        assert_eq!(f.frame_at(b.checked_add(tick).expect("a"), Round::Floor), Ok(10));
-        assert_eq!(f.frame_at(b.checked_add(tick).expect("a"), Round::Ceil), Ok(11));
-        assert_eq!(f.frame_at(b.checked_add(tick).expect("a"), Round::Nearest), Ok(10));
-        assert!(f.frame_at(b.checked_add(tick).expect("a"), Round::Exact).is_err());
+        assert_eq!(
+            f.frame_at(b.checked_sub(tick).expect("s"), Round::Floor),
+            Ok(9)
+        );
+        assert_eq!(
+            f.frame_at(b.checked_sub(tick).expect("s"), Round::Ceil),
+            Ok(10)
+        );
+        assert_eq!(
+            f.frame_at(b.checked_add(tick).expect("a"), Round::Floor),
+            Ok(10)
+        );
+        assert_eq!(
+            f.frame_at(b.checked_add(tick).expect("a"), Round::Ceil),
+            Ok(11)
+        );
+        assert_eq!(
+            f.frame_at(b.checked_add(tick).expect("a"), Round::Nearest),
+            Ok(10)
+        );
+        assert!(
+            f.frame_at(b.checked_add(tick).expect("a"), Round::Exact)
+                .is_err()
+        );
         // 1 s is not a frame boundary at 29.97
         assert!(!f.is_on_boundary(Time::secs(1)));
         assert!(FrameRate::Fps30.is_on_boundary(Time::secs(1)));
@@ -590,7 +671,16 @@ mod tests {
     #[test]
     fn timecode_rejections() {
         let f = FrameRate::Fps29_97;
-        for bad in ["00:01:00;00", "00:01:00;01", "00:00:00:30", "00:60:00:00", "00:00:60:00", "24:00:00:00", "1:2:3", "aa:00:00:00"] {
+        for bad in [
+            "00:01:00;00",
+            "00:01:00;01",
+            "00:00:00:30",
+            "00:60:00:00",
+            "00:00:60:00",
+            "24:00:00:00",
+            "1:2:3",
+            "aa:00:00:00",
+        ] {
             assert!(f.parse_timecode(bad).is_err(), "{bad} should be rejected");
         }
         assert!(f.parse_timecode("00:10:00;00").is_ok());
@@ -598,8 +688,14 @@ mod tests {
         for ff in 0..4 {
             assert!(g.parse_timecode(&format!("00:01:00;{ff:02}")).is_err());
         }
-        assert_eq!(FrameRate::Fps25.parse_timecode("00:00:01;00"), Err(TimeError::DropFrameNotAllowed));
-        assert_eq!(FrameRate::Fps30.format_df(1), Err(TimeError::DropFrameNotAllowed));
+        assert_eq!(
+            FrameRate::Fps25.parse_timecode("00:00:01;00"),
+            Err(TimeError::DropFrameNotAllowed)
+        );
+        assert_eq!(
+            FrameRate::Fps30.format_df(1),
+            Err(TimeError::DropFrameNotAllowed)
+        );
     }
 
     /// Exhaustive 24 h round trip (docs/08 §6). Runs in a few seconds with the test profile.
@@ -612,9 +708,17 @@ mod tests {
             while frame < max {
                 let ndf = f.format_ndf(frame);
                 assert_eq!(f.parse_timecode(&ndf), Ok(frame), "{f:?} ndf {ndf}");
-                if f.drop_frames().is_some() {
-                    let df = f.format_df(frame).expect("df");
-                    assert_eq!(f.parse_timecode(&df), Ok(frame), "{f:?} df {df}");
+                if let Some(drop) = f.drop_frames() {
+                    let df_capacity = (f.nominal() * 600 - drop * 9) * 6 * 24;
+                    if frame < df_capacity {
+                        let df = f.format_df(frame).expect("df");
+                        assert_eq!(f.parse_timecode(&df), Ok(frame), "{f:?} df {df}");
+                    } else {
+                        assert!(
+                            f.format_df(frame).is_err(),
+                            "{f:?} frame {frame} must have no DF label"
+                        );
+                    }
                 }
                 frame += step;
             }

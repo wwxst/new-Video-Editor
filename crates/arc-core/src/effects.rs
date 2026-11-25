@@ -53,7 +53,9 @@ pub struct StaticCatalog {
 
 impl StaticCatalog {
     pub fn new(manifests: impl IntoIterator<Item = EffectManifest>) -> Self {
-        StaticCatalog { manifests: manifests.into_iter().map(|m| (m.id.clone(), m)).collect() }
+        StaticCatalog {
+            manifests: manifests.into_iter().map(|m| (m.id.clone(), m)).collect(),
+        }
     }
 }
 

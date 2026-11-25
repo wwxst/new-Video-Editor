@@ -16,7 +16,9 @@ pub struct IdError {
 fn valid(prefix: &str, s: &str) -> bool {
     match s.strip_prefix(prefix).and_then(|r| r.strip_prefix('_')) {
         Some(rest) => {
-            !rest.is_empty() && rest.len() <= 64 && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            !rest.is_empty()
+                && rest.len() <= 64
+                && rest.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         }
         None => false,
     }
@@ -32,14 +34,17 @@ macro_rules! id_type {
 
             /// Generate a fresh, time-ordered ID.
             pub fn generate() -> Self {
-                Self(format!("{}_{}", $prefix, ulid::Ulid::new()))
+                Self(format!("{}_{}", $prefix, ulid::Ulid::generate()))
             }
 
             pub fn parse(s: &str) -> Result<Self, IdError> {
                 if valid($prefix, s) {
                     Ok(Self(s.to_string()))
                 } else {
-                    Err(IdError { prefix: $prefix, value: s.to_string() })
+                    Err(IdError {
+                        prefix: $prefix,
+                        value: s.to_string(),
+                    })
                 }
             }
 

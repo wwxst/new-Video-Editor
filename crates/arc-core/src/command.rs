@@ -168,6 +168,10 @@ pub enum Command {
         at: TimeInput,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         new_id: Option<ClipId>,
+        /// IDs for the right part's copies of the clip's effects, in order. Filled during
+        /// resolution so redo and journal replay are deterministic.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_effect_ids: Option<Vec<EffectId>>,
     },
     #[serde(rename = "timeline.set_speed")]
     SetSpeed { clip: ClipId, speed: Ratio },
@@ -215,9 +219,17 @@ pub enum Command {
     #[serde(rename = "effect.remove")]
     EffectRemove { clip: ClipId, effect: EffectId },
     #[serde(rename = "effect.set_params")]
-    EffectSetParams { clip: ClipId, effect: EffectId, params: BTreeMap<String, Param> },
+    EffectSetParams {
+        clip: ClipId,
+        effect: EffectId,
+        params: BTreeMap<String, Param>,
+    },
     #[serde(rename = "effect.set_enabled")]
-    EffectSetEnabled { clip: ClipId, effect: EffectId, enabled: bool },
+    EffectSetEnabled {
+        clip: ClipId,
+        effect: EffectId,
+        enabled: bool,
+    },
 
     #[serde(rename = "audio.set_gain")]
     AudioSetGain { clip: ClipId, gain_db: f64 },
@@ -311,35 +323,54 @@ fn err(kind: ErrorKind, msg: impl Into<String>) -> CommandError {
 
 fn seq_mut(p: &mut Project) -> CmdResult<&mut Sequence> {
     let id = p.settings.sequence.clone();
-    p.sequences.get_mut(&id).ok_or_else(|| err(ErrorKind::InvalidCommand, "project has no active sequence"))
+    p.sequences
+        .get_mut(&id)
+        .ok_or_else(|| err(ErrorKind::InvalidCommand, "project has no active sequence"))
 }
 
 fn rate_of(p: &Project) -> CmdResult<FrameRate> {
-    p.sequence().map(|s| s.frame_rate()).ok_or_else(|| err(ErrorKind::InvalidCommand, "project has no active sequence"))
+    p.sequence()
+        .map(|s| s.frame_rate())
+        .ok_or_else(|| err(ErrorKind::InvalidCommand, "project has no active sequence"))
 }
 
 fn locate(seq: &Sequence, clip: &ClipId) -> CmdResult<(usize, usize)> {
-    seq.find_clip(clip).ok_or_else(|| err(ErrorKind::UnknownClip, format!("unknown clip {clip}")))
+    seq.find_clip(clip)
+        .ok_or_else(|| err(ErrorKind::UnknownClip, format!("unknown clip {clip}")))
 }
 
 fn track_idx(seq: &Sequence, track: &TrackId) -> CmdResult<usize> {
-    seq.track_index(track).ok_or_else(|| err(ErrorKind::UnknownTrack, format!("unknown track {track}")))
+    seq.track_index(track)
+        .ok_or_else(|| err(ErrorKind::UnknownTrack, format!("unknown track {track}")))
 }
 
 fn ensure_unlocked(seq: &Sequence, ti: usize) -> CmdResult<()> {
     match seq.tracks.get(ti) {
-        Some(t) if t.locked => Err(err(ErrorKind::TrackLocked, format!("track {} is locked", t.id))),
+        Some(t) if t.locked => Err(err(
+            ErrorKind::TrackLocked,
+            format!("track {} is locked", t.id),
+        )),
         _ => Ok(()),
     }
 }
 
 /// Mutable access to a clip, enforcing the track lock.
-fn with_clip<R>(p: &mut Project, clip: &ClipId, f: impl FnOnce(&mut Clip) -> CmdResult<R>) -> CmdResult<R> {
+fn with_clip<R>(
+    p: &mut Project,
+    clip: &ClipId,
+    f: impl FnOnce(&mut Clip) -> CmdResult<R>,
+) -> CmdResult<R> {
     let seq = seq_mut(p)?;
     let (ti, ci) = locate(seq, clip)?;
     ensure_unlocked(seq, ti)?;
-    let track = seq.tracks.get_mut(ti).ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
-    let c = track.clips.get_mut(ci).ok_or_else(|| err(ErrorKind::UnknownClip, "clip vanished"))?;
+    let track = seq
+        .tracks
+        .get_mut(ti)
+        .ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
+    let c = track
+        .clips
+        .get_mut(ci)
+        .ok_or_else(|| err(ErrorKind::UnknownClip, "clip vanished"))?;
     f(c)
 }
 
@@ -348,7 +379,13 @@ fn sort_track(track: &mut Track) {
 }
 
 /// Shift clips that start at or after `from` by `delta` (may be negative).
-fn ripple_shift(seq: &mut Sequence, scope: Ripple, track: usize, from: Time, delta: Time) -> CmdResult<()> {
+fn ripple_shift(
+    seq: &mut Sequence,
+    scope: Ripple,
+    track: usize,
+    from: Time,
+    delta: Time,
+) -> CmdResult<()> {
     if scope == Ripple::None || delta.is_zero() {
         return Ok(());
     }
@@ -369,35 +406,57 @@ fn ripple_shift(seq: &mut Sequence, scope: Ripple, track: usize, from: Time, del
     Ok(())
 }
 
-fn check_new_id<T: PartialEq>(existing: impl Iterator<Item = T>, id: &T, label: &str) -> CmdResult<()>
-where
-    T: std::fmt::Display,
-{
-    let mut ex = existing;
-    if ex.any(|e| &e == id) {
-        return Err(err(ErrorKind::DuplicateId, format!("{label} {id} already exists")));
+fn check_new_id<T: PartialEq + std::fmt::Display>(
+    mut existing: impl Iterator<Item = T>,
+    id: &T,
+    label: &str,
+) -> CmdResult<()> {
+    if existing.any(|e| &e == id) {
+        return Err(err(
+            ErrorKind::DuplicateId,
+            format!("{label} {id} already exists"),
+        ));
     }
     Ok(())
 }
 
 fn all_clip_ids(seq: &Sequence) -> impl Iterator<Item = ClipId> + '_ {
-    seq.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.id.clone()))
+    seq.tracks
+        .iter()
+        .flat_map(|t| t.clips.iter().map(|c| c.id.clone()))
 }
 
 fn all_effect_ids(seq: &Sequence) -> impl Iterator<Item = EffectId> + '_ {
-    seq.tracks.iter().flat_map(|t| t.clips.iter().flat_map(|c| c.effects.iter().map(|e| e.id.clone())))
+    seq.tracks.iter().flat_map(|t| {
+        t.clips
+            .iter()
+            .flat_map(|c| c.effects.iter().map(|e| e.id.clone()))
+    })
 }
 
 fn all_transition_ids(seq: &Sequence) -> impl Iterator<Item = TransitionId> + '_ {
-    seq.tracks.iter().flat_map(|t| t.transitions.iter().map(|x| x.id.clone()))
+    seq.tracks
+        .iter()
+        .flat_map(|t| t.transitions.iter().map(|x| x.id.clone()))
 }
 
 fn finite(v: f64, what: &str) -> CmdResult<f64> {
-    if v.is_finite() { Ok(v) } else { Err(err(ErrorKind::InvalidValue, format!("{what} must be finite"))) }
+    if v.is_finite() {
+        Ok(v)
+    } else {
+        Err(err(
+            ErrorKind::InvalidValue,
+            format!("{what} must be finite"),
+        ))
+    }
 }
 
 /// Apply one command to a working copy. Resolves `cmd` in place and returns its `resulting` entry.
-pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCatalog) -> CmdResult<Value> {
+pub fn apply_command(
+    p: &mut Project,
+    cmd: &mut Command,
+    catalog: &dyn EffectCatalog,
+) -> CmdResult<Value> {
     let rate = rate_of(p)?;
     match cmd {
         Command::ProjectRename { name } => {
@@ -408,7 +467,12 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             Ok(json!({"op": "project.rename"}))
         }
 
-        Command::TrackAdd { id, kind, name, index } => {
+        Command::TrackAdd {
+            id,
+            kind,
+            name,
+            index,
+        } => {
             let seq = seq_mut(p)?;
             let new_id = id.clone().unwrap_or_else(TrackId::generate);
             check_new_id(seq.tracks.iter().map(|t| t.id.clone()), &new_id, "track")?;
@@ -449,10 +513,21 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             Ok(json!({"op": "track.remove", "id": track}))
         }
 
-        Command::TrackSetProperties { track, name, enabled, locked, opacity, gain_db, muted } => {
+        Command::TrackSetProperties {
+            track,
+            name,
+            enabled,
+            locked,
+            opacity,
+            gain_db,
+            muted,
+        } => {
             let seq = seq_mut(p)?;
             let ti = track_idx(seq, track)?;
-            let t = seq.tracks.get_mut(ti).ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
+            let t = seq
+                .tracks
+                .get_mut(ti)
+                .ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
             if let Some(n) = name {
                 t.name = n.clone();
             }
@@ -474,10 +549,20 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             Ok(json!({"op": "track.set_properties", "id": track}))
         }
 
-        Command::AssetImport { id, path, kind, probe, status } => {
+        Command::AssetImport {
+            id,
+            path,
+            kind,
+            probe,
+            status,
+        } => {
             let new_id = id.clone().unwrap_or_else(AssetId::generate);
             if p.assets.contains_key(&new_id) {
-                return Err(err(ErrorKind::DuplicateId, format!("asset {new_id} already exists")).at("id"));
+                return Err(err(
+                    ErrorKind::DuplicateId,
+                    format!("asset {new_id} already exists"),
+                )
+                .at("id"));
             }
             *id = Some(new_id.clone());
             p.assets.insert(
@@ -496,19 +581,35 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
 
         Command::AssetRemove { asset } => {
             if !p.assets.contains_key(asset) {
-                return Err(err(ErrorKind::UnknownAsset, format!("unknown asset {asset}")));
+                return Err(err(
+                    ErrorKind::UnknownAsset,
+                    format!("unknown asset {asset}"),
+                ));
             }
             let used = p.sequences.values().any(|s| {
-                s.tracks.iter().any(|t| t.clips.iter().any(|c| c.asset.as_ref() == Some(asset)))
+                s.tracks
+                    .iter()
+                    .any(|t| t.clips.iter().any(|c| c.asset.as_ref() == Some(asset)))
             });
             if used {
-                return Err(err(ErrorKind::AssetInUse, format!("asset {asset} is used by clips")));
+                return Err(err(
+                    ErrorKind::AssetInUse,
+                    format!("asset {asset} is used by clips"),
+                ));
             }
             p.assets.remove(asset);
             Ok(json!({"op": "asset.remove", "id": asset}))
         }
 
-        Command::AddClip { id, track, asset, start, duration, source_in, speed } => {
+        Command::AddClip {
+            id,
+            track,
+            asset,
+            start,
+            duration,
+            source_in,
+            speed,
+        } => {
             let start = start.resolve(rate).map_err(|e| e.at("start"))?;
             let duration = duration.resolve(rate).map_err(|e| e.at("duration"))?;
             let source_in_t = match source_in {
@@ -521,10 +622,16 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             let sp = speed.unwrap_or(Ratio::ONE);
             *speed = Some(sp);
             let Some(asset_id) = asset.clone() else {
-                return Err(err(ErrorKind::InvalidCommand, "asset is required (use title.add for titles)").at("asset"));
+                return Err(err(
+                    ErrorKind::InvalidCommand,
+                    "asset is required (use title.add for titles)",
+                )
+                .at("asset"));
             };
             if !p.assets.contains_key(&asset_id) {
-                return Err(err(ErrorKind::UnknownAsset, format!("unknown asset {asset_id}")).at("asset"));
+                return Err(
+                    err(ErrorKind::UnknownAsset, format!("unknown asset {asset_id}")).at("asset"),
+                );
             }
             let seq = seq_mut(p)?;
             let ti = track_idx(seq, track).map_err(|e| e.at("track"))?;
@@ -546,13 +653,23 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
                 label: None,
                 enabled: true,
             };
-            let t = seq.tracks.get_mut(ti).ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
+            let t = seq
+                .tracks
+                .get_mut(ti)
+                .ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
             t.clips.push_back(clip);
             sort_track(t);
             Ok(json!({"op": "timeline.add_clip", "id": new_id}))
         }
 
-        Command::TitleAdd { id, track, text, style, start, duration } => {
+        Command::TitleAdd {
+            id,
+            track,
+            text,
+            style,
+            start,
+            duration,
+        } => {
             let start = start.resolve(rate).map_err(|e| e.at("start"))?;
             let duration = duration.resolve(rate).map_err(|e| e.at("duration"))?;
             let seq = seq_mut(p)?;
@@ -566,7 +683,10 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             let clip = Clip {
                 id: new_id.clone(),
                 asset: None,
-                title: Some(Title { text: text.clone(), style: st }),
+                title: Some(Title {
+                    text: text.clone(),
+                    style: st,
+                }),
                 start,
                 duration,
                 source_in: Time::ZERO,
@@ -577,7 +697,10 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
                 label: None,
                 enabled: true,
             };
-            let t = seq.tracks.get_mut(ti).ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
+            let t = seq
+                .tracks
+                .get_mut(ti)
+                .ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
             t.clips.push_back(clip);
             sort_track(t);
             Ok(json!({"op": "title.add", "id": new_id}))
@@ -598,7 +721,10 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             let seq = seq_mut(p)?;
             let (ti, ci) = locate(seq, clip)?;
             ensure_unlocked(seq, ti)?;
-            let t = seq.tracks.get_mut(ti).ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
+            let t = seq
+                .tracks
+                .get_mut(ti)
+                .ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
             let removed = t.clips.remove(ci);
             // cascade: transitions referencing the clip are removed with it
             let before = t.transitions.len();
@@ -607,7 +733,9 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             let end = removed.end()?;
             let delta = Time::ZERO.checked_sub(removed.duration)?;
             ripple_shift(seq, *ripple, ti, end, delta)?;
-            Ok(json!({"op": "timeline.remove_clip", "id": clip, "removed_transitions": dropped_transitions}))
+            Ok(
+                json!({"op": "timeline.remove_clip", "id": clip, "removed_transitions": dropped_transitions}),
+            )
         }
 
         Command::MoveClip { clip, track, start } => {
@@ -620,30 +748,54 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
                 None => ti,
             };
             ensure_unlocked(seq, dest)?;
-            let src = seq.tracks.get_mut(ti).ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
+            let src = seq
+                .tracks
+                .get_mut(ti)
+                .ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
             if dest != ti && src.transitions.iter().any(|x| x.a == *clip || x.b == *clip) {
-                return Err(err(ErrorKind::TransitionBroken, "remove the clip's transitions before moving it to another track"));
+                return Err(err(
+                    ErrorKind::TransitionBroken,
+                    "remove the clip's transitions before moving it to another track",
+                ));
             }
             let mut c = src.clips.remove(ci);
             c.start = start;
-            let d = seq.tracks.get_mut(dest).ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
+            let d = seq
+                .tracks
+                .get_mut(dest)
+                .ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
             d.clips.push_back(c);
             sort_track(d);
             Ok(json!({"op": "timeline.move_clip", "id": clip}))
         }
 
-        Command::TrimClip { clip, edge, to, ripple } => {
+        Command::TrimClip {
+            clip,
+            edge,
+            to,
+            ripple,
+        } => {
             let to = to.resolve(rate).map_err(|e| e.at("to"))?;
             let seq = seq_mut(p)?;
             let (ti, ci) = locate(seq, clip)?;
             ensure_unlocked(seq, ti)?;
-            let t = seq.tracks.get_mut(ti).ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
-            let c = t.clips.get_mut(ci).ok_or_else(|| err(ErrorKind::UnknownClip, "clip vanished"))?;
+            let t = seq
+                .tracks
+                .get_mut(ti)
+                .ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
+            let c = t
+                .clips
+                .get_mut(ci)
+                .ok_or_else(|| err(ErrorKind::UnknownClip, "clip vanished"))?;
             let old_end = c.end()?;
             match edge {
                 Edge::Out => {
                     if to <= c.start {
-                        return Err(err(ErrorKind::OutOfRange, "out edge must be after the clip start").at("to"));
+                        return Err(err(
+                            ErrorKind::OutOfRange,
+                            "out edge must be after the clip start",
+                        )
+                        .at("to"));
                     }
                     c.duration = to.checked_sub(c.start)?;
                     let delta = to.checked_sub(old_end)?;
@@ -651,10 +803,17 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
                 }
                 Edge::In => {
                     if *ripple != Ripple::None {
-                        return Err(err(ErrorKind::UnsupportedRipple, "ripple is only supported on the out edge"));
+                        return Err(err(
+                            ErrorKind::UnsupportedRipple,
+                            "ripple is only supported on the out edge",
+                        ));
                     }
                     if to >= old_end {
-                        return Err(err(ErrorKind::OutOfRange, "in edge must be before the clip end").at("to"));
+                        return Err(err(
+                            ErrorKind::OutOfRange,
+                            "in edge must be before the clip end",
+                        )
+                        .at("to"));
                     }
                     let shift = to.checked_sub(c.start)?; // timeline delta
                     c.source_in = c.source_in.checked_add(shift.checked_mul(c.speed)?)?;
@@ -666,7 +825,12 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             Ok(json!({"op": "timeline.trim_clip", "id": clip}))
         }
 
-        Command::SplitClip { clip, at, new_id } => {
+        Command::SplitClip {
+            clip,
+            at,
+            new_id,
+            new_effect_ids,
+        } => {
             let at_t = at.resolve(rate).map_err(|e| e.at("at"))?;
             let seq = seq_mut(p)?;
             let (ti, ci) = locate(seq, clip)?;
@@ -674,13 +838,35 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             let nid = new_id.clone().unwrap_or_else(ClipId::generate);
             check_new_id(all_clip_ids(seq), &nid, "clip").map_err(|e| e.at("new_id"))?;
             *new_id = Some(nid.clone());
-            let t = seq.tracks.get_mut(ti).ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
-            let c = t.clips.get_mut(ci).ok_or_else(|| err(ErrorKind::UnknownClip, "clip vanished"))?;
+            let t = seq
+                .tracks
+                .get_mut(ti)
+                .ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
+            let c = t
+                .clips
+                .get_mut(ci)
+                .ok_or_else(|| err(ErrorKind::UnknownClip, "clip vanished"))?;
             let end = c.end()?;
             if at_t <= c.start || at_t >= end {
-                return Err(err(ErrorKind::OutOfRange, "split point must be strictly inside the clip").at("at"));
+                return Err(err(
+                    ErrorKind::OutOfRange,
+                    "split point must be strictly inside the clip",
+                )
+                .at("at"));
             }
             let left_dur = at_t.checked_sub(c.start)?;
+            let fx_ids: Vec<EffectId> = match new_effect_ids {
+                Some(v) if v.len() == c.effects.len() => v.clone(),
+                Some(_) => {
+                    return Err(err(
+                        ErrorKind::InvalidValue,
+                        "new_effect_ids must match the clip's effect count",
+                    )
+                    .at("new_effect_ids"));
+                }
+                None => c.effects.iter().map(|_| EffectId::generate()).collect(),
+            };
+            *new_effect_ids = Some(fx_ids.clone());
             let mut right = c.clone();
             right.id = nid.clone();
             right.start = at_t;
@@ -689,7 +875,8 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             right.effects = right
                 .effects
                 .iter()
-                .map(|e| EffectInstance { id: EffectId::generate(), ..e.clone() })
+                .zip(fx_ids)
+                .map(|(e, id)| EffectInstance { id, ..e.clone() })
                 .collect();
             right.audio.fade_in = Time::ZERO;
             c.duration = left_dur;
@@ -713,7 +900,14 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             Ok(json!({"op": "timeline.set_speed", "id": clip}))
         }
 
-        Command::SetTransform { clip, position, scale, rotation_deg, anchor, opacity } => {
+        Command::SetTransform {
+            clip,
+            position,
+            scale,
+            rotation_deg,
+            anchor,
+            opacity,
+        } => {
             let (pos, sc, rot, anc, op) = (*position, *scale, *rotation_deg, *anchor, *opacity);
             with_clip(p, clip, |c| {
                 if let Some(v) = pos {
@@ -754,20 +948,38 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             Ok(json!({"op": "timeline.set_label", "id": clip}))
         }
 
-        Command::AddTransition { id, a, b, duration, kind } => {
+        Command::AddTransition {
+            id,
+            a,
+            b,
+            duration,
+            kind,
+        } => {
             let d = duration.resolve(rate).map_err(|e| e.at("duration"))?;
             let seq = seq_mut(p)?;
             let (ta, _) = locate(seq, a).map_err(|e| e.at("a"))?;
             let (tb, _) = locate(seq, b).map_err(|e| e.at("b"))?;
             if ta != tb {
-                return Err(err(ErrorKind::TransitionInvalid, "a and b must be on the same track"));
+                return Err(err(
+                    ErrorKind::TransitionInvalid,
+                    "a and b must be on the same track",
+                ));
             }
             ensure_unlocked(seq, ta)?;
             let nid = id.clone().unwrap_or_else(TransitionId::generate);
             check_new_id(all_transition_ids(seq), &nid, "transition").map_err(|e| e.at("id"))?;
             *id = Some(nid.clone());
-            let t = seq.tracks.get_mut(ta).ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
-            t.transitions.push_back(Transition { id: nid.clone(), kind: *kind, a: a.clone(), b: b.clone(), duration: d });
+            let t = seq
+                .tracks
+                .get_mut(ta)
+                .ok_or_else(|| err(ErrorKind::UnknownTrack, "track vanished"))?;
+            t.transitions.push_back(Transition {
+                id: nid.clone(),
+                kind: *kind,
+                a: a.clone(),
+                b: b.clone(),
+                duration: d,
+            });
             Ok(json!({"op": "timeline.add_transition", "id": nid}))
         }
 
@@ -782,16 +994,26 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
                     return Ok(json!({"op": "timeline.remove_transition", "id": transition}));
                 }
             }
-            Err(err(ErrorKind::UnknownTransition, format!("unknown transition {transition}")))
+            Err(err(
+                ErrorKind::UnknownTransition,
+                format!("unknown transition {transition}"),
+            ))
         }
 
-        Command::EffectAdd { id, clip, effect, params } => {
-            let manifest = catalog
-                .manifest(effect)
-                .ok_or_else(|| err(ErrorKind::UnknownEffect, format!("unknown effect {effect}")).at("effect"))?;
+        Command::EffectAdd {
+            id,
+            clip,
+            effect,
+            params,
+        } => {
+            let manifest = catalog.manifest(effect).ok_or_else(|| {
+                err(ErrorKind::UnknownEffect, format!("unknown effect {effect}")).at("effect")
+            })?;
             // fill defaults so the stored instance is complete
             for spec in &manifest.params {
-                params.entry(spec.key.clone()).or_insert(Param::constant(spec.default));
+                params
+                    .entry(spec.key.clone())
+                    .or_insert(Param::constant(spec.default));
             }
             let nid = id.clone().unwrap_or_else(EffectId::generate);
             {
@@ -799,7 +1021,12 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
                 check_new_id(all_effect_ids(seq), &nid, "effect").map_err(|e| e.at("id"))?;
             }
             *id = Some(nid.clone());
-            let inst = EffectInstance { id: nid.clone(), effect: effect.clone(), enabled: true, params: params.clone() };
+            let inst = EffectInstance {
+                id: nid.clone(),
+                effect: effect.clone(),
+                enabled: true,
+                params: params.clone(),
+            };
             with_clip(p, clip, |c| {
                 c.effects.push_back(inst);
                 Ok(())
@@ -810,26 +1037,32 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
         Command::EffectRemove { clip, effect } => {
             let e = effect.clone();
             with_clip(p, clip, |c| {
-                let i = c
-                    .effects
-                    .iter()
-                    .position(|x| x.id == e)
-                    .ok_or_else(|| err(ErrorKind::UnknownEffect, format!("unknown effect instance {e}")))?;
+                let i = c.effects.iter().position(|x| x.id == e).ok_or_else(|| {
+                    err(
+                        ErrorKind::UnknownEffect,
+                        format!("unknown effect instance {e}"),
+                    )
+                })?;
                 c.effects.remove(i);
                 Ok(())
             })?;
             Ok(json!({"op": "effect.remove", "id": effect}))
         }
 
-        Command::EffectSetParams { clip, effect, params } => {
+        Command::EffectSetParams {
+            clip,
+            effect,
+            params,
+        } => {
             let e = effect.clone();
             let ps = params.clone();
             with_clip(p, clip, |c| {
-                let inst = c
-                    .effects
-                    .iter_mut()
-                    .find(|x| x.id == e)
-                    .ok_or_else(|| err(ErrorKind::UnknownEffect, format!("unknown effect instance {e}")))?;
+                let inst = c.effects.iter_mut().find(|x| x.id == e).ok_or_else(|| {
+                    err(
+                        ErrorKind::UnknownEffect,
+                        format!("unknown effect instance {e}"),
+                    )
+                })?;
                 for (k, v) in ps {
                     inst.params.insert(k, v);
                 }
@@ -838,14 +1071,19 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             Ok(json!({"op": "effect.set_params", "id": effect}))
         }
 
-        Command::EffectSetEnabled { clip, effect, enabled } => {
+        Command::EffectSetEnabled {
+            clip,
+            effect,
+            enabled,
+        } => {
             let (e, en) = (effect.clone(), *enabled);
             with_clip(p, clip, |c| {
-                let inst = c
-                    .effects
-                    .iter_mut()
-                    .find(|x| x.id == e)
-                    .ok_or_else(|| err(ErrorKind::UnknownEffect, format!("unknown effect instance {e}")))?;
+                let inst = c.effects.iter_mut().find(|x| x.id == e).ok_or_else(|| {
+                    err(
+                        ErrorKind::UnknownEffect,
+                        format!("unknown effect instance {e}"),
+                    )
+                })?;
                 inst.enabled = en;
                 Ok(())
             })?;
@@ -870,7 +1108,11 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             Ok(json!({"op": "audio.set_pan", "id": clip}))
         }
 
-        Command::AudioSetFades { clip, fade_in, fade_out } => {
+        Command::AudioSetFades {
+            clip,
+            fade_in,
+            fade_out,
+        } => {
             // Fades are sample-grained: exact rationals are accepted off frame boundaries.
             let fi = match fade_in {
                 Some(x) => Some(x.resolve(rate).map_err(|e| e.at("fade_in"))?),
@@ -896,10 +1138,16 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
             let at_t = at.resolve(rate).map_err(|e| e.at("at"))?;
             let seq = seq_mut(p)?;
             let nid = id.clone().unwrap_or_else(MarkerId::generate);
-            check_new_id(seq.markers.iter().map(|m| m.id.clone()), &nid, "marker").map_err(|e| e.at("id"))?;
+            check_new_id(seq.markers.iter().map(|m| m.id.clone()), &nid, "marker")
+                .map_err(|e| e.at("id"))?;
             *id = Some(nid.clone());
-            seq.markers.push_back(Marker { id: nid.clone(), at: at_t, label: label.clone() });
-            seq.markers.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
+            seq.markers.push_back(Marker {
+                id: nid.clone(),
+                at: at_t,
+                label: label.clone(),
+            });
+            seq.markers
+                .sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.id.cmp(&b.id)));
             Ok(json!({"op": "marker.add", "id": nid}))
         }
 
@@ -942,7 +1190,12 @@ pub fn apply_command(p: &mut Project, cmd: &mut Command, catalog: &dyn EffectCat
 
 /// The inverse of going from `before` to `after`, as an engine-only restore command.
 pub fn inverse_of(before: &Project, after: &Project) -> Command {
-    let mut r = Restore { name: None, tracks: None, markers: None, assets: Vec::new() };
+    let mut r = Restore {
+        name: None,
+        tracks: None,
+        markers: None,
+        assets: Vec::new(),
+    };
     if before.meta.name != after.meta.name {
         r.name = Some(before.meta.name.clone());
     }
@@ -960,7 +1213,10 @@ pub fn inverse_of(before: &Project, after: &Project) -> Command {
     for id in ids {
         let (b, a) = (before.assets.get(id), after.assets.get(id));
         if b != a {
-            r.assets.push(AssetPatch { id: id.clone(), asset: b.cloned() });
+            r.assets.push(AssetPatch {
+                id: id.clone(),
+                asset: b.cloned(),
+            });
         }
     }
     Command::InternalRestore { restore: r }
@@ -972,9 +1228,14 @@ pub fn inverse_of(before: &Project, after: &Project) -> Command {
 
 pub fn validate_project(p: &Project, catalog: &dyn EffectCatalog) -> CmdResult<()> {
     if p.sequences.len() != 1 {
-        return Err(err(ErrorKind::InvalidCommand, "v1 projects have exactly one sequence"));
+        return Err(err(
+            ErrorKind::InvalidCommand,
+            "v1 projects have exactly one sequence",
+        ));
     }
-    let seq = p.sequence().ok_or_else(|| err(ErrorKind::InvalidCommand, "active sequence missing"))?;
+    let seq = p
+        .sequence()
+        .ok_or_else(|| err(ErrorKind::InvalidCommand, "active sequence missing"))?;
     let rate = seq.frame_rate();
     let cap = Time::secs(MAX_SEQUENCE_SECONDS);
 
@@ -986,43 +1247,67 @@ pub fn validate_project(p: &Project, catalog: &dyn EffectCatalog) -> CmdResult<(
     for t in seq.tracks.iter() {
         let tp = format!("track {}", t.id);
         if !track_ids.insert(t.id.clone()) {
-            return Err(err(ErrorKind::DuplicateId, format!("duplicate track {}", t.id)));
+            return Err(err(
+                ErrorKind::DuplicateId,
+                format!("duplicate track {}", t.id),
+            ));
         }
         if !(0.0..=1.0).contains(&t.opacity) {
-            return Err(err(ErrorKind::OutOfRange, format!("{tp}: opacity must be within 0..=1")));
+            return Err(err(
+                ErrorKind::OutOfRange,
+                format!("{tp}: opacity must be within 0..=1"),
+            ));
         }
         if !t.gain_db.is_finite() || !(-96.0..=24.0).contains(&t.gain_db) {
-            return Err(err(ErrorKind::OutOfRange, format!("{tp}: gain_db must be within -96..=24")));
+            return Err(err(
+                ErrorKind::OutOfRange,
+                format!("{tp}: gain_db must be within -96..=24"),
+            ));
         }
         let mut prev_end: Option<(Time, &ClipId)> = None;
         for c in t.clips.iter() {
             validate_clip(p, t, c, rate, cap, catalog)?;
             if !clip_ids.insert(c.id.clone()) {
-                return Err(err(ErrorKind::DuplicateId, format!("duplicate clip {}", c.id)));
+                return Err(err(
+                    ErrorKind::DuplicateId,
+                    format!("duplicate clip {}", c.id),
+                ));
             }
             for e in c.effects.iter() {
                 if !effect_ids.insert(e.id.clone()) {
-                    return Err(err(ErrorKind::DuplicateId, format!("duplicate effect {}", e.id)));
+                    return Err(err(
+                        ErrorKind::DuplicateId,
+                        format!("duplicate effect {}", e.id),
+                    ));
                 }
             }
             if let Some((end, other)) = prev_end {
                 if c.start < end {
-                    return Err(err(ErrorKind::Overlap, format!("clip {} overlaps clip {} on {}", c.id, other, t.id))
-                        .with_details(serde_json::json!({"track": t.id, "clips": [other, c.id]})));
+                    return Err(err(
+                        ErrorKind::Overlap,
+                        format!("clip {} overlaps clip {} on {}", c.id, other, t.id),
+                    )
+                    .with_details(serde_json::json!({"track": t.id, "clips": [other, c.id]})));
                 }
             }
             prev_end = Some((c.end()?, &c.id));
         }
         for x in t.transitions.iter() {
             if !transition_ids.insert(x.id.clone()) {
-                return Err(err(ErrorKind::DuplicateId, format!("duplicate transition {}", x.id)));
+                return Err(err(
+                    ErrorKind::DuplicateId,
+                    format!("duplicate transition {}", x.id),
+                ));
             }
             validate_transition(p, t, x, rate)?;
         }
     }
     for m in seq.markers.iter() {
         if m.at.is_negative() || m.at > cap {
-            return Err(err(ErrorKind::OutOfRange, format!("marker {} outside the sequence range", m.id)));
+            return Err(err(
+                ErrorKind::OutOfRange,
+                format!("marker {} outside the sequence range", m.id),
+            ));
         }
     }
     Ok(())
@@ -1039,15 +1324,26 @@ fn validate_clip(
     let cp = |m: &str| format!("clip {}: {m}", c.id);
     match (&c.asset, &c.title) {
         (Some(a), None) => {
-            let asset = p.assets.get(a).ok_or_else(|| err(ErrorKind::UnknownAsset, cp(&format!("unknown asset {a}"))))?;
+            let asset = p
+                .assets
+                .get(a)
+                .ok_or_else(|| err(ErrorKind::UnknownAsset, cp(&format!("unknown asset {a}"))))?;
             let ok = match (t.kind, asset.kind) {
                 (TrackKind::Video, AssetKind::Video | AssetKind::Image) => true,
                 (TrackKind::Audio, AssetKind::Audio) => true,
-                (TrackKind::Audio, AssetKind::Video) => asset.probe.as_ref().is_some_and(|pr| pr.audio.is_some()),
+                (TrackKind::Audio, AssetKind::Video) => {
+                    asset.probe.as_ref().is_some_and(|pr| pr.audio.is_some())
+                }
                 _ => false,
             };
             if !ok {
-                return Err(err(ErrorKind::TrackKindMismatch, cp(&format!("{:?} asset cannot go on a {:?} track", asset.kind, t.kind))));
+                return Err(err(
+                    ErrorKind::TrackKindMismatch,
+                    cp(&format!(
+                        "{:?} asset cannot go on a {:?} track",
+                        asset.kind, t.kind
+                    )),
+                ));
             }
             if asset.kind != AssetKind::Image {
                 if let Some(pr) = &asset.probe {
@@ -1060,61 +1356,121 @@ fn validate_clip(
         }
         (None, Some(_)) => {
             if t.kind == TrackKind::Audio {
-                return Err(err(ErrorKind::TrackKindMismatch, cp("titles cannot go on audio tracks")));
+                return Err(err(
+                    ErrorKind::TrackKindMismatch,
+                    cp("titles cannot go on audio tracks"),
+                ));
             }
         }
-        _ => return Err(err(ErrorKind::InvalidCommand, cp("exactly one of asset / title must be set"))),
+        _ => {
+            return Err(err(
+                ErrorKind::InvalidCommand,
+                cp("exactly one of asset / title must be set"),
+            ));
+        }
     }
     if c.duration <= Time::ZERO {
         return Err(err(ErrorKind::OutOfRange, cp("duration must be positive")));
     }
     if c.start.is_negative() || c.source_in.is_negative() {
-        return Err(err(ErrorKind::OutOfRange, cp("start and source_in must be non-negative")));
+        return Err(err(
+            ErrorKind::OutOfRange,
+            cp("start and source_in must be non-negative"),
+        ));
     }
     if c.end()? > cap {
-        return Err(err(ErrorKind::OutOfRange, cp("clip ends past the 24 h sequence limit")));
+        return Err(err(
+            ErrorKind::OutOfRange,
+            cp("clip ends past the 24 h sequence limit"),
+        ));
     }
-    for (name, v) in [("start", c.start), ("duration", c.duration), ("source_in", c.source_in)] {
+    for (name, v) in [
+        ("start", c.start),
+        ("duration", c.duration),
+        ("source_in", c.source_in),
+    ] {
         if !rate.is_on_boundary(v) {
-            return Err(err(ErrorKind::OffFrameBoundary, cp(&format!("{name} {v} is not on a {} frame boundary", rate.label()))));
+            return Err(err(
+                ErrorKind::OffFrameBoundary,
+                cp(&format!(
+                    "{name} {v} is not on a {} frame boundary",
+                    rate.label()
+                )),
+            ));
         }
     }
     if !c.speed.is_positive() || c.speed > Ratio::new(16, 1)? {
-        return Err(err(ErrorKind::OutOfRange, cp("speed must be within (0, 16]")));
+        return Err(err(
+            ErrorKind::OutOfRange,
+            cp("speed must be within (0, 16]"),
+        ));
     }
     let tr = c.transform;
-    for v in [tr.position.x, tr.position.y, tr.scale.x, tr.scale.y, tr.rotation_deg, tr.anchor.x, tr.anchor.y, tr.opacity] {
+    for v in [
+        tr.position.x,
+        tr.position.y,
+        tr.scale.x,
+        tr.scale.y,
+        tr.rotation_deg,
+        tr.anchor.x,
+        tr.anchor.y,
+        tr.opacity,
+    ] {
         finite(v, "transform")?;
     }
     if !(0.0..=1.0).contains(&tr.opacity) {
-        return Err(err(ErrorKind::OutOfRange, cp("opacity must be within 0..=1")));
+        return Err(err(
+            ErrorKind::OutOfRange,
+            cp("opacity must be within 0..=1"),
+        ));
     }
     let a = c.audio;
     if !a.gain_db.is_finite() || !(-96.0..=24.0).contains(&a.gain_db) {
-        return Err(err(ErrorKind::OutOfRange, cp("gain_db must be within -96..=24")));
+        return Err(err(
+            ErrorKind::OutOfRange,
+            cp("gain_db must be within -96..=24"),
+        ));
     }
     if !a.pan.is_finite() || !(-1.0..=1.0).contains(&a.pan) {
         return Err(err(ErrorKind::OutOfRange, cp("pan must be within -1..=1")));
     }
-    if a.fade_in.is_negative() || a.fade_out.is_negative() || a.fade_in.checked_add(a.fade_out)? > c.duration {
-        return Err(err(ErrorKind::OutOfRange, cp("fades must be non-negative and fit in the clip")));
+    if a.fade_in.is_negative()
+        || a.fade_out.is_negative()
+        || a.fade_in.checked_add(a.fade_out)? > c.duration
+    {
+        return Err(err(
+            ErrorKind::OutOfRange,
+            cp("fades must be non-negative and fit in the clip"),
+        ));
     }
     for e in c.effects.iter() {
-        let m = catalog
-            .manifest(&e.effect)
-            .ok_or_else(|| err(ErrorKind::UnknownEffect, cp(&format!("unknown effect {}", e.effect))))?;
+        let m = catalog.manifest(&e.effect).ok_or_else(|| {
+            err(
+                ErrorKind::UnknownEffect,
+                cp(&format!("unknown effect {}", e.effect)),
+            )
+        })?;
         for (k, v) in &e.params {
-            let spec = m
-                .param(k)
-                .ok_or_else(|| err(ErrorKind::InvalidValue, cp(&format!("effect {} has no parameter {k}", e.effect))))?;
+            let spec = m.param(k).ok_or_else(|| {
+                err(
+                    ErrorKind::InvalidValue,
+                    cp(&format!("effect {} has no parameter {k}", e.effect)),
+                )
+            })?;
             let values: Vec<f64> = match v {
                 Param::Static { value } => vec![*value],
                 Param::Curve { curve } => {
                     if curve.is_empty() {
-                        return Err(err(ErrorKind::InvalidValue, cp(&format!("{k}: curve must not be empty"))));
+                        return Err(err(
+                            ErrorKind::InvalidValue,
+                            cp(&format!("{k}: curve must not be empty")),
+                        ));
                     }
                     if curve.windows(2).any(|w| w[0].t >= w[1].t) {
-                        return Err(err(ErrorKind::InvalidValue, cp(&format!("{k}: keyframe times must strictly increase"))));
+                        return Err(err(
+                            ErrorKind::InvalidValue,
+                            cp(&format!("{k}: keyframe times must strictly increase")),
+                        ));
                     }
                     curve.iter().map(|kf| kf.v).collect()
                 }
@@ -1123,7 +1479,10 @@ fn validate_clip(
                 if !x.is_finite() || x < spec.range[0] || x > spec.range[1] {
                     return Err(err(
                         ErrorKind::OutOfRange,
-                        cp(&format!("{k}={x} outside [{}, {}]", spec.range[0], spec.range[1])),
+                        cp(&format!(
+                            "{k}={x} outside [{}, {}]",
+                            spec.range[0], spec.range[1]
+                        )),
                     ));
                 }
             }
@@ -1135,32 +1494,70 @@ fn validate_clip(
 fn validate_transition(p: &Project, t: &Track, x: &Transition, rate: FrameRate) -> CmdResult<()> {
     let find = |id: &ClipId| t.clips.iter().position(|c| &c.id == id);
     let (Some(ia), Some(ib)) = (find(&x.a), find(&x.b)) else {
-        return Err(err(ErrorKind::TransitionBroken, format!("transition {} references a clip that is not on its track", x.id)));
+        return Err(err(
+            ErrorKind::TransitionBroken,
+            format!(
+                "transition {} references a clip that is not on its track",
+                x.id
+            ),
+        ));
     };
     let (a, b) = (&t.clips[ia], &t.clips[ib]);
     if ib != ia + 1 || a.end()? != b.start {
-        return Err(err(ErrorKind::TransitionBroken, format!("transition {}: clips {} and {} are not adjacent", x.id, a.id, b.id)));
+        return Err(err(
+            ErrorKind::TransitionBroken,
+            format!(
+                "transition {}: clips {} and {} are not adjacent",
+                x.id, a.id, b.id
+            ),
+        ));
     }
     if x.duration <= Time::ZERO || !rate.is_on_boundary(x.duration) {
-        return Err(err(ErrorKind::TransitionInvalid, format!("transition {}: duration must be positive and frame-aligned", x.id)));
+        return Err(err(
+            ErrorKind::TransitionInvalid,
+            format!(
+                "transition {}: duration must be positive and frame-aligned",
+                x.id
+            ),
+        ));
     }
     if x.duration > a.duration || x.duration > b.duration {
-        return Err(err(ErrorKind::TransitionInvalid, format!("transition {} is longer than one of its clips", x.id)));
+        return Err(err(
+            ErrorKind::TransitionInvalid,
+            format!("transition {} is longer than one of its clips", x.id),
+        ));
     }
     // centered: needs half the duration of source handle on both sides
     let half = x.duration.checked_div(Ratio::new(2, 1)?)?;
     let a_need = a.source_out()?.checked_add(half.checked_mul(a.speed)?)?;
     let b_need = b.source_in.checked_sub(half.checked_mul(b.speed)?)?;
-    let a_dur = a.asset.as_ref().and_then(|id| p.assets.get(id)).and_then(|s| s.probe.as_ref()).map(|pr| pr.duration);
+    let a_dur = a
+        .asset
+        .as_ref()
+        .and_then(|id| p.assets.get(id))
+        .and_then(|s| s.probe.as_ref())
+        .map(|pr| pr.duration);
     if a.title.is_none() {
         if let Some(d) = a_dur {
             if a_need > d {
-                return Err(err(ErrorKind::TransitionInvalid, format!("transition {}: clip {} lacks source handle after its out point", x.id, a.id)));
+                return Err(err(
+                    ErrorKind::TransitionInvalid,
+                    format!(
+                        "transition {}: clip {} lacks source handle after its out point",
+                        x.id, a.id
+                    ),
+                ));
             }
         }
     }
     if b.title.is_none() && b_need.is_negative() {
-        return Err(err(ErrorKind::TransitionInvalid, format!("transition {}: clip {} lacks source handle before its in point", x.id, b.id)));
+        return Err(err(
+            ErrorKind::TransitionInvalid,
+            format!(
+                "transition {}: clip {} lacks source handle before its in point",
+                x.id, b.id
+            ),
+        ));
     }
     Ok(())
 }

@@ -63,7 +63,9 @@ impl TryFrom<TimebaseWire> for Timebase {
 }
 impl From<Timebase> for TimebaseWire {
     fn from(t: Timebase) -> Self {
-        TimebaseWire { frame_duration: t.rate.frame_duration() }
+        TimebaseWire {
+            frame_duration: t.rate.frame_duration(),
+        }
     }
 }
 
@@ -200,7 +202,8 @@ impl Clip {
     }
     /// Source time shown at timeline time `t` (caller ensures `t` is inside the clip).
     pub fn source_time_at(&self, t: Time) -> Result<Time, TimeError> {
-        self.source_in.checked_add(t.checked_sub(self.start)?.checked_mul(self.speed)?)
+        self.source_in
+            .checked_add(t.checked_sub(self.start)?.checked_mul(self.speed)?)
     }
     pub fn contains(&self, t: Time) -> bool {
         match self.end() {
@@ -248,7 +251,12 @@ pub struct ClipAudio {
 
 impl Default for ClipAudio {
     fn default() -> Self {
-        ClipAudio { gain_db: 0.0, pan: 0.0, fade_in: Time::ZERO, fade_out: Time::ZERO }
+        ClipAudio {
+            gain_db: 0.0,
+            pan: 0.0,
+            fade_in: Time::ZERO,
+            fade_out: Time::ZERO,
+        }
     }
 }
 
@@ -322,8 +330,15 @@ fn eval_curve(curve: &[Keyframe], local: Time) -> f64 {
     for w in curve.windows(2) {
         let (a, b) = (&w[0], &w[1]);
         if local >= a.t && local < b.t {
-            let span = b.t.checked_sub(a.t).map(|d| d.to_f64_lossy()).unwrap_or(1.0);
-            let x = local.checked_sub(a.t).map(|d| d.to_f64_lossy()).unwrap_or(0.0) / span;
+            let span =
+                b.t.checked_sub(a.t)
+                    .map(|d| d.to_f64_lossy())
+                    .unwrap_or(1.0);
+            let x = local
+                .checked_sub(a.t)
+                .map(|d| d.to_f64_lossy())
+                .unwrap_or(0.0)
+                / span;
             let p = match a.interp {
                 Interp::Hold => 0.0,
                 Interp::Linear => x,
@@ -461,8 +476,14 @@ impl Project {
         };
         Project {
             schema_version: SCHEMA_VERSION,
-            meta: Meta { id: ProjectId::generate(), name: name.into(), created: String::new() },
-            settings: Settings { sequence: seq_id.clone() },
+            meta: Meta {
+                id: ProjectId::generate(),
+                name: name.into(),
+                created: String::new(),
+            },
+            settings: Settings {
+                sequence: seq_id.clone(),
+            },
             assets: OrdMap::new(),
             sequences: OrdMap::unit(seq_id, seq),
         }
@@ -532,16 +553,34 @@ mod tests {
         assert_eq!(back, p);
         assert_eq!(back.canonical_hash(), p.canonical_hash());
         let s = String::from_utf8(a).expect("utf8");
-        assert!(s.contains(r#""timebase":{"frame_duration":{"num":1001,"den":30000}}"#), "{s}");
+        assert!(
+            s.contains(r#""timebase":{"frame_duration":{"num":1001,"den":30000}}"#),
+            "{s}"
+        );
     }
 
     #[test]
     fn params_eval() {
         let c = Param::Curve {
             curve: vec![
-                Keyframe { t: Time::ZERO, v: 0.0, interp: Interp::Linear, ease: None },
-                Keyframe { t: Time::secs(2), v: 10.0, interp: Interp::Hold, ease: None },
-                Keyframe { t: Time::secs(4), v: 20.0, interp: Interp::Linear, ease: None },
+                Keyframe {
+                    t: Time::ZERO,
+                    v: 0.0,
+                    interp: Interp::Linear,
+                    ease: None,
+                },
+                Keyframe {
+                    t: Time::secs(2),
+                    v: 10.0,
+                    interp: Interp::Hold,
+                    ease: None,
+                },
+                Keyframe {
+                    t: Time::secs(4),
+                    v: 20.0,
+                    interp: Interp::Linear,
+                    ease: None,
+                },
             ],
         };
         assert_eq!(c.eval(Time::secs(1)), 5.0);

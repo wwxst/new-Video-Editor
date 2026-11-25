@@ -1,198 +1,192 @@
-# HANDOVER — WIP checkpoint (Phase A in progress)
+# HANDOVER — foundation checkpoint (Phases A, P, B complete; F started)
 
-> **Status: work in progress. Nothing in `crates/` has been compiled or tested yet.**
-> The workspace does not build in its current state (see §4). Treat every line of Rust here as a
-> reviewed draft, not as working code.
+Checkpoint date: 2026-11-25. Supersedes the earlier WIP handover of `720a99a`.
 
-Checkpoint date: 2026-11-25. Architecture: approved docs under `docs/` (start at `docs/01`, `docs/13`,
-`docs/10`). This file covers implementation status only.
+**State: the workspace builds, clippy is clean, and all 65 tests pass** (3 consecutive full runs on Windows 11,
+Intel integrated GPU). Every milestone below is committed and pushed to `main`. Architecture docs under
+`docs/` remain the source of truth; this file records implementation status, deviations, and how to continue.
 
 ---
 
-## 1. Progress at a glance
+## 1. Getting a working environment (Windows)
 
-| Area | Roadmap phase | State |
+Everything is user-local; no admin rights or system PATH changes were made.
+
+| Component | Location | Why |
 |---|---|---|
-| Architecture docs, ADRs 0001–0014 | — | Done, approved |
-| Cargo workspace manifest | A | Written; lists six members, only `arc-core` exists → **does not build** |
-| `arc-core` source (time, ids, model, effects, error, command, engine, journal, store) | A | **Drafted, never compiled** |
-| `arc-core` `lib.rs` | A | **Missing** — crate cannot compile without it |
-| `arc-core::runtime` (engine thread + journal thread) | A/E | **Not started** (design in §6.5) |
-| `arc-core` tests | A | Unit tests drafted inside `time.rs`, `ids.rs`, `model.rs`; **no engine, journal, store, or property tests yet** |
-| Embedding PoC | P | Not started |
-| `arc-media`, `arc-render`, `arc-audio`, `arc-cli`, `arc-app` | B–J | Not started (no directories exist) |
-| CI workflow (`.github/workflows`) | A | Not started |
-| Handover docs for the 1-to-10 phase (development guide, interface contracts, acceptance criteria, implementation roadmap) | — | **Not started** — still owed from the original task |
-
-## 2. Files in this checkpoint
-
-```
-Cargo.toml                          workspace: deps, lints, profiles
-crates/arc-core/Cargo.toml
-crates/arc-core/src/time.rs         Time, Ratio, FrameRate (8 rates), rounding, NDF/DF timecode, sample mapping + tests
-crates/arc-core/src/ids.rs          prefixed ULID IDs (prj_/sq_/tr_/cl_/as_/fx_/tx_/mk_) + test
-crates/arc-core/src/model.rs        Project/Sequence/Track/Clip/Asset/Param/... on im::Vector/OrdMap; canonical JSON + BLAKE3 hash + tests
-crates/arc-core/src/effects.rs      EffectManifest data + EffectCatalog trait + StaticCatalog
-crates/arc-core/src/error.rs        CommandError with stable snake_case ErrorKind
-crates/arc-core/src/command.rs      Command enum (28 ops + engine-only internal.restore), resolution, apply, inverse_of, validate_project
-crates/arc-core/src/engine.rs       Engine: revisions, idempotency, control/takeover, undo/redo, replay, confirm/rollback, diff
-crates/arc-core/src/journal.rs      record encode/decode, CRC32C, JournalWriter (complete/partial/failure), FaultyFile injector
-crates/arc-core/src/store.rs        .arcline ZIP container, atomic write, migrations stub, session lock, sidecar snapshots/journal, open-for-recovery
-```
-
-## 3. Module status
-
-### Completed as drafts (need compile + tests)
-
-- **`time`** — follows docs/02 §2.1–2.3 exactly. Includes the docs/08 §6 vectors and an exhaustive 24 h
-  DF round trip (`exhaustive_round_trip_24h`). `RationalWire` was made `pub` after writing (serde
-  `try_from`/`into` needs it); check that edit compiled as intended.
-- **`ids`**, **`model`**, **`effects`**, **`error`** — straightforward; small test sets.
-- **`command`** — all commands from docs/02 §4 except those listed in §5 below; whole-project invariant
-  check after every batch.
-- **`engine`** — synchronous state machine. A batch is applied speculatively, then `confirm(rev)` after the
-  journal write or `rollback_unconfirmed()` on failure (docs/08 §4.3).
-- **`journal`** — format and write states per docs/08 §4.2–4.4.
-- **`store`** — container plus sidecar per docs/08 §4.1, §4.5, §4.6. `ProjectStore::open` returns the base
-  snapshot and the decoded entries; **replay is the caller's job** (the runtime, not yet written).
-
-### Incomplete / not started
-
-- `crates/arc-core/src/lib.rs` (module declarations and re-exports).
-- `runtime.rs` (threads, ack, autosave, flush, notifications, recovery replay) — see §6.5.
-- Everything in `arc-media`, `arc-render`, `arc-audio`, `arc-cli`, `arc-app`, the reference embed host, CI.
-
-## 4. Unverified code and outstanding tests
-
-**Nothing has been compiled.** Expect compile errors. Known issues spotted on review but not fixed:
-
-1. No `lib.rs` → the crate cannot build.
-2. The workspace lists five member crates that do not exist → every `cargo` command at the root fails.
-   Either create them or temporarily reduce `members` to `["crates/arc-core"]`.
-3. `store.rs`, `ProjectStore::open`: the binding `p` in the first match arm is unused (warning). Rename it
-   `_p`.
-4. `zip = { version = "9", default-features = false, features = ["deflate"] }` — the feature name in
-   zip 9.x has not been verified. If it fails, check the crate's feature list; it must stay pure Rust
-   (no bzip2/zstd C code).
-5. `blake3` with `features = ["pure", "std"]` — chosen to avoid the C/asm build. Not yet verified.
-6. `im::Vector::sort_by`, and `im` serde support for `Vector`/`OrdMap` — assumed from the `im` 15 API; not
-   yet confirmed against the docs.
-7. `Engine::apply` with an idempotency-key hit returns an entry with empty `commands`. The runtime must
-   **not** journal that entry; only fresh commits are journaled.
-8. `SessionLock` on Windows relies on error code 32 (sharing violation) from `share_mode(0)`. The non-Windows
-   path is weak (Linux `/proc` check; macOS effectively unchecked).
-
-**Outstanding tests (required before Phase A exits; criteria in docs/10 §2 and docs/08 §6):**
-
-- Engine: every command's happy path and its main rejections. Also: stale revision, `dry_run` not
-  committing, idempotency, the `internal.restore` ban for clients, control and auto-takeover, undo/redo
-  chains, `diff` contents.
-- **Property test (invariant 7):** random batches, apply → undo → canonical hash identical; 10,000
-  sequences (`proptest`).
-- Journal: encode/decode round trip; torn tail at every byte offset; bad CRC, magic, and length; short
-  writes (`FaultyFile.max_chunk = 1`); a failure mid-record truncates to the record start; truncate failure
-  leaves a tail that decode rejects; durable-mode `sync` failure.
-- Store: create → reopen; atomic save; recovery from sidecar snapshot plus journal; corrupt snapshot falls
-  back to the container; `.rejected` tail written; lock held against a second open.
-- Frame-rate/timecode suite from docs/08 §6 (largely drafted in `time.rs`; run it).
-
-## 5. Architectural decisions and deviations taken during implementation
-
-Recorded here because they are not yet reflected in `docs/`. Fold them into docs/02 (or an ADR) once they
-are confirmed by tests.
-
-| Topic | Decision in code | Docs said / why |
-|---|---|---|
-| Undo inverses | Entity-level restore: `internal.restore` carries the prior tracks, markers, changed assets, and name; it is journaled like any batch. Clients sending it get `forbidden_op`. | Docs say "inverse derived during apply" without a form. This form makes invariant 7 hold by construction and replay deterministic. |
-| Resolved commands | `apply_command` rewrites each command in place (generated IDs, timecodes → exact rationals, effect defaults filled); the resolved list is what gets journaled and redone. | Implements docs/02 §5 "resolved forward commands". |
-| Validation | Full `validate_project` after every batch (O(n)). | Correct but not incremental; may need optimizing against the 200 µs budget (docs/08 §2). |
-| Effect manifests | `EffectCatalog` trait injected into `Engine`; built-in manifests will come from `arc-render`. | Keeps `arc-core` GPU-free (docs/01 §4). |
-| Sequences | `sequences: OrdMap` with exactly one sequence enforced; `settings.sequence` is the active one. | Matches docs/02 §1. |
-| Track index | Not stored; the vector position is the z-order (dense by construction). | docs/02 example shows `"index"`; update the example. |
-| Clip source | `asset` or `title` field, exactly one. | docs/02 §3.3 shows `asset` only. |
-| Transform | Static values only (not keyframable yet). Effect params support `{"static"}` / `{"curve"}` with f64 values. | docs/02 says every animatable property uses the param form; keyframed transforms are deferred. |
-| Ripple | `none` / `track` / `all` on `remove_clip` and out-edge `trim_clip`; in-edge ripple → `unsupported_ripple`. | Subset of docs/02 §4. |
-| Transitions | Centered on the cut; validation requires adjacency on one track and source handles of half the duration on both sides; removing a clip cascades its transitions; moving a clip with transitions to another track is rejected. | Consistent with docs/02 §3.5. |
-| `allow_subframe` audio clips | Not implemented; every clip boundary must be frame-aligned. Fades are exempt (sample-grained). | Deferred. |
-| Asset kinds on tracks | Video/image → video tracks; audio → audio tracks; a video asset with an audio stream may go on an audio track. No linked A/V clips. | Simplification; document in docs/02. |
-| Journal | CBOR payload (`ciborium`), in-house CRC32C table. | Per docs/08 §4.2. |
-| Toolchain target | `x86_64-pc-windows-gnu` (the only toolchain on this machine). | docs do not pin a target; CI should also build MSVC. |
-| First media backend (planned) | `ffmpeg`/`ffprobe` **CLI subprocesses** behind the `Decoder`/`Encoder` traits; the in-process libav backend follows once FFmpeg dev libraries are available. | The machine has no FFmpeg dev libraries or C compiler; this is a working backend, not a mock, and matches the isolation strategy (docs/04 §1.2). |
-| `unsafe_code = "deny"` workspace-wide | `arc-app` will need a crate-level override for `with_parent_window`. | Keep the override local to the embedding module. |
-
-## 6. Toolchain and dependency blockers
-
-### 6.1 Rust is installed but not on PATH
+| Rust 1.100.0, `x86_64-pc-windows-gnu` | `~/.rustup/toolchains/stable-x86_64-pc-windows-gnu/bin` | Only toolchain on this machine. `~/.cargo/bin` proxies do not exist. |
+| MinGW-w64 GCC 16.2.0 UCRT (WinLibs r3) | `~/.local/toolchains/mingw64` | `windows-sys` 0.61 links via raw-dylib and **needs `dlltool.exe`**; also the C compiler for the libav shim. Download SHA-256 `3c69305081e4a647144339a936244fcf7d3d9e558319e1ad7be2cd2886d4b6a1` (matched the published checksum). |
+| FFmpeg **8.1.3 LGPL shared** (BtbN autobuild `ffmpeg-n8.1.3-41-ga8029b6528-win64-lgpl-shared-8.1.zip`) | `~/.local/toolchains/ffmpeg-8.1-lgpl` | Headers + GNU import libs for the shim; LGPL `ffmpeg`/`ffprobe` for subprocess jobs. Built with the same GCC 16.2; `--disable-libx264 --disable-libx265`. Size matched the release API (81,544,256 bytes), zip CRCs OK, SHA-256 `dbed3e64d68de76472bf2cd0b0f3250384fb96bac14b635a708e998f6e1d6996` (GitHub reset the connection for the separate checksum file). |
 
 ```bash
-export PATH="/c/Users/ww/.rustup/toolchains/stable-x86_64-pc-windows-gnu/bin:$PATH"
-rustc --version   # rustc 1.100.0 (2026-11-09), host x86_64-pc-windows-gnu
+. scripts/dev-env.sh        # Rust + MinGW + ARCLINE_FFMPEG_DIR, FFmpeg bin first on PATH
+cargo build --workspace
+cargo test --workspace
+CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets   # see §6.1 for why
+cargo run -p arc-app --release --example embed_host          # embedding PoC report (opens windows ~30 s)
 ```
 
-`~/.cargo/bin` (the rustup proxies) does not exist; call the toolchain binaries directly or reinstall
-rustup. The GNU toolchain links with its self-contained MinGW linker — verified by compiling and running a
-hello-world.
+`scripts/dev-env.sh` puts the LGPL FFmpeg `bin/` **before** the GPL "essentials" build that is also on this
+machine's PATH. Never let tests or exports pick up the GPL build.
 
-### 6.2 No C compiler, no MSVC, no Windows SDK
+On another machine you need the same three things: Rust (GNU or MSVC), `dlltool` (GNU target only), and an
+LGPL FFmpeg dev package pointed to by `ARCLINE_FFMPEG_DIR` (`include/`, `lib/`, `bin/`). The MSVC target is
+untested — see §6.
 
-- No `cl.exe`, no `gcc`, no Windows SDK libs. `C:\Program Files\Microsoft Visual Studio\18` exists but is
-  empty.
-- Consequence: **every dependency must be pure Rust**. Watch for crates with `build.rs` C compilation
-  (bzip2, zstd, ring, blake3 without `pure`, openssl, libz-sys).
-- Fix if needed: install "Visual Studio Build Tools" (MSVC + Windows SDK) and the MSVC Rust target.
+## 2. What exists
 
-### 6.3 FFmpeg: CLI only
+```
+crates/
+  arc-core    time, ids, model, effects (manifests as data), error, command, engine, journal, store, runtime
+  arc-media   libav shim (csrc/arc_av.c) + Rust wrappers, subprocess probe/import check, encoder, fixtures
+  arc-render  builtin effect manifests, pure frame planning, wgpu direct compositor + WGSL
+  arc-audio   sample-accurate mixer (block-size independent), WAV writer
+  arc-cli     inspect (describe, text timeline), export job, JSON-RPC session, `arcline-cli` binary
+  arc-app     egui-winit + egui-wgpu host loop (top-level / embedded child / pop-out), embed channel, PoC workload
+              examples/embed_host.rs — Win32 reference host + PoC measurement
+docs/poc/embedding-poc-2026-11-25.md — PoC result (GO)
+scripts/dev-env.sh
+```
 
-- `ffmpeg`/`ffprobe` 8.1.1 "essentials" build (gyan.dev) on PATH. No headers or import libraries, so no
-  in-process libav / `ffmpeg-next`.
-- That build contains GPL encoders (libx264, libx265). For development only: never rely on them in shipped
-  defaults (docs/11 §2). Prefer `h264_mf`/NVENC/QSV/AMF, SVT-AV1, ProRes, and FFV1 (lossless; use it for
-  frame-exact tests).
+### Phase status (docs/10)
 
-### 6.4 Dependency versions (crates.io, checked 2026-11-24)
+| Phase | Status | Evidence |
+|---|---|---|
+| **A Spine** | **Done** | Exit criteria met: 10,000-case property test, timecode boundary tests, `new` + `apply` produce valid containers |
+| **P Embedding PoC** | **Done — GO** | All automated criteria pass (docs/poc, ADR-0014 outcome) |
+| **B Headless pipeline** | **Done** | Frame-exact `import → edit → render` through FFV1 and H.264 (hardware `h264_qsv` here) |
+| **C Compositor + shell** | Compositor done; **GUI editor not started** | `arc-app` currently shows the PoC workload, not an editor |
+| **D Audio** | Mixer + export done; **real-time playback (cpal) not started** | |
+| **E Lifecycle** | Journal, recovery, atomic saves, forced-kill done; **crash breadcrumbs, quarantine on relaunch, hang watchdog, relink not started** | |
+| **F Agent surface** | **Started**: JSON-RPC session with 11 of 15 methods; **MCP, local IPC, live attach, control methods, notifications over RPC not started** | |
+| J, G, I, H | Not started | |
 
-egui / egui-winit / egui-wgpu **0.37**, egui_dock 0.22, wgpu 30.0, winit 0.31.0-beta.4, im 15.1,
-arc-swap 1.9, zip 9.8, blake3 1.8, ciborium 0.2, ulid 3.0, proptest 1.12, cpal 0.18, windows-sys 0.61,
-raw-window-handle 0.6.
+### Commands available today
 
-These versions are newer than the author's API familiarity. For `arc-app`/`arc-render`, use
-`egui_wgpu::wgpu` and `egui_winit::winit` **re-exports** so the versions always match, and read the
-downloaded sources under `~/.cargo/registry` before writing against them.
+```
+arcline-cli new <p.arcline> [--name N] [--fps 29.97] [--res 1920x1080]
+arcline-cli describe <p> [--exact]          JSON project.describe
+arcline-cli timeline <p>                    text timeline (docs/schema/timeline-text.abnf)
+arcline-cli apply <p> [--file f.json]       JSON command batch from file/stdin, then save
+arcline-cli probe <media>                   subprocess import check → ok | quarantined | offline
+arcline-cli import <p> <media...>           import check + asset.import, paths relative to the project
+arcline-cli render <p> -o out --codec ffv1|h264|av1|prores [--from TC --to TC] [--snapshot doc.json]
+arcline-cli rpc [--client id]               JSON-RPC 2.0 session on stdio
+arcline [--embed-parent HWND --embed-channel stdio] [--poc-seconds N]
+```
 
-### 6.5 Runtime design (to implement next, per docs/01 §5, docs/08 §4)
+stdout carries exactly one JSON document per command; errors print `{"error":{kind,...}}` and exit 2; usage
+errors exit 64. `render` also writes `<output>.report.json`.
 
-- **Engine thread** owns `Engine`. On `Apply`, it publishes the speculative snapshot (`ArcSwap`), sends the
-  `JournalEntry` to the journal thread, and keeps the client's reply pending. On `Written{rev, ok}`:
-  - success → `confirm(rev)` and reply;
-  - failure → `rollback_unconfirmed()`, reply `journal_unavailable` to every pending client, enter
-    read-only degraded mode, publish the rolled-back snapshot.
-- **Journal thread** owns `ProjectStore` and processes jobs FIFO: `Append`, `Snapshot` (every 30 confirmed
-  batches or 60 s), `Save`, and a `flush` on a 1 s `recv_timeout`. `Save` is rejected once the journal has
-  failed.
-- **Open:** `ProjectStore::open` → `Engine::new(base, base_revision)` → `engine.replay(entry)` until the
-  first failure. Write the rejected entries next to the journal, then write a fresh snapshot at the
-  recovered revision.
-- **Notifications:** subscribers receive `Changed{revision, source, diff}` and `ControlChanged`.
-- **API:** `apply_async(req) -> Receiver<Result<ApplyResult>>` for the GUI (never block the UI thread);
-  `apply(req)` blocking for the CLI.
+JSON-RPC methods implemented: `project.open` (incl. `create`), `project.describe`, `project.apply`,
+`project.save`, `history.undo`, `history.redo`, `inspect.timeline` (with `range`), `effect.list`,
+`job.submit` (`kind: "render"`, runs a child `arcline-cli render --snapshot`), `job.status`, `job.cancel`.
+Missing versus docs/06 §4.1: `history.list`, `inspect.frame`, `control.request`, `control.release`, and pushed
+notifications.
 
-## 7. Exact next steps to resume
+## 3. Test results (all green, 65 tests)
 
-1. Put Rust on PATH (§6.1). Set `members = ["crates/arc-core"]` in `Cargo.toml` until the other crates exist.
-2. Create `crates/arc-core/src/lib.rs`: `pub mod command; pub mod effects; pub mod engine; pub mod error;
-   pub mod ids; pub mod journal; pub mod model; pub mod store; pub mod time;` plus re-exports of the main
-   types.
-3. `cargo build -p arc-core`, then fix compile errors and the issues listed in §4. Then
-   `cargo clippy -p arc-core --all-targets` and `cargo test -p arc-core`.
-4. Write the outstanding tests in §4. The property test for invariant 7 and the journal fault-injection
-   suite gate Phase A.
-5. Implement `runtime.rs` (§6.5) with tests: ack only after a complete write, rollback on an injected
-   failure, recovery after a simulated kill (write records, drop without closing, reopen).
-6. Minimal `arc-cli` (`new`, `describe`, `apply`) to meet the Phase A exit criteria (docs/10 §2).
-   Commit "Phase A".
-7. Phase P — embedding PoC (docs/13 §2.4): `arc-app` on `egui-winit` + `egui-wgpu`, a Win32 reference host,
-   measured go/no-go recorded in ADR-0014. The Electron host part needs Electron installed (not present).
-8. Continue Phase B onward per docs/10, starting with the CLI-subprocess media backend (§5).
-9. Write the handover docs for the 1-to-10 phase: development guide, interface contracts (commands, JSON-RPC,
-   MCP, embed channel, file formats), acceptance criteria per phase, and the implementation roadmap.
-   Add a CI workflow (Windows build+test; macOS and Linux `cargo check` per ADR-0011).
+| Crate / suite | Tests | What is proven |
+|---|---|---|
+| arc-core unit (time, ids, model) | 15 | Exact time; all 8 rates; NDF/DF vectors and rejections; **exhaustive 24 h DF round trip**; sample mapping; canonical JSON |
+| arc-core `tests/engine.rs` | 11 | Commands, overlap/off-boundary/unknown errors with paths, atomic batches, stale revision, dry run, idempotency, `internal.restore` ban, trim/split/ripple/transitions, manifest validation, undo/redo hashes, control + auto-takeover, rollback of unconfirmed batches, journal replay |
+| arc-core `tests/property.rs` | 1 (10,000 cases) | **Invariant 7**: apply → undo → identical canonical hash; redo → identical; every committed state validates |
+| arc-core `tests/journal.rs` | 9 | Torn tail at every byte offset, CRC/magic/length corruption, short writes, mid-record failure truncation, failed truncate, durable `fsync` failure, group-flush failure, CRC32C vectors |
+| arc-core `tests/store.rs` | 7 (+1 helper) | Container round trip, future schema refused, save/reopen/clean close, lock, torn-tail recovery with `.rejected`, ack + notifications, **forced kill via child-process `abort()` at 1, 29, 30, 31, 75 edits** |
+| arc-media unit + `tests/decode.rs` | 3 + 3 | ffprobe mapping; **frame-accurate in-process decode** (sequential, random, repeated, backward) at 29.97 and 25 fps; sample-addressed audio; import check ok/offline |
+| arc-render unit + `tests/plan.rs` + `tests/render.rs` | 1 + 1 + 5 | Manifests; frame planning incl. dissolve weights and handles; GPU bit-exact determinism, 1-LSB pass-through, color correct within 2 LSB of the CPU reference, transforms, linear-light opacity/dissolve, every effect runs or is reported |
+| arc-audio unit | 3 | **Block-size parity** (1…4096 identical), positions/gain/pan/fades/varispeed, WAV header |
+| arc-cli `tests/cli.rs`, `render_e2e.rs`, `rpc.rs` | 2 + 2 + 2 | CLI contract; **end-to-end: every output frame verified exact** (FFV1, H.264, ranges) with audio; RPC semantics and an out-of-process render job |
+
+Not part of `cargo test`: the embedding PoC (`--example embed_host`). Run it manually; result recorded in
+`docs/poc/embedding-poc-2026-11-25.md`.
+
+## 4. Bugs found and fixed by the tests (keep these tests)
+
+1. DF timecode past the 24 h label range produced an unparseable `24:00:00;00` → now an error.
+2. `split_clip` generated effect IDs at apply time, so redo/replay diverged → IDs are part of the resolved command.
+3. MKV stores 1 ms timestamps, so strict `pts ≤ target` picked the previous frame → decoder aims at the frame middle.
+4. Runtime replied before publishing the confirmed revision (race under parallel load) → publish first.
+
+## 5. Implementation decisions and deviations not yet reflected in `docs/`
+
+Fold these into docs/02–06 (or an ADR) when convenient; none contradicts an ADR.
+
+| Topic | Decision in code |
+|---|---|
+| Undo | Engine-only `internal.restore` command with the prior tracks/markers/changed assets/name; journaled; clients get `forbidden_op` |
+| Resolution | `apply_command` rewrites commands in place (IDs, exact times, effect defaults, split effect IDs); the resolved form is journaled and redone |
+| Validation | Full `validate_project` after every batch (O(n)); not yet benchmarked against the 200 µs budget |
+| Model | `sequences` map with exactly one sequence; track z-order = vector position (no stored `index`); clip source is `asset` **or** `title`; transforms are static (not keyframable); effect params are f64 `{"static"}` / `{"curve"}` |
+| Ripple | `none`/`track`/`all` on `remove_clip` and out-edge `trim_clip`; in-edge ripple → `unsupported_ripple` |
+| Audio clips | Must be frame-aligned (no `allow_subframe` yet); fades are sample-grained; a video asset with audio may sit on an audio track; no linked A/V clips |
+| CLI undo | Removed: history is session-scoped; use `arcline-cli rpc` |
+| Decode | In-process libav through `csrc/arc_av.c` (opaque handle; no FFmpeg structs in Rust). YUV→RGB happens in swscale on the CPU (BT.709/601 by stream tags) — **docs/03 §10 GPU YUV upload is a later optimization** |
+| Import check | `ffprobe` + `ffmpeg -t 1 -f null` at start/middle/end in child processes with 20 s timeouts; Windows NTSTATUS exit codes count as crashes |
+| Export | `arcline-cli render` decodes in-process (it is already a child of the GUI/session), encodes by piping RGBA to an `ffmpeg` child; encoder chosen by a one-frame trial (here `h264_qsv`; fallbacks `h264_mf`, `libopenh264`). Never x264 |
+| Render input | `render` reads the saved container, or `--snapshot` (what `job.submit` writes); it never takes the project lock |
+| Effects | GPU: color correct, vignette, chroma key, sharpen, gaussian blur. **LUT is a manifest only** (no LUT asset parameter yet) — reported as unsupported, passed through |
+| Titles | Planned but **not rendered** (no text renderer yet); export skips them with a warning in the report |
+| Audio pan | Constant-power normalized to unity at center (hard pan = +3 dB on one side) |
+| Timeline → samples | `Round::Nearest` (29.97 frames are 1601.6 samples) |
+| Embed channel | PoC uses stdio; production moves the same messages onto the named pipe (docs/13 §3) |
+| App loop | `egui-winit` + `egui-wgpu` directly, no `eframe` (ADR-0007 amendment) |
+| macOS lock | `SessionLock` is strong on Windows (no-share handle), weak elsewhere (Linux `/proc` check, macOS unchecked) |
+
+## 6. Known issues and unverified areas
+
+1. **rustc 1.100 incremental ICE under clippy** for `arc-core` (`evaluate_obligation`). Workaround:
+   `CARGO_INCREMENTAL=0 cargo clippy …`, or `cargo clean -p arc-core`. Builds and tests are unaffected.
+2. **MSVC target untested.** The shim should compile with `cl /std:c11` (compound literals are used); `build.rs`
+   passes `-std=c11` only where supported — add `/std:c11` for MSVC if needed.
+3. **No CI workflow exists yet** (`.github/workflows`). Planned per ADR-0011: Windows build + test with an LGPL
+   FFmpeg download and `ARCLINE_FORCE_FALLBACK_ADAPTER=1` (WARP); macOS/Linux `cargo check` of the FFmpeg-free
+   crates (`arc-core`, `arc-render`, `arc-audio`) plus `arc-core` tests on Linux.
+4. **GPU tests need an adapter.** They ran on Intel integrated graphics here; on CI use the fallback adapter.
+5. **Embedding PoC manual items open:** keyboard focus round-trip, IME placement, DPI change across monitors,
+   Electron host (Electron not installed).
+6. **macOS embedding:** winit 0.30 `with_parent_window` supports Windows and X11 only (risk R21).
+7. `cargo` warns that workspace dependency `arc-cli` is unused (nothing depends on it yet; `arc-app` will).
+8. The export copies every decoded frame (`to_vec`) per item per frame; fine for the foundation, a known
+   optimization target.
+9. Performance budgets (docs/08 §2) are **not yet measured**, except the PoC frame pacing.
+
+## 7. Next steps (in roadmap order)
+
+**Phase C — the editor (largest remaining piece)**
+1. Replace the PoC workload in `arc-app` with the editor shell: `egui_dock` layout, media bin, inspector
+   generated from `EffectManifest`, viewer showing `arc_render::Renderer` output via an egui-wgpu user
+   texture (`Renderer::with_device` shares egui's device).
+2. Timeline canvas: paint, virtualization, LOD, hit testing, move/trim/split/snapping → command batches via
+   `EngineHost::apply_async` (never block the UI thread).
+3. Preview decode: one `VideoDecoder` per active asset on worker threads, frame cache keyed per docs/03 §3,
+   two-level quality fallback.
+
+**Phase D** — `cpal` output with an SPSC ring fed by `Mixer::process`; audio-master clock; parity test at the
+parity tap (docs/05 §7).
+
+**Phase E** — crash breadcrumbs + quarantine on relaunch, hang watchdog with the 2-thread limit and
+decode-safe mode (docs/04 §1.2), relink, GUI export via `arcline-cli render --snapshot`.
+
+**Phase F** — finish JSON-RPC (`history.list`, `inspect.frame`, `control.*`, notifications), MCP server
+(`arcline-cli mcp`, 23 tools mapped in docs/06 §6.1) on top of `rpc::Session`, the named-pipe transport and
+consent prompt, live attach.
+
+**Cross-cutting**
+- Add the CI workflow (§6.3).
+- Text renderer for titles/subtitles (`cosmic-text` + `glyphon`), LUT asset parameter.
+- Fold §5 into the docs; update `docs/schema/CHANGELOG.md` if the model changes (bump `SCHEMA_VERSION` and
+  add a migration + fixture).
+
+## 8. Development rules that the code already enforces
+
+- All edits go through `Command` + `Engine`; never mutate a `Project` directly. New commands need
+  resolution (IDs/times written back), validation, and property-test coverage.
+- `arc-core` has no GPU/FFmpeg/UI dependencies; `arc-render` and `arc-audio` never depend on FFmpeg;
+  `arc-media` never on UI.
+- Rust never touches FFmpeg structs: extend `csrc/arc_av.c` with opaque functions instead.
+- `unsafe` is denied workspace-wide; the only exceptions are `arc-media/src/libav.rs`, `arc-app/src/embed.rs`,
+  the `with_parent_window` call in `arc-app/src/app.rs`, and the reference host — each with `SAFETY` comments.
+- Child processes get argument vectors, never shell strings.
+- No GPL encoders in shipped paths; keep `ARCLINE_FFMPEG_DIR` pointed at an LGPL build.
+- Tests use generated fixtures only (`arc_media::fixtures`), never third-party media.

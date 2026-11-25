@@ -67,6 +67,12 @@ enum Cmd {
         #[arg(long)]
         base_revision: Option<u64>,
     },
+    /// Serve a JSON-RPC 2.0 session on stdin/stdout (docs/06 §4)
+    Rpc {
+        /// Client id recorded as the source of every edit
+        #[arg(long, default_value = "rpc")]
+        client: String,
+    },
     /// Run the subprocess import check on a media file (JSON)
     Probe { media: PathBuf },
     /// Import media files into a project (import check + probe), then save
@@ -200,6 +206,7 @@ fn project_relative(project: &Path, media: &Path) -> String {
 fn run(cli: Cli) -> Result<String, Fail> {
     let d = durability(&cli);
     match &cli.cmd {
+        Cmd::Rpc { .. } => Err(fail("invalid_command", "rpc is handled before dispatch")),
         Cmd::New {
             path,
             name,
@@ -384,6 +391,11 @@ fn main() -> ExitCode {
             return ExitCode::from(if e.use_stderr() { 64 } else { 0 });
         }
     };
+    if let Cmd::Rpc { client } = &cli.cmd {
+        let stdin = std::io::stdin();
+        arc_cli::rpc::serve(stdin.lock(), std::io::stdout(), client);
+        return ExitCode::SUCCESS;
+    }
     match run(cli) {
         Ok(out) => {
             println!("{out}");

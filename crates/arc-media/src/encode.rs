@@ -50,9 +50,22 @@ impl VideoCodec {
         }
     }
 
-    /// Candidates in preference order (docs/04 §5).
-    fn candidates(self) -> &'static [&'static str] {
-        match self {
+    /// Codecs to try, in preference order (docs/04 §5).
+    ///
+    /// `ARCLINE_ENCODER_CANDIDATES` (debug builds only, a development aid like
+    /// `ARCLINE_ALLOW_ANY_FFMPEG`) replaces the list with comma-separated names so tests can exercise
+    /// the "no working encoder" path on a machine that has the hardware.
+    fn candidates(self) -> Vec<String> {
+        if cfg!(debug_assertions)
+            && let Ok(list) = std::env::var("ARCLINE_ENCODER_CANDIDATES")
+        {
+            return list
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        let names: &[&str] = match self {
             VideoCodec::Ffv1 => &["ffv1"],
             VideoCodec::H264 => &[
                 "h264_nvenc",
@@ -67,7 +80,8 @@ impl VideoCodec {
             // Hardware only: the shipped 9.1 build has no `libx265` (GPL, D1) and no `hevc_mf`
             // (D2), so there is no software fallback by design.
             VideoCodec::Hevc => &["hevc_nvenc", "hevc_qsv", "hevc_amf"],
-        }
+        };
+        names.iter().map(|s| s.to_string()).collect()
     }
 
     fn pix_fmt(self) -> &'static str {
@@ -169,28 +183,17 @@ pub fn select_encoder(codec: VideoCodec) -> Result<String, EncodeError> {
         OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&codec).cloned()) {
-        return hit.ok_or_else(|| {
-            EncodeError::NoEncoder(
-                codec,
-                codec.candidates().iter().map(|s| s.to_string()).collect(),
-            )
-        });
+        return hit.ok_or_else(|| EncodeError::NoEncoder(codec, codec.candidates()));
     }
     let available = tools::encoders();
     let chosen = codec
         .candidates()
-        .iter()
-        .find(|c| available.iter().any(|a| a == *c) && trial(c, codec))
-        .map(|s| s.to_string());
+        .into_iter()
+        .find(|c| available.iter().any(|a| a == c) && trial(c, codec));
     if let Ok(mut c) = cache.lock() {
         c.insert(codec, chosen.clone());
     }
-    chosen.ok_or_else(|| {
-        EncodeError::NoEncoder(
-            codec,
-            codec.candidates().iter().map(|s| s.to_string()).collect(),
-        )
-    })
+    chosen.ok_or_else(|| EncodeError::NoEncoder(codec, codec.candidates()))
 }
 
 /// Streams RGBA frames into an `ffmpeg` encoder process.
@@ -360,20 +363,14 @@ mod tests {
     fn hevc_candidates_are_hardware_only_and_the_error_names_them() {
         assert_eq!(
             VideoCodec::Hevc.candidates(),
-            &["hevc_nvenc", "hevc_qsv", "hevc_amf"]
+            ["hevc_nvenc", "hevc_qsv", "hevc_amf"].map(String::from)
         );
         assert_eq!(VideoCodec::Hevc.pix_fmt(), "yuv420p");
         assert_eq!(VideoCodec::parse("hevc"), Some(VideoCodec::Hevc));
-        let err = EncodeError::NoEncoder(
-            VideoCodec::Hevc,
-            VideoCodec::Hevc.candidates()
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
-        );
+        let err = EncodeError::NoEncoder(VideoCodec::Hevc, VideoCodec::Hevc.candidates());
         let msg = err.to_string();
         for c in VideoCodec::Hevc.candidates() {
-            assert!(msg.contains(c), "{msg}");
+            assert!(msg.contains(&c), "{msg}");
         }
         assert!(msg.contains("no working encoder"), "{msg}");
     }

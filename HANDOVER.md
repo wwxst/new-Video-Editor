@@ -210,7 +210,11 @@ Fold these into docs/02–06 (or an ADR) when convenient; none contradicts an AD
 
 ## 6. Known issues and unverified areas
 
-1. **rustc 1.100 incremental ICE under clippy** for `arc-core` (`evaluate_obligation`). Workaround:
+1. **Development aids for tests:** `ARCLINE_ALLOW_ANY_FFMPEG=1` (bypasses the pinned-tool check),
+   `ARCLINE_ENCODER_CANDIDATES=a,b` (debug builds only: replaces the encoder candidate list so the
+   no-encoder path is testable on a machine that has the hardware; used by
+   `render_without_a_usable_hevc_encoder_reports_no_encoder`).
+2. **rustc 1.100 incremental ICE under clippy** for `arc-core` (`evaluate_obligation`). Workaround:
    `CARGO_INCREMENTAL=0 cargo clippy …`, or `cargo clean -p arc-core`. Builds and tests are unaffected.
 2. **MSVC target untested.** The shim should compile with `cl /std:c11` (compound literals are used); `build.rs`
    passes `-std=c11` only where supported — add `/std:c11` for MSVC if needed.

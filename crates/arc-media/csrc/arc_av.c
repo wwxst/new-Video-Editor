@@ -51,10 +51,13 @@ typedef struct ArcAv {
     AVChannelLayout swr_in_layout;
     int64_t last_pts;     /* pts of the last delivered video frame, INT64_MIN if none */
     int eof_sent;
-    /* buffered resampled audio (interleaved stereo f32) */
+    /* buffered resampled audio (interleaved stereo f32): abuf[0] is output sample `abuf_start` */
     float *abuf;
-    int abuf_len, abuf_cap, abuf_pos;
-    int64_t audio_next_sample; /* output-rate sample index of abuf[abuf_pos] */
+    int abuf_len, abuf_cap;
+    int64_t abuf_start;
+    int audio_started;    /* a decode position has been established */
+    int anchor_pending;   /* the next appended frame fixes abuf_start from its timestamp */
+    int64_t pkt_duration; /* duration of the last packet sent to the decoder, in stream ticks */
 } ArcAv;
 
 typedef struct ArcAvInfo {
@@ -332,6 +335,14 @@ int arc_av_video_at(ArcAv *a, int64_t target_pts, uint8_t *dst, int stride, int6
 
 /* ---- audio ---------------------------------------------------------------------------------- */
 
+/* Output frames kept behind the read cursor. The mixer reads one frame more than it advances, so
+ * consecutive blocks overlap by one sample; serving that overlap from the buffer instead of
+ * re-seeking removes the per-block decoder reset (audit F-06). One second of history also covers
+ * small backward jumps. */
+#define ARC_AUDIO_HISTORY 48000
+/* Frames decoded and discarded before a seek target so that MDCT decoders (AAC, MP3, Opus) have
+ * re-primed and the resampler has warmed up before the first delivered sample (audit F-06). */
+#define ARC_AUDIO_PREROLL 12000
 static int abuf_push(ArcAv *a, int frames) {
     int need = (a->abuf_len + frames) * 2;
     if (need > a->abuf_cap) {
@@ -396,80 +407,123 @@ static int ensure_swr(ArcAv *a, const AVFrame *f, int out_rate) {
     return 0;
 }
 
+/* Absolute output-sample position of the first frame decoded after a reposition. Returns -1 when
+ * the frame carries no timestamp. */
+static int64_t audio_anchor(const ArcAv *a, const AVFrame *f, int out_rate) {
+    const AVStream *s = a->fmt->streams[a->stream];
+    int64_t pts = frame_pts(f);
+    if (pts == AV_NOPTS_VALUE) return -1;
+    int64_t base = s->start_time == AV_NOPTS_VALUE ? 0 : s->start_time;
+    int64_t pos = av_rescale_q(pts - base, s->time_base, (AVRational){1, out_rate});
+    return pos > 0 ? pos : 0;
+}
+/* Start a new decode position: seek to `target` minus the pre-roll and drop the buffered output.
+ * The resampler is kept (it stays primed); its stale history is flushed by the pre-roll that is
+ * decoded and discarded before `target` (audit F-06). */
+static int audio_reposition(ArcAv *a, int out_rate, int64_t target, char *err, int errlen) {
+    AVStream *s = a->fmt->streams[a->stream];
+    int64_t pre = target > ARC_AUDIO_PREROLL ? target - ARC_AUDIO_PREROLL : 0;
+    int r = 0;
+    /* The very first read from the start needs no seek: the demuxer is already there and an
+     * unnecessary seek costs the decoder its priming (audit F-06). */
+    if (a->audio_started || target > 0) {
+        int64_t ts = av_rescale_q(pre, (AVRational){1, out_rate}, s->time_base);
+        if (s->start_time != AV_NOPTS_VALUE) ts += s->start_time;
+        r = av_seek_frame(a->fmt, a->stream, ts, AVSEEK_FLAG_BACKWARD);
+    }
+    if (r < 0 && pre > 0) { set_err(err, errlen, "audio seek", r); return -1; }
+    avcodec_flush_buffers(a->dec);
+    a->eof_sent = 0;
+    a->drained = 0;
+    a->abuf_len = 0;
+    a->abuf_start = target;
+    a->audio_started = 1;
+    a->anchor_pending = 1;
+    return 0;
+}
+
+/* Decode one more frame and append its resampled output. 0 = appended, 1 = end of stream. */
+static int audio_refill(ArcAv *a, int out_rate, char *err, int errlen) {
+    int r = next_frame(a, err, errlen);
+    if (r < 0) return r;
+    if (r == 1) return 1;
+    if (a->anchor_pending) {
+        int64_t pos = audio_anchor(a, a->frame, out_rate);
+
+        if (pos >= 0) {
+            a->abuf_start = pos;
+            a->abuf_len = 0;
+            a->anchor_pending = 0;
+        }
+    }
+    /* May drain the previous resampler into abuf before rebuilding it. */
+    if (ensure_swr(a, a->frame, out_rate) < 0) {
+        av_frame_unref(a->frame);
+        set_err(err, errlen, "resampler", 0);
+        return -1;
+    }
+    int maxo = swr_get_out_samples(a->swr, a->frame->nb_samples);
+    if (abuf_push(a, maxo) < 0) { av_frame_unref(a->frame); set_err(err, errlen, "out of memory", 0); return -1; }
+    uint8_t *outp = (uint8_t *)(a->abuf + (size_t)a->abuf_len * 2);
+    int got = swr_convert(a->swr, &outp, maxo, (const uint8_t **)a->frame->extended_data, a->frame->nb_samples);
+    av_frame_unref(a->frame);
+    if (got < 0) { set_err(err, errlen, "resample", got); return -1; }
+    a->abuf_len += got;
+    return 0;
+}
+
 /*
  * Read `frames` stereo f32 frames starting at output sample `start` (at `out_rate`), counted from
  * the stream's first sample. Missing samples (before start / after end) are zero.
- * Returns the number of frames that came from the stream (rest zero-filled).
+ *
+ * Reads are served from a buffer with a history window, so overlapping and repeated reads do not
+ * touch the decoder; only a genuine jump re-seeks, and that path decodes a pre-roll first
+ * (audit F-06). Returns the number of frames that came from the stream (rest zero-filled).
  */
 int arc_av_audio_read(ArcAv *a, int out_rate, int64_t start, int frames, float *dst, char *err, int errlen) {
     if (!a->is_audio) { set_err(err, errlen, "not an audio decoder", 0); return -1; }
+    if (frames <= 0) return 0;
+    if (start < 0) start = 0;
     memset(dst, 0, (size_t)frames * 2 * sizeof(float));
-    int64_t buf_start = a->audio_next_sample;
-    int64_t buf_end = buf_start + (a->abuf_len - a->abuf_pos);
-    if (a->swr == NULL || start < buf_start || start > buf_end + out_rate) {
-        /* (re)position: seek to just before `start`, then decode forward and discard */
-        AVStream *s = a->fmt->streams[a->stream];
-        int64_t ts = av_rescale_q(start, (AVRational){1, out_rate}, s->time_base);
-        if (s->start_time != AV_NOPTS_VALUE) ts += s->start_time;
-        int r = av_seek_frame(a->fmt, a->stream, ts, AVSEEK_FLAG_BACKWARD);
-        if (r < 0 && start > 0) { set_err(err, errlen, "audio seek", r); return -1; }
-        avcodec_flush_buffers(a->dec);
-        a->eof_sent = 0;
-        a->abuf_len = a->abuf_pos = 0;
-        a->audio_next_sample = -1; /* set from the first decoded frame */
-        if (a->swr) swr_free(&a->swr);
+    int64_t end = a->abuf_start + a->abuf_len;
+    if (!a->audio_started || start < a->abuf_start || start > end + out_rate) {
+        if (audio_reposition(a, out_rate, start, err, errlen) < 0) return -1;
     }
     int produced = 0;
     while (produced < frames) {
-        int avail = a->abuf_len - a->abuf_pos;
-        if (avail > 0 && a->audio_next_sample >= 0) {
-            int64_t want = start + produced;
-            if (a->audio_next_sample < want) {
-                int64_t skip = want - a->audio_next_sample;
-                if (skip > avail) skip = avail;
-                a->abuf_pos += (int)skip;
-                a->audio_next_sample += skip;
-                continue;
-            }
-            if (a->audio_next_sample > want) {
-                /* gap before stream data: leave zeros */
-                int64_t gap = a->audio_next_sample - want;
-                if (gap > frames - produced) gap = frames - produced;
-                produced += (int)gap;
-                continue;
-            }
-            int n = avail < frames - produced ? avail : frames - produced;
-            memcpy(dst + (size_t)produced * 2, a->abuf + (size_t)a->abuf_pos * 2, (size_t)n * 2 * sizeof(float));
-            a->abuf_pos += n;
-            a->audio_next_sample += n;
+        int64_t want = start + produced;
+        int64_t hi = a->abuf_start + a->abuf_len;
+        if (want < a->abuf_start) {
+            /* gap before the first decoded sample: leave zeros */
+            int64_t gap = a->abuf_start - want;
+            if (gap > frames - produced) gap = frames - produced;
+            produced += (int)gap;
+            continue;
+        }
+        if (want < hi) {
+            int64_t off = want - a->abuf_start;
+            int n = (int)(hi - want);
+            if (n > frames - produced) n = frames - produced;
+            memcpy(dst + (size_t)produced * 2, a->abuf + (size_t)off * 2, (size_t)n * 2 * sizeof(float));
             produced += n;
             continue;
         }
-        /* refill */
-        if (a->abuf_pos > 0) {
-            memmove(a->abuf, a->abuf + (size_t)a->abuf_pos * 2, (size_t)(a->abuf_len - a->abuf_pos) * 2 * sizeof(float));
-            a->abuf_len -= a->abuf_pos;
-            a->abuf_pos = 0;
-        }
-        int r = next_frame(a, err, errlen);
+        int r = audio_refill(a, out_rate, err, errlen);
         if (r < 0) return r;
         if (r == 1) break;
-        if (a->audio_next_sample < 0) {
-            AVStream *s = a->fmt->streams[a->stream];
-            int64_t pts = frame_pts(a->frame);
-            int64_t base = s->start_time != AV_NOPTS_VALUE ? s->start_time : 0;
-            a->audio_next_sample = pts == AV_NOPTS_VALUE ? 0 : av_rescale_q(pts - base, s->time_base, (AVRational){1, out_rate});
-            if (a->audio_next_sample < 0) a->audio_next_sample = 0;
+    }
+    /* Keep only the history window behind the read cursor. */
+    int64_t keep = start - ARC_AUDIO_HISTORY;
+    if (keep > a->abuf_start) {
+        int64_t last = a->abuf_start + a->abuf_len;
+        if (keep > last) keep = last;
+        int drop = (int)(keep - a->abuf_start);
+        if (drop > 0) {
+            memmove(a->abuf, a->abuf + (size_t)drop * 2,
+                    (size_t)(a->abuf_len - drop) * 2 * sizeof(float));
+            a->abuf_start += drop;
+            a->abuf_len -= drop;
         }
-        /* May drain the previous resampler into abuf before rebuilding it. */
-        if (ensure_swr(a, a->frame, out_rate) < 0) { set_err(err, errlen, "resampler", 0); return -1; }
-        int maxo = swr_get_out_samples(a->swr, a->frame->nb_samples);
-        if (abuf_push(a, maxo) < 0) { set_err(err, errlen, "out of memory", 0); return -1; }
-        uint8_t *outp = (uint8_t *)(a->abuf + (size_t)a->abuf_len * 2);
-        int got = swr_convert(a->swr, &outp, maxo, (const uint8_t **)a->frame->extended_data, a->frame->nb_samples);
-        av_frame_unref(a->frame);
-        if (got < 0) { set_err(err, errlen, "resample", got); return -1; }
-        a->abuf_len += got;
     }
     return produced;
 }

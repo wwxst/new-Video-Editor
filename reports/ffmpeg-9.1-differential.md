@@ -185,10 +185,15 @@ regressions and the upgrade's runtime/encoder/fixture tests.
   `prores_ks` outputs decode. Encoder selection is unchanged from 8.1.3 (`h264_qsv` first available).
 - **AC-11:** `cargo test -p arc-media --test param_change` — 2 passed. The F-02 test checks both
   the byte-concatenated TS fixture (sequential, 120 frames) and the audited continuous-timestamp
-  MKV fixture (sequential, ≥110 of 120 frames because the TS join drops at most one, plus
-  fresh-decoder random access); every decoded frame is scaled to the reported 320×180 with a
-  320×180×4 RGBA buffer. The F-03 test reads MP2 stereo→mono both as one long read and in the
-  mixer's 4096+1 pattern; no crash and both segments carry audio.
+  MKV fixture (sequential, ≥110 of 120 frames, plus fresh-decoder random access). The MKV fixture is
+  built by muxing segment B with `-output_ts_offset 2.1`, byte-concatenating the two MPEG-TS files
+  and remuxing with `-c copy`; the `mpegts` demuxer reports **one corrupt packet at the byte join**
+  (the PES/continuity boundary) and drops at most one frame, so the test requires ≥110 frames
+  instead of exactly 120. The remux is otherwise clean: the MKV carries the mid-stream resolution
+  change, sequential decoding scales every frame into the reported 320×180 buffer, and random
+  access works. Every decoded frame is scaled to the reported 320×180 with a 320×180×4 RGBA
+  buffer. The F-03 test reads MP2 stereo→mono both as one long read and in the mixer's 4096+1
+  pattern; no crash and both segments carry audio.
 
 ---
 

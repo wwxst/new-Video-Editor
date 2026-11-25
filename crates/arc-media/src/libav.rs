@@ -377,12 +377,29 @@ pub struct FrameRef<'a> {
     pub time: Time,
 }
 
+/// Upper bound for one decoded frame: 2^28 pixels is 1 GiB of RGBA, comfortably above any real
+/// source (a 100 MP still is 10^8 pixels) and below what a corrupt header could demand from the
+/// allocator (audit follow-up: malformed media must fail as a typed error, never abort).
+const MAX_DECODE_PIXELS: u64 = 1 << 28;
+
+/// Reject zero and implausible dimensions before allocating the frame buffer.
+fn check_dimensions(width: u32, height: u32) -> Result<(), MediaError> {
+    if width == 0 || height == 0 {
+        return Err(MediaError::Decode("video stream has no dimensions".into()));
+    }
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels > MAX_DECODE_PIXELS {
+        return Err(MediaError::Decode(format!(
+            "implausible frame size {width}x{height} ({pixels} pixels, limit {MAX_DECODE_PIXELS}); the file header is corrupt"
+        )));
+    }
+    Ok(())
+}
+
 impl VideoDecoder {
     pub fn open(path: &Path) -> Result<VideoDecoder, MediaError> {
         let (h, info) = open(path, 0)?;
-        if info.width == 0 || info.height == 0 {
-            return Err(MediaError::Decode("video stream has no dimensions".into()));
-        }
+        check_dimensions(info.width, info.height)?;
         let buf = vec![0u8; info.width as usize * info.height as usize * 4];
         Ok(VideoDecoder { h, info, buf })
     }
@@ -554,3 +571,13 @@ mod tests {
         assert!(validate_runtime(&b, &b, &l).iter().any(|p| p.contains("approved")));
     }
 }
+    /// Malformed headers can claim absurd frame sizes; the decoder must refuse them before
+    /// allocating the RGBA buffer instead of aborting on the allocation.
+    #[test]
+    fn implausible_dimensions_are_refused() {
+        assert!(check_dimensions(1920, 1080).is_ok());
+        assert!(check_dimensions(10000, 10000).is_ok());
+        assert!(check_dimensions(0, 1080).is_err());
+        assert!(check_dimensions(65535, 65535).is_err());
+        assert!(check_dimensions(u32::MAX, 2).is_err());
+    }

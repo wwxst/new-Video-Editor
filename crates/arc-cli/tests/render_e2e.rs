@@ -407,3 +407,102 @@ fn hevc_exports_are_decodable_and_match_the_spec() {
     let f = d.frame_at(arc_core::Time::ZERO).expect("hevc frame");
     assert_eq!((f.width, f.height), (320, 180));
 }
+
+/// Goal B: one unreadable asset must not stop the export. The report marks it unavailable, the
+/// other clips still render frame-exactly, and the project stays usable afterwards.
+#[test]
+fn mixed_media_export_survives_an_unreadable_asset() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let media = dir.path().join("media");
+    std::fs::create_dir_all(&media).expect("mkdir");
+    let good = media.join("good.mkv");
+    let broken = media.join("broken.mkv");
+    write_counter_video(&good, 60, FrameRate::Fps30.rate(), 320, 180, false).expect("fixture");
+    std::fs::copy(&good, &broken).expect("copy");
+
+    let p = dir.path().join("mixed.arcline");
+    let ps = p.to_str().expect("utf8");
+    let (code, out, err) = cli(
+        &["new", ps, "--fps", "30", "--res", "320x180", "--name", "Mixed"],
+        None,
+    );
+    assert_eq!(code, 0, "{out} {err}");
+    let (code, out, err) = cli(
+        &[
+            "import",
+            ps,
+            good.to_str().expect("utf8"),
+            broken.to_str().expect("utf8"),
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{out} {err}");
+    let imp = j(&out);
+    let good_id = imp["imported"][0]["id"].as_str().expect("good id").to_string();
+    let broken_id = imp["imported"][1]["id"]
+        .as_str()
+        .expect("broken id")
+        .to_string();
+
+    // The media is replaced after import: the project references a file that no longer decodes.
+    std::fs::write(&broken, b"corrupted after import, no longer media\n").expect("corrupt");
+
+    let batch = json!([
+        {"op":"track.add","id":"tr_v1","kind":"video"},
+        {"op":"track.add","id":"tr_v2","kind":"video"},
+        {"op":"timeline.add_clip","id":"cl_good","track":"tr_v1","asset":good_id,"start":"00:00:00:00","duration":"00:00:01:00"},
+        {"op":"timeline.add_clip","id":"cl_broken","track":"tr_v2","asset":broken_id,"start":"00:00:01:00","duration":"00:00:01:00"}
+    ]);
+    let (code, out, err) = cli(&["apply", ps], Some(&batch.to_string()));
+    assert_eq!(code, 0, "{out} {err}");
+
+    let output = dir.path().join("out.mkv");
+    let (code, stdout, err) = cli(
+        &[
+            "render",
+            ps,
+            "-o",
+            output.to_str().expect("utf8"),
+            "--codec",
+            "ffv1",
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "export must survive: {stdout} {err}");
+    let report = j(&stdout);
+    assert_eq!(report["frames"], json!(60), "{report}");
+    let warnings = report["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(|w| w.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("unavailable") && w.contains(&broken_id)),
+        "the broken asset must be reported as unavailable: {warnings:?}"
+    );
+
+    // The good clip is still frame-exact; the unavailable one renders the background.
+    let rate = FrameRate::Fps30;
+    let mut d = VideoDecoder::open(&output).expect("open output");
+    for k in 0..30i64 {
+        let f = d.frame_at(rate.time_of_frame(k)).expect("good frame");
+        assert_eq!(
+            read_counter(f.rgba, f.width, f.height),
+            Some(k as u32),
+            "frame {k} of the intact clip"
+        );
+    }
+    let f = d.frame_at(rate.time_of_frame(45)).expect("broken-frame slot");
+    assert!(
+        f.rgba.chunks_exact(4).all(|px| px[0] == 0 && px[1] == 0 && px[2] == 0),
+        "an unavailable source renders black, not a stale frame"
+    );
+
+    // The project and the session are untouched by the failed asset.
+    let (code, out, err) = cli(&["describe", ps], None);
+    assert_eq!(code, 0, "{out} {err}");
+    assert_eq!(j(&out)["project"]["name"], json!("Mixed"));
+}

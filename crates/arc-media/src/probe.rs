@@ -176,10 +176,26 @@ fn test_decode(path: &Path, seek: Option<Time>) -> Result<tools::Output, String>
     if let Some(t) = seek {
         cmd.args(["-ss", &format!("{:.6}", t.to_f64_lossy())]);
     }
+    // `-progress` reports `frame=` on stdout: a decode that produces no frames means the file is
+    // truncated or unreadable at that point, which the exit code alone does not reveal.
     cmd.args(["-protocol_whitelist", "file", "-i"])
         .arg(&url)
-        .args(["-t", "1", "-f", "null", "-"]);
+        .args(["-t", "1", "-nostats", "-progress", "pipe:1", "-f", "null", "-"]);
     tools::run(cmd, PROBE_TIMEOUT).map_err(|e| e.to_string())
+}
+
+/// Frames the test decode produced, from ffmpeg's `-progress` output.
+fn decoded_frames(o: &tools::Output) -> Option<u64> {
+    let text = String::from_utf8_lossy(&o.stdout);
+    let mut last = None;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("frame=") {
+            if let Ok(n) = v.trim().parse::<u64>() {
+                last = Some(n);
+            }
+        }
+    }
+    last
 }
 
 /// The subprocess import check (docs/04 §1.2 step 1): probe, then test-decode the start, the
@@ -210,7 +226,14 @@ pub fn import_check(path: &Path) -> ImportOutcome {
     for p in points {
         match test_decode(path, p) {
             Ok(o) => match o.exit {
-                Exit::Ok => {}
+                Exit::Ok => {
+                    if decoded_frames(&o).is_some_and(|n| n == 0) {
+                        return ImportOutcome::Offline {
+                            reason: "test decode produced no frames (truncated or unreadable media)"
+                                .into(),
+                        };
+                    }
+                }
                 Exit::Failed(_) => {
                     return ImportOutcome::Offline {
                         reason: format!("test decode failed: {}", o.stderr.trim()),

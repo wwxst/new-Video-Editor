@@ -48,12 +48,21 @@ fn item<'a>(
     }
 }
 
+/// WARP, the software adapter a GPU-less CI runner uses, crashes with an access violation when
+/// several wgpu devices are created concurrently in one process. Serialize the GPU tests in this
+/// binary: on a real GPU the run only loses about a second.
+static GPU_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    GPU_SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 fn renderer() -> Renderer {
     Renderer::new_headless().expect("a GPU or software adapter is required for render tests")
 }
 
 #[test]
 fn passthrough_is_faithful_and_deterministic() {
+    let _serial = serial();
     let mut r = renderer();
     eprintln!("adapter: {}", r.adapter_info());
     let (w, h) = (256, 144);
@@ -94,6 +103,7 @@ fn passthrough_is_faithful_and_deterministic() {
 
 #[test]
 fn color_correct_matches_cpu_reference() {
+    let _serial = serial();
     let mut r = renderer();
     let (w, h) = (64, 64);
     let colors = [
@@ -148,6 +158,7 @@ fn color_correct_matches_cpu_reference() {
 
 #[test]
 fn transform_scale_and_position() {
+    let _serial = serial();
     let mut r = renderer();
     let (w, h) = (200, 100);
     let src = solid(64, 32, [255, 0, 0]);
@@ -190,6 +201,7 @@ fn transform_scale_and_position() {
 
 #[test]
 fn layer_opacity_and_cross_dissolve_mix_in_linear_light() {
+    let _serial = serial();
     let mut r = renderer();
     let (w, h) = (32, 32);
     let white = solid(w, h, [255, 255, 255]);
@@ -257,6 +269,7 @@ fn layer_opacity_and_cross_dissolve_mix_in_linear_light() {
 
 #[test]
 fn every_builtin_effect_runs_or_is_reported() {
+    let _serial = serial();
     let mut r = renderer();
     let (w, h) = (64, 36);
     let src = gradient(w, h);

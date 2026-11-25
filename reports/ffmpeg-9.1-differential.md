@@ -87,7 +87,23 @@ parsed `Probe`, the import-check status/kind, and the media file's own BLAKE3.
 | `Probe` (all fields the model uses) | **identical** (AC-9) |
 | Import-check outcome (status and kind) | **identical** (AC-10) |
 
-### The 2 AAC differences, explained (AC-7)
+### Re-run after the F-06/F-07/F-08 fixes (2026-11-25)
+
+The follow-up fixed the three accuracy defects the audit had deferred. Those fixes intentionally
+change decoded output where the old shim was wrong, so the comparison against the 8.1.3 baseline now
+shows a different, explained set of differences (allow-list updated; **0 unexplained**):
+
+| Field | Entries | Why it differs from the baseline |
+|---|---|---|
+| `audio.blocks` | FLAC 48 k/44.1 k, WAV, MP3, Opus Ogg/MKV, MP2 channel change, AAC sine/noise | F-06: reads are served from a history buffer, so the 4096+1 pattern equals one continuous read (bit-exact in `tests/audio_blocks.rs`); the baseline recorded the corrupt per-block re-seek |
+| `audio.long` | AAC sine/noise | F-07: the first read from 0 no longer seeks, so the decoder is not flushed before the first frame; the new stream equals the bundled CLI's decode |
+| `video.sequential`, `video.random` | `counter_mpeg2_bframes.ts` | F-08: the unindexed MPEG-TS fixture with a 483 ms start returned a later I-frame for every request from frame 15; the new output is the requested frame (`tests/seek_accuracy.rs`) |
+
+Everything else is still identical: all other video hashes (including MPEG-2/MKV, MPEG-4/MP4,
+H.264, stills), the long audio reads of the non-AAC entries, every `Probe`, and every import-check
+outcome. The command is the same as above; the result is `1 passed` with `unexplained: 0`.
+
+### The 2 AAC differences, explained (AC-7, before the fix)
 
 Only `audio_aac_sine.m4a` and `audio_aac_noise.m4a`, field `audio.blocks` (the hash and its
 per-block list), differ. Nothing else in either entry differs (the long continuous read is

@@ -1,15 +1,65 @@
 {
-  "comment": "Differences between the FFmpeg 8.1.3 baseline and the 9.1 build that are explained and accepted (AC-7). Every other difference must fail the harness. Kept next to the baseline so the comparison is reproducible.",
+  "comment": "Differences between the FFmpeg 8.1.3 baseline and the current shim that are explained and accepted (AC-7). Every other difference must fail the harness. Kept next to the baseline so the comparison is reproducible. The 2026-11-25 follow-up re-ran the harness after fixing F-06, F-07 and F-08: those fixes intentionally change the decoded samples where the old shim was wrong, so the affected fields legitimately differ from the 8.1.3 baseline.",
   "allowed": [
     {
       "entry": "audio_aac_sine.m4a",
       "field": "audio.blocks",
-      "reason": "F-25/F-06 (P2): the shim re-seeks for every mixer block (the 4096+1 pattern), and FFmpeg 9.1 changed AAC seek/priming behaviour (APIchanges lavc 63.23.101/102). A continuous decode is bit-identical between 8.1.3 and 9.1 (independent CLI check: 0 differing samples in the first second and in 24 seek+4097-sample comparisons run through each version's CLI, which handles priming itself); only the shim's block-pattern hash differs. Tracked as F-06, not a regression of this upgrade."
+      "reason": "F-06 fix: the shim no longer re-seeks for every mixer block, so the 4096+1 block pattern now equals one continuous read (proven bit-exact in tests/audio_blocks.rs). The 8.1.3 baseline recorded the corrupt per-block output; the difference is the fix, not a regression."
+    },
+    {
+      "entry": "audio_aac_sine.m4a",
+      "field": "audio.long",
+      "reason": "F-07 fix: the first read from position 0 no longer seeks, so the AAC decoder is not flushed before the first frame. The new stream equals the bundled ffmpeg CLI's decode of the same file (checked sample by sample); the baseline recorded the post-seek stream."
     },
     {
       "entry": "audio_aac_noise.m4a",
       "field": "audio.blocks",
-      "reason": "F-25/F-06 (P2): same mechanism as audio_aac_sine.m4a; AAC decoder history/priming after the shim's per-block re-seek differs between 8.1.3 and 9.1. Continuous decode is bit-identical; the block-pattern hash is not. Tracked as F-06."
+      "reason": "F-06 fix: same mechanism as audio_aac_sine.m4a; the block pattern is now bit-identical to the continuous read (tests/audio_blocks.rs)."
+    },
+    {
+      "entry": "audio_aac_noise.m4a",
+      "field": "audio.long",
+      "reason": "F-07 fix: same mechanism as audio_aac_sine.m4a; the long read now starts without a seek."
+    },
+    {
+      "entry": "audio_flac48.flac",
+      "field": "audio.blocks",
+      "reason": "F-06 fix: the mixer's overlapping block pattern is served from the history buffer instead of re-seeking, so it equals the continuous read; the baseline recorded the per-block re-seek."
+    },
+    {
+      "entry": "audio_flac44.flac",
+      "field": "audio.blocks",
+      "reason": "F-06 fix: resampled 44.1 kHz source; the block pattern no longer resets the resampler and is bit-identical to the continuous read."
+    },
+    {
+      "entry": "audio_mp3_48.mp3",
+      "field": "audio.blocks",
+      "reason": "F-06 fix: MDCT decoder pre-roll is decoded and discarded on a seek, and the block pattern no longer seeks at all; the result equals the continuous read."
+    },
+    {
+      "entry": "audio_opus.ogg",
+      "field": "audio.blocks",
+      "reason": "F-06 fix: the block pattern is served from the history buffer and equals the continuous read."
+    },
+    {
+      "entry": "audio_opus.mkv",
+      "field": "audio.blocks",
+      "reason": "F-06 fix: same as audio_opus.ogg; this entry is also the F-07 alignment case (1 ms timestamps) and is bit-identical to the Ogg remux in tests/audio_anchor.rs."
+    },
+    {
+      "entry": "change_channels.mp2",
+      "field": "audio.blocks",
+      "reason": "F-06 fix: the block pattern no longer re-seeks into the stereo/mono parameter change, so it equals the continuous read."
+    },
+    {
+      "entry": "counter_mpeg2_bframes.ts",
+      "field": "video.sequential",
+      "reason": "F-08 fix: this is the unindexed MPEG-TS fixture with a 483 ms start offset. The old shim returned the next I-frame for every request from frame 15 on (audit experiment G: all 88 frames wrong); the new output is the requested frame for every index, so the hash necessarily differs from the 8.1.3 baseline."
+    },
+    {
+      "entry": "counter_mpeg2_bframes.ts",
+      "field": "video.random",
+      "reason": "F-08 fix: same fixture; random access now decodes across the target instead of returning a later frame."
     }
   ]
 }

@@ -119,6 +119,60 @@ fn new_refuses_existing_project_and_overwrite_opts_in() {
     assert_eq!(j(&out)["project"]["name"], json!("PROJECT B"));
 }
 
+/// Audit F-09: `apply` must resolve every client `asset.import` itself: reject URL/protocol paths
+/// before any I/O, run the import check, and ignore client-supplied kind/probe/status.
+#[test]
+fn apply_checks_client_imports_and_rejects_urls() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let p = dir.path().join("imp.arcline");
+    let ps = p.to_str().expect("utf8");
+    let (code, out) = cli(&["new", ps], None);
+    assert_eq!(code, 0, "{out}");
+
+    let url = json!([{"op":"asset.import","path":"http://127.0.0.1:9/x.mp4","kind":"video","status":"ok"}]);
+    let (code, out) = cli(&["apply", ps], Some(&url.to_string()));
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(j(&out)["error"]["kind"], json!("invalid_value"));
+    let (_, out) = cli(&["describe", ps], None);
+    assert_eq!(j(&out)["assets"], json!([]), "nothing was imported");
+
+    // A lying client: wrong kind/status/probe for a real local file.
+    let media = dir.path().join("media").join("counter.mkv");
+    std::fs::create_dir_all(media.parent().expect("parent")).expect("mkdir");
+    arc_media::fixtures::write_counter_video(
+        &media,
+        90,
+        arc_core::FrameRate::Fps30.rate(),
+        160,
+        90,
+        false,
+    )
+    .expect("fixture");
+    let batch = json!([{
+        "op":"asset.import",
+        "path": media.to_str().expect("utf8"),
+        "kind":"audio",
+        "status":"offline",
+        "probe":{"duration":{"num":1,"den":1}}
+    }]);
+    let (code, out) = cli(&["apply", ps], Some(&batch.to_string()));
+    assert_eq!(code, 0, "{out}");
+    let (_, out) = cli(&["describe", ps], None);
+    let a = &j(&out)["assets"][0];
+    assert_eq!(a["status"], json!("ok"), "client status ignored");
+    assert_eq!(a["kind"], json!("video"), "client kind ignored");
+    assert_eq!(a["path"], json!("media/counter.mkv"));
+    assert_eq!(a["duration"], json!("00:00:03:00"), "client probe ignored");
+
+    // The tool subcommands reject scheme paths too (no probe/open attempt).
+    let (code, out) = cli(&["probe", "http://127.0.0.1:9/x.mp4"], None);
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(j(&out)["error"]["kind"], json!("invalid_value"));
+    let (code, out) = cli(&["import", ps, "handle:1"], None);
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(j(&out)["error"]["kind"], json!("invalid_value"));
+}
+
 #[test]
 fn usage_and_frame_rate_errors() {
     let dir = tempfile::tempdir().expect("tmp");

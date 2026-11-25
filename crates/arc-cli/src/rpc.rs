@@ -126,9 +126,15 @@ impl Session {
                     comment: Option<String>,
                 }
                 let a: P = params(p)?;
+                let project_path = self
+                    .path
+                    .clone()
+                    .ok_or_else(|| err(DOMAIN_ERROR, "no_project", "call project.open first"))?;
+                let mut commands = a.commands;
+                crate::media::resolve_imports(&project_path, &mut commands)?;
                 let r = self.host()?.apply(ApplyRequest {
                     base_revision: a.base_revision,
-                    commands: a.commands,
+                    commands,
                     dry_run: a.dry_run,
                     idempotency_key: a.idempotency_key,
                     source: self.source(),

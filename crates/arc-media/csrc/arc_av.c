@@ -83,11 +83,26 @@ void arc_av_close(ArcAv *a) {
 int arc_av_open(const char *path, int kind, int threads, ArcAv **out, char *err, int errlen) {
     *out = NULL;
     av_log_set_level(AV_LOG_ERROR);
+    /* Only local files: the caller builds `file:` URLs from canonical paths, and the whitelist is
+     * inherited by nested opens (playlists, references). Rejects http:, handle:, concat:, ... even
+     * if a binary contains those protocols (audit F-09, spec S1). */
+    if (!path || strncmp(path, "file:", 5) != 0) {
+        set_err(err, errlen, "open: only local file: paths are allowed", 0);
+        return -1;
+    }
     ArcAv *a = av_mallocz(sizeof *a);
     if (!a) { set_err(err, errlen, "out of memory", 0); return -1; }
     a->last_pts = INT64_MIN;
     a->is_audio = kind == 1;
-    int r = avformat_open_input(&a->fmt, path, NULL, NULL);
+    AVDictionary *opts = NULL;
+    if (av_dict_set(&opts, "protocol_whitelist", "file", 0) < 0) {
+        set_err(err, errlen, "open: out of memory", 0);
+        av_dict_free(&opts);
+        av_free(a);
+        return -1;
+    }
+    int r = avformat_open_input(&a->fmt, path, NULL, &opts);
+    av_dict_free(&opts);
     if (r < 0) { set_err(err, errlen, "open", r); arc_av_close(a); return -1; }
     r = avformat_find_stream_info(a->fmt, NULL);
     if (r < 0) { set_err(err, errlen, "find_stream_info", r); arc_av_close(a); return -1; }
@@ -301,7 +316,8 @@ static int swr_drain(ArcAv *a) {
  * mid-stream and feeding a mono frame to a stereo resampler is invalid (audit F-03).
  */
 static int ensure_swr(ArcAv *a, const AVFrame *f, int out_rate) {
-    AVChannelLayout in;
+    /* av_channel_layout_copy() frees the destination first: it must be zero-initialised. */
+    AVChannelLayout in = {0};
     if (av_channel_layout_copy(&in, &f->ch_layout) < 0) return AVERROR(ENOMEM);
     if (in.nb_channels == 0) av_channel_layout_default(&in, 2);
     if (a->swr && a->out_rate == out_rate && a->swr_in_fmt == f->format &&

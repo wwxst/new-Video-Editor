@@ -162,6 +162,18 @@ fn parse_resolution(s: &str) -> Result<Resolution, Fail> {
     Ok(Resolution { w, h })
 }
 
+/// Media arguments must be local paths, never URLs or protocol strings (audit F-09).
+fn reject_scheme(p: &Path) -> Result<(), Fail> {
+    let s = p.to_string_lossy();
+    if arc_cli::media::has_url_scheme(&s) {
+        return Err(fail(
+            "invalid_value",
+            format!("media path must be a local file path, not a URL or protocol: {s}"),
+        ));
+    }
+    Ok(())
+}
+
 fn read_commands(file: &Option<PathBuf>) -> Result<Vec<Command>, Fail> {
     let text = match file {
         Some(p) => std::fs::read_to_string(p).map_err(|e| fail("io_error", e))?,
@@ -193,18 +205,6 @@ fn outcome_json(o: &arc_media::probe::ImportOutcome) -> Value {
         } => json!({"status": "quarantined", "reason": reason, "kind": kind, "probe": probe}),
         Offline { reason } => json!({"status": "offline", "reason": reason}),
     }
-}
-
-/// Store media paths relative to the project folder when the media lives below it.
-fn project_relative(project: &Path, media: &Path) -> String {
-    let abs = std::fs::canonicalize(media).unwrap_or_else(|_| media.to_path_buf());
-    let root = project.parent().and_then(|p| std::fs::canonicalize(p).ok());
-    let rel = root
-        .as_ref()
-        .and_then(|r| abs.strip_prefix(r).ok())
-        .map(Path::to_path_buf);
-    let s = rel.unwrap_or(abs).to_string_lossy().replace('\\', "/");
-    s.strip_prefix("//?/").map(str::to_string).unwrap_or(s)
 }
 
 fn run(cli: Cli) -> Result<String, Fail> {
@@ -263,7 +263,8 @@ fn run(cli: Cli) -> Result<String, Fail> {
             dry_run,
             base_revision,
         } => {
-            let commands = read_commands(file)?;
+            let mut commands = read_commands(file)?;
+            arc_cli::media::resolve_imports(path, &mut commands).map_err(Fail::from)?;
             let host = open(path, d)?;
             let r = host.apply(ApplyRequest {
                 commands,
@@ -287,6 +288,7 @@ fn run(cli: Cli) -> Result<String, Fail> {
             Ok(serde_json::to_string(&r).unwrap_or_default())
         }
         Cmd::Probe { media } => {
+            reject_scheme(media)?;
             Ok(outcome_json(&arc_media::probe::import_check(media)).to_string())
         }
         Cmd::Import { path, media } => {
@@ -294,9 +296,10 @@ fn run(cli: Cli) -> Result<String, Fail> {
             let mut commands = Vec::new();
             let mut outcomes = Vec::new();
             for m in media {
+                reject_scheme(m)?;
                 let o = arc_media::probe::import_check(m);
                 outcomes.push(json!({"path": m, "result": outcome_json(&o)}));
-                let rel = project_relative(path, m);
+                let rel = arc_cli::media::project_relative(path, m);
                 let (kind, probe, status) = match o {
                     ImportOutcome::Ok { kind, probe } => {
                         (kind, Some(probe), arc_core::model::AssetStatus::Ok)

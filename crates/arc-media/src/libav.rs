@@ -107,8 +107,17 @@ impl Drop for Handle {
     }
 }
 
+/// Build the `file:` URL for a local media file. Document asset paths are untrusted input, so only
+/// canonical local files are ever passed to libav (audit F-09, spec §4.4/S1).
+fn file_url(path: &Path) -> Result<CString, MediaError> {
+    let canon = std::fs::canonicalize(path).map_err(|_| MediaError::Path)?;
+    let s = canon.to_string_lossy();
+    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    CString::new(format!("file:{s}")).map_err(|_| MediaError::Path)
+}
+
 fn open(path: &Path, kind: c_int) -> Result<(Handle, StreamInfo), MediaError> {
-    let p = CString::new(path.to_string_lossy().as_bytes()).map_err(|_| MediaError::Path)?;
+    let p = file_url(path)?;
     let mut err = [0 as c_char; 256];
     let mut h: *mut ArcAv = std::ptr::null_mut();
     // SAFETY: valid NUL-terminated path, out-pointer, and error buffer of the stated length.

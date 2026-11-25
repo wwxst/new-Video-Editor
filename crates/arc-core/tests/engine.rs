@@ -406,3 +406,18 @@ fn speed_not_one_clips_split_and_trim_at_any_frame() {
         .expect_err("sub-frame source_in at speed 1");
     assert_eq!(err.kind, ErrorKind::OffFrameBoundary);
 }
+/// F-29: removing a locked track must be refused, like every clip command on it.
+#[test]
+fn removing_a_locked_track_is_refused() {
+    let mut e = engine_with_media();
+    e.apply(req(cmds(json!([{"op":"track.set_properties","track":"tr_v1","locked":true}]))))
+        .expect("lock");
+    let err = e
+        .apply(req(cmds(json!([{"op":"track.remove","track":"tr_v1"}]))))
+        .expect_err("locked track removed");
+    assert_eq!(err.kind, ErrorKind::TrackLocked);
+    e.apply(req(cmds(json!([{"op":"track.set_properties","track":"tr_v1","locked":false}]))))
+        .expect("unlock");
+    e.apply(req(cmds(json!([{"op":"track.remove","track":"tr_v1"}]))))
+        .expect("unlocked track removal");
+}

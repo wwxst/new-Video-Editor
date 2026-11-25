@@ -509,6 +509,9 @@ pub fn apply_command(
         Command::TrackRemove { track } => {
             let seq = seq_mut(p)?;
             let ti = track_idx(seq, track)?;
+            // Every clip command refuses a locked track; removing the whole track must too
+            // (audit F-29). Unlock it first.
+            ensure_unlocked(seq, ti)?;
             seq.tracks.remove(ti);
             Ok(json!({"op": "track.remove", "id": track}))
         }

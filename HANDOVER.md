@@ -2,18 +2,22 @@
 
 Checkpoint date: 2026-11-25. Supersedes the earlier WIP handover of `720a99a`.
 
-**State: the workspace builds against the pinned FFmpeg 9.1 package, clippy is clean, and 96 tests
+**State: the workspace builds against the pinned FFmpeg 9.1 package, clippy is clean, and 110 tests
 pass** (Windows 11, Intel integrated GPU; see §3 for the exact counts and the three-run evidence in
-`reports/ffmpeg-9.1-differential.md`). All P0 audit defects are fixed and the FFmpeg 8.1.3 → 9.1
-upgrade is implemented (spec steps 0–3); the remaining audit findings are P2/P3 work items. Every
-milestone is committed on `feat/ffmpeg-9.1-upgrade` (branched from the pushed
-`fix/p0-audit-88e0707`). Architecture docs under `docs/` remain the source of truth; this file
-records implementation status, deviations, and how to continue.
+`reports/ffmpeg-9.1-differential.md`). All P0 audit defects are fixed, the FFmpeg 8.1.3 → 9.1
+upgrade is implemented (spec steps 0–3), and the follow-up work closed twelve more audit findings
+(F-06, F-07, F-08, F-11, F-12, F-13, F-14, F-24, F-26, F-28, F-29, F-31). The remaining findings
+are deferred with a written reason and recommendation in
+[reports/audit-follow-up-2026-11-25.md](reports/audit-follow-up-2026-11-25.md). The upgrade and the
+follow-up commits are merged into `main` (`e5d444f` plus the follow-up commits). Architecture docs
+under `docs/` remain the source of truth; this file records implementation status, deviations, and
+how to continue.
 
-> **Read first: [audit of `88e0707`](reports/audit-2026-11-25-88e0707.md)** (2026-11-25). Its P0 list
-> (F-01, F-02, F-03, F-04, F-05, F-09) is fixed with regression tests on `fix/p0-audit-88e0707`;
-> the FFmpeg 9.1 upgrade (F-19, F-20, F-21, plus the shim/tools parts of F-09) is implemented and
-> recorded in [third_party/ffmpeg](third_party/ffmpeg). The P2/P3 findings remain open (§6, §7).
+> **Read first: [audit of `88e0707`](reports/audit-2026-11-25-88e0707.md)** (2026-11-25) and its
+> [follow-up status table](reports/audit-follow-up-2026-11-25.md). Its P0 list (F-01, F-02, F-03,
+> F-04, F-05, F-09) is fixed with regression tests; the FFmpeg 9.1 upgrade (F-19, F-20, F-21, plus
+> the shim/tools parts of F-09) is recorded in [third_party/ffmpeg](third_party/ffmpeg); F-06, F-07
+> and F-08 (accuracy) and F-11…F-14, F-24, F-26, F-28, F-29, F-31 were fixed in the follow-up.
 
 ---
 
@@ -87,7 +91,7 @@ scripts/dev-env.sh
 |---|---|---|
 | **A Spine** | **Done** (dependency-rule CI check still missing) | Exit criteria met: 10,000-case property test, timecode boundary tests, `new` + `apply` produce valid containers |
 | **P Embedding PoC** | **Done — GO** | All automated criteria pass (docs/poc, ADR-0014 outcome) |
-| **B Headless pipeline** | **Functionally complete; exit criteria open** | Frame-exact `import → edit → render` through FFV1 and H.264 (hardware `h264_qsv` here); AV1 via `libsvtav1` and ProRes encode/decode covered by tests. Open per docs/10 §4: mutated-media corpus with quarantine; HEVC encode path not exercised; macOS/Linux CI. Accuracy defects on long-GOP and lossy-audio sources (audit F-06–F-08) remain P2 |
+| **B Headless pipeline** | **Functionally complete; exit criteria open** | Frame-exact `import → edit → render` through FFV1 and H.264 (hardware `h264_qsv` here); AV1 via `libsvtav1` and ProRes/DNxHD encode/decode covered by tests; long-GOP, B-frame and MPEG-TS random access is frame-exact (F-08 fixed) and lossy/resampled audio survives the mixer's block pattern (F-06/F-07 fixed). Open per docs/10 §4: HEVC encode path (no `--codec hevc`), a crashing-media quarantine fixture, macOS/Linux CI — see [follow-up report §4](reports/audit-follow-up-2026-11-25.md) |
 | **C Compositor + shell** | Compositor done; **GUI editor not started** | `arc-app` currently shows the PoC workload, not an editor |
 | **D Audio** | Mixer + export done; **real-time playback (cpal) not started** | |
 | **E Lifecycle** | Journal, recovery, atomic saves, forced-kill done; **crash breadcrumbs, quarantine on relaunch, hang watchdog, relink not started** | |
@@ -117,7 +121,7 @@ JSON-RPC methods implemented: `project.open` (incl. `create`), `project.describe
 Missing versus docs/06 §4.1: `history.list`, `inspect.frame`, `control.request`, `control.release`, and pushed
 notifications.
 
-## 3. Test results (all green, 96 tests, 1 ignored)
+## 3. Test results (all green, 110 tests, 1 ignored)
 
 Three consecutive full `cargo test --workspace` runs and a clean clippy run on the FFmpeg 9.1 switch
 are recorded in [reports/ffmpeg-9.1-differential.md](reports/ffmpeg-9.1-differential.md) §5; the
@@ -125,30 +129,42 @@ per-crate table below is the current suite.
 
 | Crate / suite | Tests | What is proven |
 |---|---|---|
-| arc-core unit (time, ids, model) | 15 | Exact time; all 8 rates; NDF/DF vectors and rejections; **exhaustive 24 h DF round trip**; sample mapping; canonical JSON |
-| arc-core `tests/engine.rs` | 11 | Commands, overlap/off-boundary/unknown errors with paths, atomic batches, stale revision, dry run, idempotency, `internal.restore` ban, trim/split/ripple/transitions, manifest validation, undo/redo hashes, control + auto-takeover, rollback of unconfirmed batches, journal replay |
+| arc-core unit (time, ids, model, lock errors) | 16 | Exact time; all 8 rates; NDF/DF vectors and rejections; **exhaustive 24 h DF round trip**; sample mapping; canonical JSON |
+| arc-core `tests/engine.rs` | 14 | Commands, overlap/off-boundary/unknown errors with paths, atomic batches, stale revision, dry run, idempotency, `internal.restore` ban, trim/split/ripple/transitions, manifest validation, undo/redo hashes, control + auto-takeover, rollback of unconfirmed batches, journal replay, **replayed redo has no phantom entry (F-12)**, **speed ≠ 1 split/trim (F-13)**, **locked track removal refused (F-29)** |
 | arc-core `tests/property.rs` | 1 (10,000 cases) | **Invariant 7**: apply → undo → identical canonical hash; redo → identical; every committed state validates |
 | arc-core `tests/journal.rs` | 9 | Torn tail at every byte offset, CRC/magic/length corruption, short writes, mid-record failure truncation, failed truncate, durable `fsync` failure, group-flush failure, CRC32C vectors |
-| arc-core `tests/store.rs` | 7 (+1 helper) | Container round trip, future schema refused, save/reopen/clean close, lock, torn-tail recovery with `.rejected`, ack + notifications, **forced kill via child-process `abort()` at 1, 29, 30, 31, 75 edits** |
+| arc-core `tests/store.rs` | 8 (+1 helper) | Container round trip, future schema refused, save/reopen/clean close, lock, torn-tail recovery with `.rejected`, ack + notifications, **forced kill via child-process `abort()` at 1, 29, 30, 31, 75 edits**, **snapshot rotation publishes only with its journal (F-14)** |
 | arc-core `tests/recovery.rs` | 7 | P0 recovery/creation regressions: rejected replay (F-01), evidence split, create over locked/existing project (F-04), stale sidecar and foreign snapshot id checks (F-05) |
 | arc-media unit + `tests/decode.rs` | 6 + 3 | ffprobe mapping, runtime identity, ffprobe parse; **frame-accurate in-process decode** (sequential, random, repeated, backward) at 29.97 and 25 fps for FFV1 in MKV; sample-addressed audio; import check ok/offline |
 | arc-media `tests/param_change.rs` | 2 | Mid-stream resolution change (F-02) scaled, not overflowing; MP2 stereo→mono (F-03) resampled safely |
+| arc-media `tests/audio_blocks.rs` | 2 | The mixer's 4096+1 block pattern is bit-identical to one continuous read for FLAC 48/44.1 kHz, MP3, Ogg/MKV Opus and AAC (**F-06**) |
+| arc-media `tests/audio_anchor.rs` | 2 | One Opus stream remuxed to Ogg and MKV decodes bit-identically; reads at 20/50/80 s align with the continuous decode (**F-07**) |
+| arc-media `tests/seek_accuracy.rs` | 4 | Every frame exact for MPEG-2 open GOP/MKV, MPEG-2/TS with a 1.433 s start, MPEG-4 Part 2/MP4 with B-frames and H.264, sequential, backward, repeated and from fresh decoders (**F-08**) |
 | arc-media `tests/paths.rs` | 2 | Local-file-only opening; URL/device paths refused before I/O; spaces/non-ASCII file: URLs |
 | arc-media `tests/runtime.rs` | 3 | Runtime identity/licence/ident, verified tools and encoder set, `libsvtav1` encode+decode |
 | arc-media `tests/differential.rs` | 1 | FFmpeg 8.1.3-vs-9.1 corpus harness (skipped unless `ARCLINE_CORPUS_DIR` is set; step-1 baseline committed) |
 | arc-render unit + `tests/plan.rs` + `tests/render.rs` | 1 + 1 + 5 | Manifests; frame planning incl. dissolve weights and handles; GPU bit-exact determinism, 1-LSB pass-through, color correct within 2 LSB of the CPU reference, transforms, linear-light opacity/dissolve, every effect runs or is reported |
 | arc-audio unit | 3 | **Block-size parity** (1…4096 identical) with a synthetic source, positions/gain/pan/fades/varispeed, WAV header. Parity through the real decoder for AAC/MP3/Opus/resampled media still shows the P2 F-06 defect |
+| arc-app unit | 1 | PoC embed messages gated on a PoC session (**F-31**) |
 | arc-cli `tests/cli.rs`, `render_e2e.rs`, `rpc.rs` | 4 + 4 + 4 | CLI contract incl. `new --overwrite`; import checks and scheme/device rejection; **end-to-end: every output frame verified exact** (FFV1, H.264, ranges) with audio and the §4.5 `ffmpeg` report block; AV1/ProRes/DNxHD decode; RPC semantics, create/locked/existing, out-of-process render job |
 
 Not part of `cargo test`: the embedding PoC (`--example embed_host`). Run it manually; result recorded in
 `docs/poc/embedding-poc-2026-11-25.md`.
 
-**Now covered by tests** (added with the P0 fixes and the upgrade): recovery after a rejected replay
-record (F-01), creation over an existing or locked project (F-04), stale/foreign sidecars (F-05),
-mid-stream resolution and channel changes (F-02, F-03), non-file asset paths and client-supplied
-`asset.import` (F-09). **Still not covered** (P2/P3): long-GOP / B-frame / MPEG-TS random access
-(F-08), lossy audio through the real decoder in the mixer's block pattern (F-06/F-07), split/trim of
-clips with speed ≠ 1 (F-13), redo in replayed history (F-12).
+**Now covered by tests** (added with the P0 fixes, the upgrade and the follow-up): recovery after a
+rejected replay record (F-01), creation over an existing or locked project (F-04), stale/foreign
+sidecars (F-05), mid-stream resolution and channel changes (F-02, F-03), non-file asset paths and
+client-supplied `asset.import` (F-09), lossy and resampled audio through the real decoder in the
+mixer's block pattern (F-06), container-independent Opus alignment (F-07), long-GOP / B-frame /
+MPEG-TS random access (F-08), replay of a redo (F-12), speed ≠ 1 split and in-trim (F-13), snapshot
+rotation failure (F-14), lock-error mapping (F-24), locked-track removal (F-29), PoC embed gating
+(F-31).
+
+**Still not covered:** the deferred findings in
+[reports/audit-follow-up-2026-11-25.md](reports/audit-follow-up-2026-11-25.md) §3 — path
+allow-lists (F-10), engine panic containment (F-15), rotation/SAR (F-16), streaming export audio
+(F-17), oversized sources (F-18), VFR-flagged media (F-22), mid-stream colour tags (F-23),
+job/temp-file hygiene (F-27), idempotency binding (F-30), VBR probe duration (F-32).
 
 ## 4. Bugs found and fixed by the tests (keep these tests)
 
@@ -169,8 +185,9 @@ Fold these into docs/02–06 (or an ADR) when convenient; none contradicts an AD
 | Model | `sequences` map with exactly one sequence; track z-order = vector position (no stored `index`); clip source is `asset` **or** `title`; transforms are static (not keyframable); effect params are f64 `{"static"}` / `{"curve"}` |
 | Ripple | `none`/`track`/`all` on `remove_clip` and out-edge `trim_clip`; in-edge ripple → `unsupported_ripple` |
 | Audio clips | Must be frame-aligned (no `allow_subframe` yet); fades are sample-grained; a video asset with audio may sit on an audio track; no linked A/V clips |
+| Speed ≠ 1 | `start`/`duration` stay frame-aligned; `source_in` may be any exact time when `speed != 1` (it is derived from a frame-aligned timeline position), and must stay on the frame grid at speed 1 (F-13) |
 | CLI undo | Removed: history is session-scoped; use `arcline-cli rpc` |
-| Decode | In-process libav through `csrc/arc_av.c` (opaque handle; no FFmpeg structs in Rust). YUV→RGB happens in swscale on the CPU (BT.709/601 by stream tags) — **docs/03 §10 GPU YUV upload is a later optimization** |
+| Decode | In-process libav through `csrc/arc_av.c` (opaque handle; no FFmpeg structs in Rust). YUV→RGB happens in swscale on the CPU (BT.709/601 by stream tags) — **docs/03 §10 GPU YUV upload is a later optimization**. Video seeks back off until a frame at or before the target is decoded (F-08); audio reads come from a one-second history buffer, a jump seeks 12,000 frames early and decodes the pre-roll (F-06) |
 | Import check | `ffprobe` + `ffmpeg -t 1 -f null` at start/middle/end in child processes with 20 s timeouts; Windows NTSTATUS exit codes count as crashes |
 | Export | `arcline-cli render` decodes in-process (it is already a child of the GUI/session), encodes by piping RGBA to an `ffmpeg` child; encoder chosen by a one-frame trial (here `h264_qsv`; fallbacks `h264_mf`, `libopenh264`). Never x264 |
 | Render input | `render` reads the saved container, or `--snapshot` (what `job.submit` writes); it never takes the project lock |
@@ -181,7 +198,7 @@ Fold these into docs/02–06 (or an ADR) when convenient; none contradicts an AD
 | Embed channel | PoC uses stdio; production moves the same messages onto the named pipe (docs/13 §3) |
 | App loop | `egui-winit` + `egui-wgpu` directly, no `eframe` (ADR-0007 amendment) |
 | macOS lock | `SessionLock` is strong on Windows (no-share handle), weak elsewhere (Linux `/proc` check, macOS unchecked) |
-| Not yet implemented, although documented (audit §5.2) | import-check cache by content hash; rotation in the compositor; `catch_unwind` / engine panic containment; `--root`/`--output-root`; `job.status` progress and `queued`; `MOVEFILE_WRITE_THROUGH` on rename; schema fixture `fixtures/schema/v7_min.arcline` |
+| Not yet implemented, although documented (audit §5.2) | import-check cache by content hash; rotation in the compositor; `catch_unwind` / engine panic containment; `--root`/`--output-root`; `job.status` progress and `queued`; `MOVEFILE_WRITE_THROUGH` on rename; schema fixture `fixtures/schema/v7_min.arcline`. Each is deferred with a reason in [reports/audit-follow-up-2026-11-25.md](reports/audit-follow-up-2026-11-25.md) §3 |
 | Blur radius | manifest range is 0–200 px; the shader caps the kernel at 64 taps per side, so radii above 64 px use a truncated kernel |
 | Software H.264 | the encoder *candidates* still list `h264_mf`/`libopenh264` as fallbacks, but D2 excludes Media Foundation and the build excludes `libopenh264`, so neither exists in the shipped 9.1 package (audit F-19 closed in the build). Never x264 |
 | FFmpeg | 9.1 in-repo build (D1 LGPL v2.1+, D2 no Media Foundation, D3 source build, D4 P0 first); compile-time ABI pin + run-time version/licence check; tools resolved from the bundle only. Details: [third_party/ffmpeg](third_party/ffmpeg), §9 |
@@ -204,26 +221,21 @@ Fold these into docs/02–06 (or an ADR) when convenient; none contradicts an AD
 8. The export copies every decoded frame (`to_vec`) per item per frame; fine for the foundation, a known
    optimization target.
 9. Performance budgets (docs/08 §2) are **not yet measured**, except the PoC frame pacing.
-10. **Audit defects.** The P0 list below is **fixed with regression tests** (F-01, F-02, F-03, F-04,
-    F-05, F-09); the FFmpeg-related findings F-19/F-20/F-21 are closed by the 9.1 build (§9). The
-    remaining items are P2/P3 and are listed with the audit report
-    ([reports/audit-2026-11-25-88e0707.md](reports/audit-2026-11-25-88e0707.md)):
+10. **Audit defects.** Every finding is tracked in
+    [reports/audit-follow-up-2026-11-25.md](reports/audit-follow-up-2026-11-25.md) with its commit and
+    regression test, or with the reason it is deferred. Fixed: F-01 (journal restarts after a rejected
+    record), F-02/F-03 (shim parameter changes), F-04 (lock-before-create + additivity), F-05 (sidecar
+    identity), F-06 (audio served from a history buffer), F-07 (container-independent Opus alignment),
+    F-08 (seek back-off until a frame at or before the target), F-09 (local files only + session-layer
+    import checks), F-12 (replayed redo pops the redo stack), F-13 (speed ≠ 1 source_in rule), F-14
+    (snapshot published only after its journal opens), F-19/F-20/F-21 (licence posture, reproducible
+    pinned build, runtime identity), F-24 (lock-error mapping), F-26 (MSRV), F-28 (EAGAIN packet kept),
+    F-29 (locked track removal refused), F-31 (PoC messages gated).
 
-    | Id | Severity | Open defect |
-    |---|---|---|
-    | F-06 | High | Exported AAC/MP3/Opus/resampled audio is corrupted every 4,096 samples (decoder re-seeks for each mixer block) |
-    | F-07 | High | Opus from MKV/WebM is 48 samples late |
-    | F-08 | High | Random access returns a later frame for MP4 with B-frames and for MPEG-TS |
-    | F-10 | Medium | No `--root`/`--output-root` allow-lists; render output can overwrite any file |
-    | F-12 | Medium | After recovery, a replayed redo leaves a phantom redo entry |
-    | F-13 | Medium | Split/in-trim of clips with speed ≠ 1 fails at half the positions (`off_frame_boundary` on derived `source_in`) |
-    | F-14–F-18 | Medium | Non-atomic snapshot rotation; no panic containment; rotation/SAR ignored; whole export audio in memory; >8192 px sources |
-    | F-22–F-33 | Low/Info | VFR bias, fixed colour params, lock-error mapping, AAC history, MSRV, job/temp hygiene, `EAGAIN` packet, locked-track removal, idempotency keys, PoC embed messages, VBR probe duration, performance debt |
-
-    Fixed in this branch: F-01 (journal restarts after a rejected record), F-02/F-03 (shim parameter
-    changes), F-04 (lock-before-create + additivity), F-05 (sidecar identity), F-09 (local files only +
-    session-layer import checks), F-19/F-20/F-21 (licence posture, reproducible pinned build, runtime
-    identity).
+    Deferred with a written reason and recommendation (follow-up report §3): F-10 (path allow-lists),
+    F-15 (panic containment), F-16 (rotation/SAR), F-17 (streaming export audio), F-18 (oversized
+    sources), F-22 (VFR bias), F-23 (colour-tag changes), F-27 (job/temp hygiene), F-30 (idempotency
+    binding), F-32 (VBR probe duration), F-33 (performance debt).
 
 11. **UNC asset paths are trusted.** A project file received from someone else can point at a UNC
     path (or a mapped network drive), and the in-process decoder will open it, which can trigger
@@ -240,9 +252,10 @@ evidence, UNC normalisation, device-namespace rejection).
 **P1 — FFmpeg 9.1 upgrade** ([spec](docs/specs/ffmpeg-9.1-upgrade.md)): **done** on
 `feat/ffmpeg-9.1-upgrade` (decision record and evidence in §9).
 
-**P2 — before Phase C preview work depends on them:** F-08 (seek accuracy), F-06/F-07 (audio accuracy),
-F-12, F-13 (decide the rule), F-14, F-15, F-10 (`--root`/`--output-root`, which also bounds the UNC/NTLM
-exposure noted in §6.11); CI workflow, dependency-rule check and `cargo-deny`.
+**P2 — before Phase C preview work depends on them:** **done** — F-06/F-07 (audio accuracy), F-08 (seek
+accuracy), F-12, F-13, F-14 (see the follow-up report). Remaining P2: F-10 (`--root`/`--output-root`,
+which also bounds the UNC/NTLM exposure noted in §6.11) and F-15 (panic containment with a
+degraded-mode contract); CI workflow, dependency-rule check and `cargo-deny`.
 
 **Phase C — the editor (largest remaining piece)**
 1. Replace the PoC workload in `arc-app` with the editor shell: `egui_dock` layout, media bin, inspector
@@ -314,3 +327,15 @@ local manifest; network protocols are disabled), while `hls`/`dash`/`concat` are
 (AAC block-pattern decode differences explained by F-25/F-06), performance within ±10 %, and the
 rollback rehearsal are recorded in [reports/ffmpeg-9.1-differential.md](reports/ffmpeg-9.1-differential.md)
 together with the AC-1…AC-15 table.
+**Follow-up after the merge (2026-11-25):** F-06 (audio block pattern), F-07 (Opus alignment) and
+F-08 (seek accuracy) are fixed on `main` and add `audio_blocks`, `audio_anchor` and `seek_accuracy`
+to the suite; the audio differential's AAC block-pattern difference is now explained and gone in the
+new tests (the 8.1.3 baseline itself is unchanged, it is history). The suite is **110 passed,
+0 failed, 1 ignored** at the merge state, and the AC table in
+[reports/ffmpeg-9.1-differential.md](reports/ffmpeg-9.1-differential.md) §8 carries the updated AC-6
+row. No FFmpeg package change was needed for the follow-up: all three fixes are in the shim and its
+tests.
+
+**Merge record:** `feat/ffmpeg-9.1-upgrade` was merged into `main` with `--no-ff` (`e5d444f`), the
+full suite was re-run on `main`, and the branch was pushed. The P0 branch `fix/p0-audit-88e0707` and
+its worktree were left untouched.

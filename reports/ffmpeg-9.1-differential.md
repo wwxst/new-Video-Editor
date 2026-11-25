@@ -184,6 +184,11 @@ or `hevc_mf` (D2). All shipped binaries carry the three required PE flags.
 All 65 original tests are still present and pass unchanged; the additional 31 tests are the P0
 regressions and the upgrade's runtime/encoder/fixture tests.
 
+**Post-merge state (2026-11-25):** the audit follow-up added 14 tests (F-06 audio block pattern,
+F-07 container alignment, F-08 seek accuracy, F-12, F-13, F-14, F-24, F-29, F-31), so the suite at
+the merge into `main` is **110 passed, 0 failed, 1 ignored**. The three 96-test runs above remain
+the upgrade-time evidence; the follow-up ran the full suite again on `main` before the push.
+
 - **AC-8:** on this machine `--codec h264` selects **`h264_qsv`** (10/10 frames, verified by an
   actual render); `libsvtav1` encodes and the output decodes (`libsvtav1_encodes_and_the_result_decodes`);
   `render_is_frame_exact_with_audio` verifies every FFV1 output frame and `render_range_and_h264`
@@ -257,7 +262,7 @@ default when the 9.1 directory is absent.
 | AC-3 | 9.x imports only; mismatched DLLs/tools refused; report block | `objdump -p arcline-cli.exe`; fake 8.1 tool bundle + `probe`; export report | ✅ avcodec-63/format-63/util-61/sws-10/swr-7, no 8.x; exit 2 `ffmpeg_unavailable` with pinned ident; report block with manifest SHA |
 | AC-4 | Shipped build: LGPL, no GPL/nonfree/version3, file+pipe only, no hls/dash/concat, no libopenh264/h264_mf, PE flags | `third_party/ffmpeg/verify.sh` | ✅ exit 0, 40 checks ok (see §3) |
 | AC-5 | `http:`, `handle:`, `concat:` etc. fail before network/handle in shim and CLI | `cargo test -p arc-media --test paths`; CLI/RPC import rejection tests | ✅ all refused (`MediaError::Path` / `invalid_value`) |
-| AC-6 | All existing tests pass 3×; clippy clean | 3 × `cargo test --workspace`; clippy | ✅ 96/96/96 passed, 0 failed, 1 ignored; 0 lints |
+| AC-6 | All existing tests pass 3×; clippy clean | 3 × `cargo test --workspace`; clippy | ✅ 96/96/96 passed at upgrade time, 0 failed, 1 ignored; **110 passed at the merge** (§5); 0 lints |
 | AC-7 | No unexplained 8.1.3-vs-9.1 difference | differential harness + allow-list | ✅ 4 differences (2 AAC block patterns ×2 paths), 0 unexplained; see §2 |
 | AC-8 | Encoder selection unchanged; AV1/libsvtav1; FFV1+H.264 frame-exact; ProRes/DNxHD decodable | `render_e2e`; manual `--codec h264`; `libsvtav1` test | ✅ h264_qsv; libsvtav1 encodes/decodes; FFV1/H.264 frame-exact; AV1/ProRes/DNxHD decode |
 | AC-9 | `Probe` results equal baseline | differential report | ✅ identical for all 22 entries |

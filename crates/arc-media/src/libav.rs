@@ -233,8 +233,9 @@ impl VideoDecoder {
         let mut err = [0 as c_char; 256];
         let mut got = 0i64;
         let stride = self.info.width as c_int * 4;
-        // SAFETY: buf holds width*height*4 bytes, matching the stride and the stream dimensions
-        // the shim converts to (it scales to the stream's native size).
+        // SAFETY: buf holds width*height*4 bytes. The shim scales every decoded frame to the
+        // stream dimensions reported by `arc_av_info` (even when a frame changes size mid-stream),
+        // and rejects a stride smaller than width*4 (audit F-02).
         let r = unsafe {
             arc_av_video_at(
                 self.h.0,

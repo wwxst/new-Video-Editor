@@ -32,6 +32,7 @@ typedef struct ArcAv {
     int is_audio;
     struct SwsContext *sws;
     int sws_w, sws_h, sws_fmt;
+    int dst_w, dst_h;     /* stream dimensions reported in ArcAvInfo: the RGBA destination size */
     struct SwrContext *swr;
     int out_rate;
     int64_t last_pts;     /* pts of the last delivered video frame, INT64_MIN if none */
@@ -97,6 +98,11 @@ int arc_av_open(const char *path, int kind, int threads, ArcAv **out, char *err,
     if (!a->dec) { set_err(err, errlen, "alloc codec context", 0); arc_av_close(a); return -1; }
     r = avcodec_parameters_to_context(a->dec, a->fmt->streams[a->stream]->codecpar);
     if (r < 0) { set_err(err, errlen, "codec parameters", r); arc_av_close(a); return -1; }
+    /* The buffer Rust allocates is the size reported by arc_av_info (the stream's codec
+     * parameters), so every decoded frame is scaled to exactly this size. Frames can change size
+     * mid-stream (audit F-02). */
+    a->dst_w = a->fmt->streams[a->stream]->codecpar->width;
+    a->dst_h = a->fmt->streams[a->stream]->codecpar->height;
     a->dec->thread_count = threads;
     a->dec->pkt_timebase = a->fmt->streams[a->stream]->time_base;
     r = avcodec_open2(a->dec, codec, NULL);
@@ -169,9 +175,12 @@ static int64_t frame_pts(const AVFrame *f) {
 }
 
 static int to_rgba(ArcAv *a, const AVFrame *f, uint8_t *dst, int stride) {
+    if (a->dst_w <= 0 || a->dst_h <= 0) return -1;
+    /* `dst` holds dst_h rows of dst_w RGBA pixels; a smaller stride would overflow every row. */
+    if (stride < a->dst_w * 4) return -1;
     if (!a->sws || a->sws_w != f->width || a->sws_h != f->height || a->sws_fmt != f->format) {
         if (a->sws) sws_freeContext(a->sws);
-        a->sws = sws_getContext(f->width, f->height, f->format, f->width, f->height, AV_PIX_FMT_RGBA,
+        a->sws = sws_getContext(f->width, f->height, f->format, a->dst_w, a->dst_h, AV_PIX_FMT_RGBA,
                                 SWS_BICUBIC | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT, NULL, NULL, NULL);
         if (!a->sws) return -1;
         a->sws_w = f->width;
@@ -184,7 +193,8 @@ static int to_rgba(ArcAv *a, const AVFrame *f, uint8_t *dst, int stride) {
     }
     uint8_t *planes[4] = {dst, NULL, NULL, NULL};
     int strides[4] = {stride, 0, 0, 0};
-    return sws_scale(a->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, planes, strides) > 0 ? 0 : -1;
+    /* Scale to the reported size even when the frame itself changed size or format. */
+    return sws_scale(a->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, planes, strides) == a->dst_h ? 0 : -1;
 }
 
 /*

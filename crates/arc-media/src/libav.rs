@@ -111,8 +111,13 @@ impl Drop for Handle {
 /// canonical local files are ever passed to libav (audit F-09, spec §4.4/S1).
 fn file_url(path: &Path) -> Result<CString, MediaError> {
     let canon = std::fs::canonicalize(path).map_err(|_| MediaError::Path)?;
-    let s = canon.to_string_lossy();
-    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+    // Map `\\?\C:\...` to a drive path and `\\?\UNC\server\...` back to `\\server\...`; a
+    // verbatim prefix left in place, or stripped to `UNC\...`, makes FFmpeg treat NAS media as a
+    // relative path.
+    let s = crate::paths::normalize_verbatim(&canon.to_string_lossy());
+    if !crate::paths::is_local_absolute(&s) {
+        return Err(MediaError::Path);
+    }
     CString::new(format!("file:{s}")).map_err(|_| MediaError::Path)
 }
 

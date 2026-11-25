@@ -136,6 +136,21 @@ fn apply_checks_client_imports_and_rejects_urls() {
     let (_, out) = cli(&["describe", ps], None);
     assert_eq!(j(&out)["assets"], json!([]), "nothing was imported");
 
+    // Windows device namespace / verbatim paths are the handle-style access F-09 closes.
+    for bad in [
+        r"\\.\pipe\arcline",
+        r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\x.mp4",
+        "//./pipe/arcline",
+        "//?/C:/x.mp4",
+    ] {
+        let batch = json!([{"op":"asset.import","path":bad,"kind":"video","status":"ok"}]);
+        let (code, out) = cli(&["apply", ps], Some(&batch.to_string()));
+        assert_eq!(code, 2, "{bad}: {out}");
+        assert_eq!(j(&out)["error"]["kind"], json!("invalid_value"), "{bad}");
+    }
+    let (_, out) = cli(&["describe", ps], None);
+    assert_eq!(j(&out)["assets"], json!([]), "no device path was imported");
+
     // A lying client: wrong kind/status/probe for a real local file.
     let media = dir.path().join("media").join("counter.mkv");
     std::fs::create_dir_all(media.parent().expect("parent")).expect("mkdir");

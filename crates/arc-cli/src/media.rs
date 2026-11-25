@@ -26,7 +26,8 @@ pub fn has_url_scheme(s: &str) -> bool {
         && it.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
 }
 
-/// Store a media path relative to the project folder when the media lives below it.
+/// Store a media path relative to the project folder when the media lives below it. The stored
+/// form uses forward slashes and never keeps a Windows verbatim prefix (audit F-09 follow-up).
 pub fn project_relative(project: &Path, media: &Path) -> String {
     let abs = std::fs::canonicalize(media).unwrap_or_else(|_| media.to_path_buf());
     let root = project.parent().and_then(|p| std::fs::canonicalize(p).ok());
@@ -34,8 +35,8 @@ pub fn project_relative(project: &Path, media: &Path) -> String {
         .as_ref()
         .and_then(|r| abs.strip_prefix(r).ok())
         .map(Path::to_path_buf);
-    let s = rel.unwrap_or(abs).to_string_lossy().replace('\\', "/");
-    s.strip_prefix("//?/").map(str::to_string).unwrap_or(s)
+    let chosen = rel.unwrap_or(abs);
+    arc_media::paths::normalize_verbatim(&chosen.to_string_lossy()).replace('\\', "/")
 }
 
 fn absolute(root: &Path, p: &str) -> PathBuf {
@@ -63,10 +64,13 @@ pub fn resolve_imports(project_path: &Path, commands: &mut [Command]) -> Result<
         else {
             continue;
         };
-        if has_url_scheme(path) {
+        if has_url_scheme(path) || is_device_path(path) {
             return Err(CommandError::new(
                 ErrorKind::InvalidValue,
-                format!("asset path must be a local file path, not a URL or protocol: {path}"),
+                format!(
+                    "asset path must be a local file path, not a URL, protocol, device or \
+                     verbatim path: {path}"
+                ),
             )
             .at(format!("commands[{i}].path")));
         }
@@ -99,6 +103,17 @@ pub fn resolve_imports(project_path: &Path, commands: &mut [Command]) -> Result<
     Ok(())
 }
 
+    /// True when `s` uses a Windows device-namespace or verbatim prefix (`\\.\pipe\x`,
+    /// `\\?\GLOBALROOT\...`, `//./...`, `//?/...`); these are handle-style accesses, not media files.
+    pub fn is_device_path(s: &str) -> bool {
+        let lower = s.to_ascii_lowercase();
+        [
+            r"\\.\", r"\\?\", r"\.\", r"\?\", "//./", "//?/",
+        ]
+        .iter()
+        .any(|p| lower.starts_with(p))
+    }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,6 +142,28 @@ mod tests {
     }
 
     #[test]
+    fn device_namespaces_are_rejected_but_unc_is_not() {
+        for s in [
+            r"\\.\pipe\arcline",
+            r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\x.mp4",
+            r"\.\pipe\x",
+            r"\?\C:\x",
+            "//./pipe/arcline",
+            "//?/C:/x.mp4",
+        ] {
+            assert!(is_device_path(s), "{s}");
+        }
+        for s in [
+            r"C:\media\x.mkv",
+            "C:/media/x.mkv",
+            r"\\server\share\x.mkv",
+            "media/x.mkv",
+        ] {
+            assert!(!is_device_path(s), "{s}");
+        }
+    }
+
+    #[test]
     fn relative_paths_stay_relative() {
         let dir = tempfile::tempdir().expect("tmp");
         let project = dir.path().join("p.arcline");
@@ -134,5 +171,18 @@ mod tests {
         std::fs::create_dir_all(media.parent().expect("parent")).expect("mkdir");
         std::fs::write(&media, b"x").expect("write");
         assert_eq!(project_relative(&project, &media), "media/a.mov");
+    }
+
+    #[test]
+    fn unc_and_verbatim_paths_are_stored_as_plain_paths() {
+        let project = Path::new(r"D:\projects\p.arcline");
+        assert_eq!(
+            project_relative(project, Path::new(r"\\?\UNC\server\share\a b.mkv")),
+            "//server/share/a b.mkv"
+        );
+        assert_eq!(
+            project_relative(project, Path::new(r"\\?\C:\media\a.mkv")),
+            "C:/media/a.mkv"
+        );
     }
 }

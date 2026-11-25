@@ -437,9 +437,12 @@ impl ProjectStore {
             .ok()
             .map(|(p, _)| p.meta.id.as_str().to_string());
         let (snap, foreign) = latest_snapshot(&paths, expected_id.as_deref());
-        if container.is_ok() && foreign {
-            // The sidecar belongs to a different project (the container was replaced outside the
-            // API). Keep the files for support, but never replay them (audit F-05).
+        if container.is_ok() && foreign && snap.is_none() {
+            // No snapshot of this project was selected, so the sidecar belongs to a different
+            // project (the container was replaced outside the API). Keep the files for support,
+            // but never replay them (audit F-05). A foreign snapshot alongside a *matching* base
+            // is simply ignored by the id check; moving the sidecar would discard the matching
+            // snapshot's journal and lose its acknowledged records.
             move_stale_sidecar_aside(&paths)?;
         }
         let (base, base_revision, from_sidecar, saved_revision) = match (container, snap) {

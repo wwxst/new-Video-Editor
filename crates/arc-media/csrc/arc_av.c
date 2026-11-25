@@ -40,6 +40,7 @@ typedef struct ArcAv {
     AVFrame *cur;         /* last delivered frame */
     AVFrame *held;        /* look-ahead: first decoded frame after `cur` */
     int drained;          /* decoder returned EOF */
+    int pkt_pending;      /* the packet in `pkt` must be resent before reading another */
     int stream;
     int is_audio;
     struct SwsContext *sws;
@@ -57,7 +58,6 @@ typedef struct ArcAv {
     int64_t abuf_start;
     int audio_started;    /* a decode position has been established */
     int anchor_pending;   /* the next appended frame fixes abuf_start from its timestamp */
-    int64_t pkt_duration; /* duration of the last packet sent to the decoder, in stream ticks */
 } ArcAv;
 
 typedef struct ArcAvInfo {
@@ -220,22 +220,36 @@ static int next_frame(ArcAv *a, char *err, int errlen) {
         if (r == AVERROR_EOF) { a->drained = 1; return 1; }
         if (r != AVERROR(EAGAIN)) { set_err(err, errlen, "receive_frame", r); return -1; }
         if (a->eof_sent) return 1;
-        r = av_read_frame(a->fmt, a->pkt);
-        if (r == AVERROR_EOF) {
-            avcodec_send_packet(a->dec, NULL);
-            a->eof_sent = 1;
-            continue;
-        }
-        if (r < 0) { set_err(err, errlen, "read_frame", r); return -1; }
-        if (a->pkt->stream_index == a->stream) {
-            r = avcodec_send_packet(a->dec, a->pkt);
-            if (r < 0 && r != AVERROR(EAGAIN) && r != AVERROR_INVALIDDATA) {
+        if (!a->pkt_pending) {
+            r = av_read_frame(a->fmt, a->pkt);
+            if (r == AVERROR_EOF) {
+                avcodec_send_packet(a->dec, NULL);
+                a->eof_sent = 1;
+                continue;
+            }
+            if (r < 0) { set_err(err, errlen, "read_frame", r); return -1; }
+            if (a->pkt->stream_index != a->stream) {
                 av_packet_unref(a->pkt);
-                set_err(err, errlen, "send_packet", r);
-                return -1;
+                continue;
             }
         }
+        r = avcodec_send_packet(a->dec, a->pkt);
+        if (r == AVERROR(EAGAIN)) {
+            /* The decoder wants a drained frame first: keep the packet and resend it on the next
+             * round. It used to be unreferenced and lost (audit F-28). */
+            a->pkt_pending = 1;
+            r = avcodec_receive_frame(a->dec, a->frame);
+            if (r == 0) return 0;
+            if (r == AVERROR_EOF) { a->drained = 1; return 1; }
+            if (r != AVERROR(EAGAIN)) { set_err(err, errlen, "receive_frame", r); return -1; }
+            continue;
+        }
         av_packet_unref(a->pkt);
+        a->pkt_pending = 0;
+        if (r < 0 && r != AVERROR_INVALIDDATA) {
+            set_err(err, errlen, "send_packet", r);
+            return -1;
+        }
     }
 }
 

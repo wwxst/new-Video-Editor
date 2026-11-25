@@ -38,6 +38,8 @@ pub struct ExportReport {
     pub duration: String,
     pub audio: Option<String>,
     pub renderer: RendererInfo,
+    /// Identity of the FFmpeg this export actually used (spec §4.5).
+    pub ffmpeg: arc_media::libav::RuntimeReport,
     pub warnings: Vec<String>,
 }
 
@@ -244,6 +246,8 @@ pub fn export(
     }
     warnings.dedup();
     let duration = rate.time_of_frame(to - from);
+    let mut ffmpeg = arc_media::libav::runtime_report();
+    ffmpeg.override_used |= arc_media::tools::override_used();
     Ok(ExportReport {
         output: spec.output.display().to_string(),
         encoder: enc.encoder,
@@ -258,6 +262,7 @@ pub fn export(
             adapter: renderer.adapter_info().to_string(),
             shader_hash: shader_hash(),
         },
+        ffmpeg,
         warnings,
     })
 }

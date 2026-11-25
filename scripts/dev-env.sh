@@ -30,13 +30,20 @@ case "$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')" in
 esac
 
 # 3. FFmpeg (LGPL, shared) for arc-media: headers + import libs for the libav shim, and its
-#    LGPL ffmpeg/ffprobe for subprocess jobs. Its bin/ goes first on PATH so the DLLs resolve and
-#    the GPL "essentials" CLI build is never picked up. See HANDOVER.md for the pinned build.
-if [ -z "$ARCLINE_FFMPEG_DIR" ] && [ -d "$HOME/.local/toolchains/ffmpeg-8.1-lgpl" ]; then
-  export ARCLINE_FFMPEG_DIR="$HOME/.local/toolchains/ffmpeg-8.1-lgpl"
+#    LGPL ffmpeg/ffprobe for subprocess jobs. The pinned 9.1 package is preferred; 8.1.3 stays
+#    installed for rollback (spec §5.5/§11). ARCLINE_FFMPEG_DIR overrides the choice.
+if [ -z "$ARCLINE_FFMPEG_DIR" ]; then
+  for d in "$HOME/.local/toolchains/ffmpeg-9.1-lgpl" \
+           "$HOME/.local/toolchains/ffmpeg-8.1-lgpl"; do
+    if [ -d "$d" ]; then
+      export ARCLINE_FFMPEG_DIR="$d"
+      break
+    fi
+  done
 fi
 if [ -n "$ARCLINE_FFMPEG_DIR" ]; then
   export PATH="$ARCLINE_FFMPEG_DIR/bin:$PATH"
+  echo "dev-env: FFmpeg = $(ffmpeg -version 2>/dev/null | head -1)" >&2
 else
   echo "dev-env: ARCLINE_FFMPEG_DIR not set; arc-media will not build (see HANDOVER.md)" >&2
 fi

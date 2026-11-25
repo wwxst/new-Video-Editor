@@ -12,6 +12,7 @@
  */
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavutil/avutil.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libswscale/swscale.h>
@@ -19,6 +20,17 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+
+/* Compile-time version pin (spec docs/specs/ffmpeg-9.1-upgrade.md §4.3). The shim is written for
+ * FFmpeg 9.x only; build.rs gives the friendlier message, this is the backstop. */
+#if LIBAVUTIL_VERSION_MAJOR != 61 || LIBAVCODEC_VERSION_MAJOR != 63 || \
+    LIBAVFORMAT_VERSION_MAJOR != 63 || LIBSWSCALE_VERSION_MAJOR != 10 || \
+    LIBSWRESAMPLE_VERSION_MAJOR != 7
+#error "arc_av requires FFmpeg 9.x headers (lavu 61, lavc 63, lavf 63, sws 10, swr 7); see docs/specs/ffmpeg-9.1-upgrade.md"
+#endif
+#if LIBAVCODEC_VERSION_INT < AV_VERSION_INT(63, 24, 100) || LIBAVFORMAT_VERSION_INT < AV_VERSION_INT(63, 16, 100)
+#error "arc_av requires FFmpeg 9.1 or newer within the 9.x series"
+#endif
 
 typedef struct ArcAv {
     AVFormatContext *fmt;
@@ -56,6 +68,42 @@ typedef struct ArcAvInfo {
     char codec[32];
     char pix_fmt[32];
 } ArcAvInfo;
+
+/* Run-time identity of the loaded libraries (spec §4.5). Signatures are part of the FFI. */
+typedef struct ArcAvRuntime {
+    unsigned build[5];    /* LIB*_VERSION_INT at compile time: avutil, avcodec, avformat, swscale, swresample */
+    unsigned runtime[5];  /* avutil_version(), avcodec_version(), ... at run time */
+    char license[5][48];  /* av*_license() */
+    char ident[64];       /* av_version_info(), e.g. "n9.1" */
+} ArcAvRuntime;
+
+int arc_av_abi_size(void) { return (int)sizeof(ArcAvInfo); }
+
+static void copy_str(char *dst, size_t len, const char *src) {
+    snprintf(dst, len, "%s", src ? src : "");
+}
+
+int arc_av_runtime(ArcAvRuntime *out) {
+    if (!out) return -1;
+    memset(out, 0, sizeof *out);
+    out->build[0] = LIBAVUTIL_VERSION_INT;
+    out->build[1] = LIBAVCODEC_VERSION_INT;
+    out->build[2] = LIBAVFORMAT_VERSION_INT;
+    out->build[3] = LIBSWSCALE_VERSION_INT;
+    out->build[4] = LIBSWRESAMPLE_VERSION_INT;
+    out->runtime[0] = avutil_version();
+    out->runtime[1] = avcodec_version();
+    out->runtime[2] = avformat_version();
+    out->runtime[3] = swscale_version();
+    out->runtime[4] = swresample_version();
+    copy_str(out->license[0], sizeof out->license[0], avutil_license());
+    copy_str(out->license[1], sizeof out->license[0], avcodec_license());
+    copy_str(out->license[2], sizeof out->license[0], avformat_license());
+    copy_str(out->license[3], sizeof out->license[0], swscale_license());
+    copy_str(out->license[4], sizeof out->license[0], swresample_license());
+    copy_str(out->ident, sizeof out->ident, av_version_info());
+    return 0;
+}
 
 static void set_err(char *err, int len, const char *what, int code) {
     if (!err || len <= 0) return;

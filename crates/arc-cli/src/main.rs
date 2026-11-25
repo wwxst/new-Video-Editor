@@ -289,11 +289,13 @@ fn run(cli: Cli) -> Result<String, Fail> {
             Ok(serde_json::to_string(&r).unwrap_or_default())
         }
         Cmd::Probe { media } => {
+            arc_media::tools::verify().map_err(|e| fail("ffmpeg_unavailable", e))?;
             reject_non_local(media)?;
             Ok(outcome_json(&arc_media::probe::import_check(media)).to_string())
         }
         Cmd::Import { path, media } => {
             use arc_media::probe::ImportOutcome;
+            arc_media::tools::verify().map_err(|e| fail("ffmpeg_unavailable", e))?;
             let mut commands = Vec::new();
             let mut outcomes = Vec::new();
             for m in media {
@@ -353,6 +355,7 @@ fn run(cli: Cli) -> Result<String, Fail> {
         } => {
             let codec = arc_media::encode::VideoCodec::parse(codec)
                 .ok_or_else(|| fail("invalid_value", "codec must be ffv1, h264, av1, or prores"))?;
+            arc_media::tools::verify().map_err(|e| fail("ffmpeg_unavailable", e))?;
             let project = match snapshot {
                 Some(s) => {
                     let bytes = std::fs::read(s).map_err(|e| fail("io_error", e))?;

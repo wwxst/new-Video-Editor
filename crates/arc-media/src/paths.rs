@@ -8,6 +8,8 @@
 //! so getting this wrong silently breaks NAS media while the import check (subprocess) still
 //! succeeds.
 
+use std::path::Path;
+
 /// Map a canonical Windows path to the plain form:
 /// - `\\?\UNC\server\share\x` → `\\server\share\x`
 /// - `\\?\C:\dir\x` → `C:\dir\x`
@@ -35,6 +37,27 @@ pub fn is_local_absolute(s: &str) -> bool {
     } else {
         s.starts_with('/')
     }
+}
+
+/// `file:<absolute path>` for an existing local file; `None` for anything else (missing, relative,
+/// URL, device namespace). This is the only form the shim and the CLI tools are given (spec §4.4).
+pub fn file_url(path: &Path) -> Option<String> {
+    let canon = std::fs::canonicalize(path).ok()?;
+    let s = normalize_verbatim(&canon.to_string_lossy());
+    is_local_absolute(&s).then(|| format!("file:{s}"))
+}
+
+/// `file:` URL for a path that may not exist yet but whose parent does (encoder output).
+pub fn output_file_url(path: &Path) -> Option<String> {
+    if let Some(url) = file_url(path) {
+        return Some(url);
+    }
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())?;
+    let canon = std::fs::canonicalize(parent).ok()?;
+    let mut full = canon;
+    full.push(path.file_name()?);
+    let s = normalize_verbatim(&full.to_string_lossy());
+    is_local_absolute(&s).then(|| format!("file:{s}"))
 }
 
 #[cfg(test)]
@@ -70,5 +93,21 @@ mod tests {
         assert!(!is_local_absolute(&normalize_verbatim(
             r"\\?\Volume{0000}\a.mkv"
         )));
+    }
+
+    #[test]
+    fn file_url_requires_an_existing_local_file() {
+        assert_eq!(file_url(Path::new("http://127.0.0.1:9/x.mp4")), None);
+        assert_eq!(file_url(Path::new(r"C:\does\not\exist\x.mkv")), None);
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = dir.path().join("a b.mkv");
+        std::fs::write(&p, b"x").expect("write");
+        let url = file_url(&p).expect("local file");
+        assert!(url.starts_with("file:"), "{url}");
+        assert!(url.ends_with("a b.mkv"), "{url}");
+
+        let out = dir.path().join("new output.mkv");
+        let url = output_file_url(&out).expect("output in an existing directory");
+        assert!(url.starts_with("file:") && url.ends_with("new output.mkv"), "{url}");
     }
 }

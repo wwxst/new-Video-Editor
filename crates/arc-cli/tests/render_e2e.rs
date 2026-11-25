@@ -106,6 +106,24 @@ fn render_is_frame_exact_with_audio() {
     assert_eq!(report["frames"], json!(50));
     assert_eq!(report["encoder"], json!("ffv1"));
     assert_eq!(report["duration"], json!("00:00:01:20"));
+    // Run-time identity block (spec §4.5 / AC-3).
+    assert_eq!(
+        report["ffmpeg"]["license"],
+        json!("LGPL version 2.1 or later")
+    );
+    assert_eq!(report["ffmpeg"]["override"], json!(false));
+    assert!(
+        report["ffmpeg"]["ident"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("9.1")),
+        "{report}"
+    );
+    assert_eq!(report["ffmpeg"]["libraries"]["avcodec"], json!("63.24.100"));
+    assert_eq!(
+        report["ffmpeg"]["build_id"].as_str().map(str::len),
+        Some(64),
+        "manifest sha256"
+    );
     assert!(
         report["warnings"].as_array().is_some_and(Vec::is_empty),
         "{report}"
@@ -133,6 +151,64 @@ fn render_is_frame_exact_with_audio() {
     assert!(got >= 48_000, "{got}");
     let rms = (buf.iter().map(|s| s * s).sum::<f32>() / buf.len() as f32).sqrt();
     assert!(rms > 0.05, "tone survives the mix and mux (rms {rms})");
+}
+
+#[test]
+fn av1_and_prores_exports_are_decodable() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let p = build(dir.path());
+    let ps = p.to_str().expect("utf8");
+
+    // AV1 through libsvtav1 (the only software AV1 encoder in the shipped profile).
+    let av1 = dir.path().join("out_av1.mkv");
+    let (code, stdout, err) = cli(
+        &[
+            "render",
+            ps,
+            "-o",
+            av1.to_str().expect("utf8"),
+            "--codec",
+            "av1",
+            "--from",
+            "00:00:00:00",
+            "--to",
+            "00:00:00:10",
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{stdout} {err}");
+    let r = j(&stdout);
+    let av1_encoder = r["encoder"].as_str().unwrap_or_default();
+    assert!(
+        ["av1_qsv", "av1_nvenc", "av1_amf", "libsvtav1"].contains(&av1_encoder),
+        "{av1_encoder} ({r})"
+    );
+    let mut d = VideoDecoder::open(&av1).expect("decode av1");
+    let f = d.frame_at(arc_core::Time::ZERO).expect("av1 frame");
+    assert_eq!((f.width, f.height), (320, 180));
+
+    // ProRes (prores_ks) is decodable by the same decoder.
+    let pro = dir.path().join("out_prores.mov");
+    let (code, stdout, err) = cli(
+        &[
+            "render",
+            ps,
+            "-o",
+            pro.to_str().expect("utf8"),
+            "--codec",
+            "prores",
+            "--from",
+            "00:00:00:00",
+            "--to",
+            "00:00:00:10",
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{stdout} {err}");
+    assert_eq!(j(&stdout)["encoder"], json!("prores_ks"));
+    let mut d = VideoDecoder::open(&pro).expect("decode prores");
+    let f = d.frame_at(arc_core::Time::ZERO).expect("prores frame");
+    assert_eq!((f.width, f.height), (320, 180));
 }
 
 #[test]

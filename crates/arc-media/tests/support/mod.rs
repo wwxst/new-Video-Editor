@@ -416,7 +416,7 @@ fn video_hash(v: &[u8]) -> String {
 }
 
 fn frame_time(rate: arc_core::Ratio, i: i64) -> arc_core::Time {
-    let frame = arc_core::Ratio::new(rate.den() as i64, rate.num() as i64);
+    let frame = arc_core::Ratio::new(rate.den() as i64, rate.num());
     match (arc_core::Time::new(i, 1), frame) {
         (Ok(t), Ok(r)) => t.checked_mul(r).unwrap_or(arc_core::Time::ZERO),
         _ => arc_core::Time::ZERO,
@@ -524,7 +524,7 @@ fn collect_entry(entry: &Entry) -> Value {
             if imports_ok {
                 let duration_samples = arc_core::time::sample_index(
                     p.duration,
-                    AUDIO_RATE as u32,
+                    AUDIO_RATE,
                     arc_core::time::Round::Floor,
                 )
                 .unwrap_or(0);

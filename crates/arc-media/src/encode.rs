@@ -142,6 +142,7 @@ fn trial(encoder: &str, codec: VideoCodec) -> bool {
 
 /// Pick the first candidate that is compiled in and actually encodes on this machine (cached).
 pub fn select_encoder(codec: VideoCodec) -> Result<String, EncodeError> {
+    tools::verify().map_err(EncodeError::Failed)?;
     static CACHE: OnceLock<Mutex<std::collections::HashMap<VideoCodec, Option<String>>>> =
         OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
@@ -192,8 +193,10 @@ impl std::fmt::Debug for Encoder {
 impl Encoder {
     pub fn start(spec: EncodeSpec) -> Result<Encoder, EncodeError> {
         let encoder = select_encoder(spec.codec)?;
-        let mut cmd = Command::new(tools::ffmpeg());
+        let ffmpeg = tools::ffmpeg_checked().map_err(EncodeError::Failed)?;
+        let mut cmd = Command::new(ffmpeg);
         cmd.args(["-hide_banner", "-v", "error", "-y"])
+            .args(["-protocol_whitelist", "pipe"])
             .args(["-f", "rawvideo", "-pix_fmt", "rgba"])
             .args(["-s", &format!("{}x{}", spec.width, spec.height)])
             .args(["-framerate", &spec.frame_rate.to_string()])
@@ -201,7 +204,10 @@ impl Encoder {
         let has_audio = match &spec.audio {
             AudioInput::None => false,
             AudioInput::Wav(p) => {
-                cmd.arg("-i").arg(p);
+                let url = crate::paths::file_url(p).ok_or_else(|| {
+                    EncodeError::Failed(format!("audio input is not a local file: {}", p.display()))
+                })?;
+                cmd.args(["-protocol_whitelist", "file", "-i"]).arg(url);
                 true
             }
             AudioInput::Lavfi(src) => {
@@ -239,7 +245,13 @@ impl Encoder {
         if let Some(ac) = &audio_codec {
             cmd.args(["-c:a", ac]);
         }
-        cmd.arg(&spec.output)
+        let out_url = crate::paths::output_file_url(&spec.output).ok_or_else(|| {
+            EncodeError::Failed(format!(
+                "output is not a local path in an existing directory: {}",
+                spec.output.display()
+            ))
+        })?;
+        cmd.arg(out_url)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());

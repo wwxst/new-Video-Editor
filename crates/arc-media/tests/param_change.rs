@@ -22,8 +22,10 @@ fn run_ffmpeg(dir: &Path, args: &[&str]) {
     );
 }
 
-/// Experiment J: MPEG-2 320x180 for 2 s, then 640x360 for 2 s, concatenated into one MKV.
-fn resolution_change_mkv(dir: &Path) -> PathBuf {
+/// Experiment J: MPEG-2 320x180 for 2 s, then 640x360 for 2 s, concatenated as an MPEG-TS
+/// elementary stream (byte concatenation keeps working with the shipped build, which disables the
+/// `concat` demuxer/protocol for security; spec S2/S3).
+fn resolution_change_ts(dir: &Path) -> PathBuf {
     run_ffmpeg(
         dir,
         &[
@@ -35,7 +37,9 @@ fn resolution_change_mkv(dir: &Path) -> PathBuf {
             "mpeg2video",
             "-q:v",
             "2",
-            "a.mkv",
+            "-f",
+            "mpegts",
+            "a.ts",
         ],
     );
     run_ffmpeg(
@@ -49,17 +53,16 @@ fn resolution_change_mkv(dir: &Path) -> PathBuf {
             "mpeg2video",
             "-q:v",
             "2",
-            "b.mkv",
+            "-f",
+            "mpegts",
+            "b.ts",
         ],
     );
-    std::fs::write(dir.join("list.txt"), "file 'a.mkv'\nfile 'b.mkv'\n").expect("list");
-    run_ffmpeg(
-        dir,
-        &[
-            "-f", "concat", "-safe", "0", "-i", "list.txt", "-c", "copy", "-map", "0", "change.mkv",
-        ],
-    );
-    dir.join("change.mkv")
+    let mut bytes = std::fs::read(dir.join("a.ts")).expect("a.ts");
+    bytes.extend_from_slice(&std::fs::read(dir.join("b.ts")).expect("b.ts"));
+    let path = dir.join("change.ts");
+    std::fs::write(&path, bytes).expect("write");
+    path
 }
 
 /// The stream reports 320x180. Frames that arrive as 640x360 must be scaled into the buffer the
@@ -67,7 +70,7 @@ fn resolution_change_mkv(dir: &Path) -> PathBuf {
 #[test]
 fn resolution_change_is_scaled_to_the_reported_size() {
     let dir = tempfile::tempdir().expect("tmp");
-    let path = resolution_change_mkv(dir.path());
+    let path = resolution_change_ts(dir.path());
     let mut d = VideoDecoder::open(&path).expect("open");
     assert_eq!((d.info().width, d.info().height), (320, 180));
     let rate = FrameRate::Fps30;

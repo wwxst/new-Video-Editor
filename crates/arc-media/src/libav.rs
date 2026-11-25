@@ -5,8 +5,11 @@
 #![allow(unsafe_code)]
 
 use arc_core::time::{Ratio, Round, Time};
+use serde::Serialize;
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_char, c_int};
 use std::path::Path;
+use std::sync::OnceLock;
 
 #[repr(C)]
 struct ArcAv {
@@ -29,6 +32,180 @@ struct RawInfo {
     vfr: c_int,
     codec: [c_char; 32],
     pix_fmt: [c_char; 32],
+}
+
+#[repr(C)]
+struct RawRuntime {
+    build: [u32; 5],
+    runtime: [u32; 5],
+    license: [[c_char; 48]; 5],
+    ident: [c_char; 64],
+}
+
+/// Names of the five libraries, in the shim's `ArcAvRuntime` order.
+pub const LIBRARIES: [&str; 5] = ["avutil", "avcodec", "avformat", "swscale", "swresample"];
+
+/// D1: the shipped build is LGPL v2.1 or later (no `--enable-version3`).
+pub const APPROVED_LICENSE: &str = "LGPL version 2.1 or later";
+
+/// Identity of the FFmpeg the process is actually using; computed once (spec §4.5).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RuntimeReport {
+    pub ident: String,
+    /// library name → "major.minor.micro" of the loaded DLL
+    pub libraries: BTreeMap<String, String>,
+    pub license: String,
+    /// SHA-256 of `third_party/ffmpeg/manifest.json`
+    pub build_id: String,
+    #[serde(rename = "override")]
+    pub override_used: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+fn version_string(v: u32) -> String {
+    format!("{}.{}.{}", v >> 16, (v >> 8) & 0xFF, v & 0xFF)
+}
+
+/// Pure comparison used by the runtime check and its unit tests.
+fn validate_runtime(
+    build: &[u32; 5],
+    runtime: &[u32; 5],
+    licenses: &[String; 5],
+) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (i, name) in LIBRARIES.iter().enumerate() {
+        let (b, r) = (build[i], runtime[i]);
+        let (bm, bmin) = (b >> 16, (b >> 8) & 0xFF);
+        let (rm, rmin) = (r >> 16, (r >> 8) & 0xFF);
+        if rm != bm {
+            problems.push(format!(
+                "{name}: run-time major {rm} does not match build major {bm} ({} vs {})",
+                version_string(r),
+                version_string(b)
+            ));
+        } else if rmin < bmin {
+            problems.push(format!(
+                "{name}: run-time {} is older than build {}",
+                version_string(r),
+                version_string(b)
+            ));
+        }
+        let lic = &licenses[i];
+        let lower = lic.to_ascii_lowercase();
+        if lower.contains("nonfree") {
+            problems.push(format!("{name}: nonfree licence {lic:?}"));
+        } else if lower.contains("gpl version") && !lower.contains("lgpl") {
+            problems.push(format!("{name}: GPL (not LGPL) licence {lic:?}"));
+        } else if lic != APPROVED_LICENSE {
+            problems.push(format!(
+                "{name}: licence {lic:?} is not the approved {APPROVED_LICENSE:?} (decision D1)"
+            ));
+        }
+    }
+    problems
+}
+
+const BUILD_IDENT: &str = match option_env!("ARC_FFMPEG_BUILD_IDENT") {
+    Some(v) => v,
+    None => "unpinned",
+};
+const MANIFEST_SHA256: &str = match option_env!("ARC_FFMPEG_MANIFEST_SHA256") {
+    Some(v) => v,
+    None => "unpinned",
+};
+
+struct RuntimeState {
+    report: RuntimeReport,
+    refusal: Option<String>,
+}
+
+fn runtime_state() -> &'static RuntimeState {
+    static STATE: OnceLock<RuntimeState> = OnceLock::new();
+    STATE.get_or_init(load_runtime)
+}
+
+fn load_runtime() -> RuntimeState {
+    let override_allowed = std::env::var("ARCLINE_ALLOW_ANY_FFMPEG").as_deref() == Ok("1");
+    let mut raw = RawRuntime {
+        build: [0; 5],
+        runtime: [0; 5],
+        license: [[0; 48]; 5],
+        ident: [0; 64],
+    };
+    // SAFETY: raw is a valid out-struct matching ArcAvRuntime's layout.
+    let r = unsafe { arc_av_runtime(&mut raw) };
+    let mut problems = Vec::new();
+    if r != 0 {
+        problems.push("arc_av_runtime failed".to_string());
+    }
+    let abi = unsafe { arc_av_abi_size() };
+    if abi != std::mem::size_of::<RawInfo>() as c_int {
+        problems.push(format!(
+            "ArcAvInfo ABI size {abi} does not match the Rust mirror ({})",
+            std::mem::size_of::<RawInfo>()
+        ));
+    }
+    let licenses: [String; 5] = std::array::from_fn(|i| c_str(&raw.license[i]));
+    problems.extend(validate_runtime(&raw.build, &raw.runtime, &licenses));
+    let ident = c_str(&raw.ident);
+    if BUILD_IDENT != "unpinned" && !ident.is_empty() && ident != BUILD_IDENT {
+        problems.push(format!(
+            "loaded FFmpeg ident {ident:?} does not match the build ident {BUILD_IDENT:?}"
+        ));
+    }
+    let libraries = LIBRARIES
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.to_string(), version_string(raw.runtime[i])))
+        .collect();
+    let approved_license = licenses
+        .iter()
+        .find(|l| *l == APPROVED_LICENSE)
+        .cloned()
+        .unwrap_or_else(|| licenses[0].clone());
+    let mut report = RuntimeReport {
+        ident,
+        libraries,
+        license: approved_license,
+        build_id: MANIFEST_SHA256.to_string(),
+        override_used: false,
+        warnings: Vec::new(),
+    };
+    let refusal = if problems.is_empty() {
+        None
+    } else if override_allowed {
+        report.override_used = true;
+        report.warnings = problems
+            .iter()
+            .map(|p| format!("ARCLINE_ALLOW_ANY_FFMPEG override: {p}"))
+            .collect();
+        None
+    } else {
+        Some(problems.join("; "))
+    };
+    RuntimeState { report, refusal }
+}
+
+/// Check the loaded FFmpeg once per process; the decoders refuse to open if it is not the pinned,
+/// approved build (spec §4.5).
+fn ensure_runtime() -> Result<(), MediaError> {
+    match &runtime_state().refusal {
+        None => Ok(()),
+        Some(reason) => Err(MediaError::Decode(format!(
+            "ffmpeg runtime refused: {reason}"
+        ))),
+    }
+}
+
+/// The runtime identity recorded in export reports.
+pub fn runtime_report() -> RuntimeReport {
+    runtime_state().report.clone()
+}
+
+/// True when the run-time check or tool verification was overridden in this process.
+pub fn runtime_override_used() -> bool {
+    runtime_state().report.override_used
 }
 
 unsafe extern "C" {
@@ -60,6 +237,8 @@ unsafe extern "C" {
         errlen: c_int,
     ) -> c_int;
     fn arc_av_close(a: *mut ArcAv);
+    fn arc_av_runtime(out: *mut RawRuntime) -> c_int;
+    fn arc_av_abi_size() -> c_int;
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -109,20 +288,10 @@ impl Drop for Handle {
 
 /// Build the `file:` URL for a local media file. Document asset paths are untrusted input, so only
 /// canonical local files are ever passed to libav (audit F-09, spec §4.4/S1).
-fn file_url(path: &Path) -> Result<CString, MediaError> {
-    let canon = std::fs::canonicalize(path).map_err(|_| MediaError::Path)?;
-    // Map `\\?\C:\...` to a drive path and `\\?\UNC\server\...` back to `\\server\...`; a
-    // verbatim prefix left in place, or stripped to `UNC\...`, makes FFmpeg treat NAS media as a
-    // relative path.
-    let s = crate::paths::normalize_verbatim(&canon.to_string_lossy());
-    if !crate::paths::is_local_absolute(&s) {
-        return Err(MediaError::Path);
-    }
-    CString::new(format!("file:{s}")).map_err(|_| MediaError::Path)
-}
-
 fn open(path: &Path, kind: c_int) -> Result<(Handle, StreamInfo), MediaError> {
-    let p = file_url(path)?;
+    ensure_runtime()?;
+    let url = crate::paths::file_url(path).ok_or(MediaError::Path)?;
+    let p = CString::new(url).map_err(|_| MediaError::Path)?;
     let mut err = [0 as c_char; 256];
     let mut h: *mut ArcAv = std::ptr::null_mut();
     // SAFETY: valid NUL-terminated path, out-pointer, and error buffer of the stated length.
@@ -341,5 +510,47 @@ impl AudioDecoder {
         let start = arc_core::time::sample_index(t, self.rate, Round::Floor)
             .map_err(|e| MediaError::Decode(e.to_string()))?;
         self.read(start, dst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(major: u32, minor: u32, micro: u32) -> u32 {
+        (major << 16) | (minor << 8) | micro
+    }
+
+    fn licenses() -> [String; 5] {
+        std::array::from_fn(|_| APPROVED_LICENSE.to_string())
+    }
+
+    #[test]
+    fn runtime_check_accepts_the_pinned_build() {
+        let b = [v(61, 19, 100), v(63, 24, 100), v(63, 16, 100), v(10, 5, 100), v(7, 6, 100)];
+        assert!(validate_runtime(&b, &b, &licenses()).is_empty());
+        // A later 9.x minor is fine (ABI rule within a major).
+        let r = [v(61, 20, 100), v(63, 26, 100), v(63, 17, 100), v(10, 6, 100), v(7, 7, 100)];
+        assert!(validate_runtime(&b, &r, &licenses()).is_empty());
+    }
+
+    #[test]
+    fn runtime_check_refuses_major_minor_and_licence_mismatches() {
+        let b = [v(61, 19, 100), v(63, 24, 100), v(63, 16, 100), v(10, 5, 100), v(7, 6, 100)];
+        let mut r = b;
+        r[1] = v(62, 24, 100);
+        assert!(validate_runtime(&b, &r, &licenses()).iter().any(|p| p.contains("major")));
+        let mut r = b;
+        r[4] = v(7, 5, 100);
+        assert!(validate_runtime(&b, &r, &licenses()).iter().any(|p| p.contains("older")));
+        let mut l = licenses();
+        l[2] = "GPL version 3 or later".into();
+        assert!(validate_runtime(&b, &b, &l).iter().any(|p| p.contains("GPL")));
+        let mut l = licenses();
+        l[0] = "nonfree software".into();
+        assert!(validate_runtime(&b, &b, &l).iter().any(|p| p.contains("nonfree")));
+        let mut l = licenses();
+        l[3] = "LGPL version 3 or later".into();
+        assert!(validate_runtime(&b, &b, &l).iter().any(|p| p.contains("approved")));
     }
 }

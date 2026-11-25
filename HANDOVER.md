@@ -212,10 +212,10 @@ Fold these into docs/02–06 (or an ADR) when convenient; none contradicts an AD
 2. **MSVC target untested.** The shim should compile with `cl /std:c11` (compound literals are used); `build.rs`
    passes `-std=c11` only where supported — add `/std:c11` for MSVC if needed.
 3. **CI exists** (`.github/workflows/ci.yml`, ADR-0011): `core` on ubuntu/windows/macos (Rust 1.95 + clippy,
-   FFmpeg-free crates) and `media` on Windows (pinned FFmpeg 9.1 built from the in-repo recipe and cached,
-   full workspace build/test/clippy, `ARCLINE_FORCE_FALLBACK_ADAPTER=1`). The first GitHub run is
-   unobserved from the development environment (`gh` unauthenticated); check the Actions tab. The
-   hardware-encoder tests skip themselves on machines without a GPU.
+   FFmpeg-free crates) is green on GitHub (run 2); `media` on Windows builds the pinned FFmpeg 9.1 from
+   the in-repo recipe (cached) and runs the full workspace build/test/clippy with
+   `ARCLINE_FORCE_FALLBACK_ADAPTER=1`. The hardware-encoder tests skip themselves on machines without a
+   GPU. Run links and status: [Phase B closure](reports/phase-b-exit-2026-11-25.md) §3.2.
 4. **GPU tests need an adapter.** They ran on Intel integrated graphics here; on CI use the fallback adapter.
 5. **Embedding PoC manual items open:** keyboard focus round-trip, IME placement, DPI change across monitors,
    Electron host (Electron not installed).

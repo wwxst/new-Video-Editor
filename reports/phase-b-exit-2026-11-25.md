@@ -6,8 +6,8 @@ error convergence, and CI. Documentation: `docs/10-roadmap.md` §4 and `HANDOVER
 
 **State:** full workspace `cargo test` green (see §5 for the exact count), `cargo build
 --workspace --all-targets` exit 0, the 8.1.3-vs-9.1 differential still 0 unexplained, and the CI
-workflow is committed. The CI has **not been observed on GitHub**: `gh` is not installed and no
-token is available in this environment (§4.3 explains how to check it).
+workflow is live on GitHub: the **core matrix is green** on Windows, Linux and macOS (run 2), while
+the Windows `media` job is still building the pinned FFmpeg package (link and status in §3.2).
 
 ## 1. Goal A — HEVC export
 
@@ -108,10 +108,27 @@ macOS jobs cover the FFmpeg-free crates, which is exactly what HANDOVER §6.3 pl
 encoder tests now skip themselves when the capability probe finds no encoder, because a GPU-less
 runner has no `h264_*`/`hevc_*` encoder in the shipped build (no software H.264/HEVC by posture).
 
-### 3.2 Local verification (no GitHub authentication here)
+### 3.2 First real runs on GitHub
 
-`gh` is not installed and no token is available, so the workflow could not be dispatched from this
-machine. The core-job steps were executed locally instead (rustc 1.100.0, Windows GNU):
+The repository is public, so the Actions API is readable without a token (job logs are not: they
+need repository admin rights). Runs, `https://github.com/wwxst/new-Video-Editor/actions`:
+
+| Run | Commit | Result |
+|---|---|---|
+| [#1](https://github.com/wwxst/new-Video-Editor/actions/runs/45643845772) | `a394f37` | `core (windows)` success; `core (ubuntu)`, `core (macos)` failed in `cargo test -p arc-core`; `media` failed in the FFmpeg build step |
+| [#2](https://github.com/wwxst/new-Video-Editor/actions/runs/45645526473) | `5a1a3ac` | **`core` success on windows, ubuntu and macos**; `media` in progress (FFmpeg 9.1 build, ~30–60 min cold, cached afterwards) |
+
+Run 1 diagnosed two real problems, both fixed in `5a1a3ac`:
+
+- the media job's MSYS2 package list was missing the external libraries the pinned profile enables
+  (`dav1d`, `svt-av1`, `libvpl`, `ffnvcodec-headers`, `amf-headers`, `zlib`), so `configure` could
+  not run;
+- two `arc-core` lock tests assumed the Windows strong `SessionLock`. `second_open_is_locked` is now
+  `#[cfg(windows)]`, and `create_over_locked_project_is_refused_without_touching_it` accepts
+  `Locked` on Windows or `Exists` elsewhere while keeping its container-integrity assertions on all
+  platforms.
+
+Local verification of the same core-job steps (rustc 1.100.0, Windows GNU):
 
 | Step | Result |
 |---|---|
@@ -121,9 +138,9 @@ machine. The core-job steps were executed locally instead (rustc 1.100.0, Window
 | `cargo clippy -p arc-core -p arc-audio -p arc-render --all-targets` | exit 0 (pre-existing lint warnings only) |
 | YAML | `.github/workflows/ci.yml` parses; 2 jobs, 3-OS matrix, 8 media steps |
 
-The media job's only CI-specific pieces are the FFmpeg build (recipe already rehearsed for the
-9.1 package, cached afterwards) and the WARP fallback; the suite it runs is the same full suite
-recorded in §5.
+The media job's only CI-specific pieces are the FFmpeg build (the recipe that produced the local 9.1
+package, cached afterwards) and the WARP fallback; the suite it runs is the same full suite recorded
+in §5. Its first cold build is the long pole; the result is recorded in the run link above.
 
 ### 3.3 How to see the real run
 
@@ -169,3 +186,5 @@ The five new tests over the previous batch's 110 are `arc-media/tests/malformed.
 | `05182d1` | HEVC export (`feat(media,cli)`), probe + typed error, ffprobe e2e |
 | `5fcc28b` | malformed corpus, truncation + dimension convergence, mixed-media export |
 | `ea4b0ce` | CI workflow and hardware-test skip policy |
+| `a394f37` | MSYS2 archive/text tools for the FFmpeg recipe |
+| `5a1a3ac` | FFmpeg build dependencies + the two platform lock-test fixes (run 1 → run 2) |

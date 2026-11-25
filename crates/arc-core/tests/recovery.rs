@@ -8,6 +8,7 @@ use arc_core::ids::{AssetId, ClipId, EffectId, TrackId};
 use arc_core::journal::Durability;
 use arc_core::model::{AssetKind, TrackKind};
 use arc_core::runtime::EngineHost;
+use arc_core::store::ProjectPaths;
 use arc_core::{Command, FrameRate, TimeInput};
 use common::*;
 use std::sync::Arc;
@@ -171,6 +172,162 @@ fn create_refuses_existing_project_unless_overwrite() {
     assert_eq!(host.published().project.meta.name, "PROJECT B");
     assert_eq!(host.published().revision, 0);
     host.shutdown();
+}
+
+/// Audit F-05 (experiment C2): a sidecar left by an unsaved session of project A must not be
+/// recovered as project B when B is created at the same path after the container was deleted.
+#[test]
+fn create_does_not_resurrect_a_stale_sidecar() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("stale.arcline");
+
+    // Session A: unsaved edit leaves snapshot-1 for PROJECT A.
+    let a = EngineHost::create(
+        &path,
+        arc_core::model::Project::new(
+            "PROJECT A",
+            FrameRate::Fps30,
+            arc_core::model::Resolution { w: 640, h: 360 },
+        ),
+        catalog(),
+        Durability::Default,
+        false,
+    )
+    .expect("create A");
+    apply(
+        &a,
+        vec![Command::ProjectRename {
+            name: "A saved".into(),
+        }],
+    );
+    a.save().expect("save A");
+    apply(
+        &a,
+        vec![Command::ProjectRename {
+            name: "A unsaved".into(),
+        }],
+    );
+    drop(a);
+    assert!(ProjectPaths::new(&path).sidecar.join("snapshot-1.json").exists());
+
+    // The user deletes the container; the sidecar survives.
+    std::fs::remove_file(&path).expect("delete container");
+
+    // An agent creates PROJECT B at the same path and also leaves without saving.
+    let b = EngineHost::create(
+        &path,
+        arc_core::model::Project::new(
+            "PROJECT B",
+            FrameRate::Fps30,
+            arc_core::model::Resolution { w: 640, h: 360 },
+        ),
+        catalog(),
+        Durability::Default,
+        false,
+    )
+    .expect("create B");
+    apply(
+        &b,
+        vec![Command::ProjectRename {
+            name: "B unsaved".into(),
+        }],
+    );
+    drop(b);
+
+    // Reopening must be PROJECT B, not resurrected PROJECT A.
+    let c = EngineHost::open(&path, catalog(), Durability::Default).expect("open");
+    assert_eq!(c.published().project.meta.name, "B unsaved");
+    assert_eq!(c.published().revision, 1);
+    c.shutdown();
+
+    // The stale sidecar was moved aside, never deleted.
+    let entries: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    assert!(
+        entries
+            .iter()
+            .any(|n| n.contains(".stale-") && n.starts_with("stale.arcline.autosave")),
+        "{entries:?}"
+    );
+}
+
+/// Audit F-05: when the container identifies a different project than the sidecar snapshots, the
+/// sidecar is not replayed (and the journal that belongs to the foreign project is not applied).
+#[test]
+fn snapshots_from_another_project_are_ignored() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let a_path = dir.path().join("a.arcline");
+    let b_path = dir.path().join("b.arcline");
+
+    // PROJECT A saves revision 1, then dies with unsaved revision 2 in its sidecar.
+    let a = EngineHost::create(
+        &a_path,
+        arc_core::model::Project::new(
+            "PROJECT A",
+            FrameRate::Fps30,
+            arc_core::model::Resolution { w: 640, h: 360 },
+        ),
+        catalog(),
+        Durability::Default,
+        false,
+    )
+    .expect("create A");
+    apply(
+        &a,
+        vec![Command::TrackAdd {
+            id: Some(track()),
+            kind: TrackKind::Video,
+            name: None,
+            index: None,
+        }],
+    );
+    a.save().expect("save A");
+    apply(
+        &a,
+        vec![Command::ProjectRename {
+            name: "A unsaved".into(),
+        }],
+    );
+    drop(a);
+    let stale_sidecar = ProjectPaths::new(&a_path).sidecar;
+    assert!(stale_sidecar.join("snapshot-1.json").exists());
+    assert!(stale_sidecar.join("journal-1.bin").exists());
+
+    // PROJECT B is saved cleanly elsewhere, then its container replaces A's file while A's
+    // sidecar is still there.
+    let b = EngineHost::create(
+        &b_path,
+        arc_core::model::Project::new(
+            "PROJECT B",
+            FrameRate::Fps30,
+            arc_core::model::Resolution { w: 640, h: 360 },
+        ),
+        catalog(),
+        Durability::Default,
+        false,
+    )
+    .expect("create B");
+    apply(
+        &b,
+        vec![Command::TrackAdd {
+            id: Some(track()),
+            kind: TrackKind::Video,
+            name: None,
+            index: None,
+        }],
+    );
+    b.save().expect("save B");
+    b.shutdown();
+    std::fs::copy(&b_path, &a_path).expect("replace container");
+
+    let opened = EngineHost::open(&a_path, catalog(), Durability::Default).expect("open");
+    assert_eq!(opened.published().project.meta.name, "PROJECT B");
+    assert_eq!(opened.published().revision, 1);
+    assert_eq!(opened.published().project.sequence().map(|s| s.tracks.len()), Some(1));
+    opened.shutdown();
 }
 
 /// Audit F-01 (experiment F): a journal record that decodes but fails replay validation must not

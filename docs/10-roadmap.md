@@ -107,7 +107,8 @@ the [Phase B closure report](../reports/phase-b-exit-2026-11-25.md))
   `MediaError`s; a mixed good/broken export completes with the broken asset named as unavailable
   (`render_e2e::mixed_media_export_survives_an_unreadable_asset`). The quarantine branch itself is
   covered by `arc-media/tests/quarantine.rs`: a generated stub tool crashes (NTSTATUS 0xC0000005),
-  hangs (killed at the 20 s probe timeout) and prints garbage, and the check returns
+  hangs (killed at the 20 s probe timeout) and prints garbage in **both the probe and the decode
+  phase**, and the check returns
   `Quarantined`/`Offline` in bounded time while real media still imports in the same process. A
   *real* crashing-media fixture (fuzzed decoder output) remains future work.
 - **Met** — Windows FFmpeg LGPL build pipeline pinned in the repo (`third_party/ffmpeg/`, manifest

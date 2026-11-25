@@ -232,7 +232,7 @@ fn decode_shortfall(
         .map(|t| (t.to_f64_lossy() * 1_000_000.0) as i64)
         .unwrap_or(0);
     let duration_us = (duration.to_f64_lossy() * 1_000_000.0) as i64;
-    let expected_us = (duration_us - seek_us).max(0).min(1_000_000);
+    let expected_us = (duration_us - seek_us).clamp(0, 1_000_000);
     if expected_us < 100_000 {
         return None; // shorter than 0.1 s: not enough signal to judge
     }

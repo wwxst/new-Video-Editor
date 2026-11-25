@@ -107,7 +107,7 @@ arcline-cli timeline <p>                    text timeline (docs/schema/timeline-
 arcline-cli apply <p> [--file f.json]       JSON command batch from file/stdin, then save
 arcline-cli probe <media>                   subprocess import check → ok | quarantined | offline
 arcline-cli import <p> <media...>           import check + asset.import, paths relative to the project
-arcline-cli render <p> -o out --codec ffv1|h264|av1|prores [--from TC --to TC] [--snapshot doc.json]
+arcline-cli render <p> -o out --codec ffv1|h264|av1|prores|dnxhd [--from TC --to TC] [--snapshot doc.json]
 arcline-cli rpc [--client id]               JSON-RPC 2.0 session on stdio
 arcline [--embed-parent HWND --embed-channel stdio] [--poc-seconds N]
 ```

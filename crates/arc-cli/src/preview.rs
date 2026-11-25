@@ -235,6 +235,11 @@ impl PreviewEngine {
         self.stats.clone()
     }
 
+    /// GPUs adapter in use (diagnostics and the C3 benchmark report).
+    pub fn adapter_info(&self) -> &str {
+        self.renderer.adapter_info()
+    }
+
     /// Decoded-source memory budget; larger frames therefore cache fewer entries.
     pub fn set_cache_budget(&mut self, bytes: u64) {
         self.budget_bytes = bytes.max(1);

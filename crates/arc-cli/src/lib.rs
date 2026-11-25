@@ -9,4 +9,5 @@ pub mod inspect;
 pub mod media;
 pub mod preview;
 pub mod preview_scheduler;
+pub mod preview_transport;
 pub mod rpc;

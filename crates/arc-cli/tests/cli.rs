@@ -97,6 +97,28 @@ fn new_apply_describe_timeline_undo() {
     assert_eq!(d["clips"].as_array().map(Vec::len), Some(1));
 }
 
+/// Audit F-04: `new` must not replace an existing project by accident, and the lock failure must be
+/// reported as `project_locked` (not `io_error`).
+#[test]
+fn new_refuses_existing_project_and_overwrite_opts_in() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let p = dir.path().join("dup.arcline");
+    let ps = p.to_str().expect("utf8");
+    let (code, out) = cli(&["new", ps, "--name", "PROJECT A"], None);
+    assert_eq!(code, 0, "{out}");
+
+    let (code, out) = cli(&["new", ps, "--name", "PROJECT B"], None);
+    assert_eq!(code, 2, "{out}");
+    assert_eq!(j(&out)["error"]["kind"], json!("project_exists"));
+    let (code, out) = cli(&["describe", ps], None);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(j(&out)["project"]["name"], json!("PROJECT A"));
+
+    let (code, out) = cli(&["new", ps, "--name", "PROJECT B", "--overwrite"], None);
+    assert_eq!(code, 0, "{out}");
+    assert_eq!(j(&out)["project"]["name"], json!("PROJECT B"));
+}
+
 #[test]
 fn usage_and_frame_rate_errors() {
     let dir = tempfile::tempdir().expect("tmp");

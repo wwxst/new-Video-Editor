@@ -44,6 +44,7 @@ fn create_edit_save_reopen() {
         project(FrameRate::Fps30),
         catalog(),
         Durability::Default,
+        false,
     )
     .expect("create");
     host.apply(rename("First")).expect("edit");
@@ -69,6 +70,7 @@ fn second_open_is_locked() {
         project(FrameRate::Fps30),
         catalog(),
         Durability::Default,
+        false,
     )
     .expect("create");
     let err = EngineHost::open(&path, catalog(), Durability::Default).expect_err("locked");
@@ -98,6 +100,7 @@ fn forced_kill_child() {
         project(FrameRate::Fps30),
         catalog(),
         Durability::Default,
+        false,
     )
     .expect("create");
     for i in 0..n {
@@ -145,6 +148,7 @@ fn torn_journal_tail_is_discarded_and_kept_for_support() {
         project(FrameRate::Fps30),
         catalog(),
         Durability::Default,
+        false,
     )
     .expect("create");
     host.apply(rename("ok-1")).expect("1");
@@ -172,6 +176,7 @@ fn acknowledgement_and_notifications() {
         project(FrameRate::Fps30),
         catalog(),
         Durability::Durable,
+        false,
     )
     .expect("create");
     let events = host.subscribe();

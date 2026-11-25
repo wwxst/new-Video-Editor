@@ -146,6 +146,43 @@ fn session_semantics() {
     assert_eq!(ip["error"]["code"], json!(-32602));
 }
 
+/// Audit F-04: creation takes the lock before writing and refuses an existing container unless
+/// `create.overwrite` is true; both map to stable error kinds.
+#[test]
+fn create_refuses_locked_and_existing_projects() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("lock.arcline");
+    let create = |name: &str| {
+        json!({"path": path, "create": {"name": name, "frame_rate": "30", "resolution": [160, 90]}})
+    };
+    let mut a = Rpc::start();
+    a.ok("project.open", create("PROJECT A"));
+    a.ok("project.save", json!({}));
+
+    let mut b = Rpc::start();
+    assert_eq!(b.kind("project.open", create("PROJECT B")), "project_locked");
+    let mut overwrite = create("PROJECT B");
+    overwrite["create"]["overwrite"] = json!(true);
+    assert_eq!(
+        b.kind("project.open", overwrite),
+        "project_locked",
+        "overwrite must never break another session's lock"
+    );
+
+    drop(a); // kill the session; the lock is released with the process
+    let mut c = Rpc::start();
+    assert_eq!(
+        c.kind("project.open", create("PROJECT B")),
+        "project_exists"
+    );
+    let mut overwrite = create("PROJECT B");
+    overwrite["create"]["overwrite"] = json!(true);
+    let r = c.ok("project.open", overwrite);
+    assert_eq!(r["summary"]["project"]["name"], json!("PROJECT B"));
+    assert_eq!(r["revision"], json!(0));
+    c.ok("project.save", json!({}));
+}
+
 #[test]
 fn render_job_runs_out_of_process() {
     let dir = tempfile::tempdir().expect("tmp");

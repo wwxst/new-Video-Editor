@@ -46,6 +46,10 @@ enum Cmd {
         /// Resolution WxH
         #[arg(long, default_value = "1920x1080")]
         res: String,
+        /// Replace an existing project file (refused by default; never replaces a project that is
+        /// open in another session)
+        #[arg(long)]
+        overwrite: bool,
     },
     /// Print the project.describe summary (JSON)
     Describe {
@@ -212,11 +216,26 @@ fn run(cli: Cli) -> Result<String, Fail> {
             name,
             fps,
             res,
+            overwrite,
         } => {
             let rate = FrameRate::parse(fps).map_err(|e| Fail::from(CommandError::from(e)))?;
             let project = Project::new(name, rate, parse_resolution(res)?);
-            let host = EngineHost::create(path, project, arc_render::builtin::catalog(), d)
-                .map_err(|e| fail("io_error", e))?;
+            let host = EngineHost::create(
+                path,
+                project,
+                arc_render::builtin::catalog(),
+                d,
+                *overwrite,
+            )
+            .map_err(|e| match e {
+                arc_core::runtime::HostError::Store(arc_core::store::StoreError::Locked(_)) => {
+                    fail("project_locked", &e)
+                }
+                arc_core::runtime::HostError::Store(arc_core::store::StoreError::Exists(_)) => {
+                    fail("project_exists", &e)
+                }
+                other => fail("io_error", other),
+            })?;
             let p = host.published();
             let out = inspect::describe(&p.project, p.revision, false);
             finish(host)?;

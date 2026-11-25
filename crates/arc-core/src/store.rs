@@ -25,6 +25,8 @@ pub enum StoreError {
     Io { path: PathBuf, source: io::Error },
     #[error("project is open in another process ({0})")]
     Locked(PathBuf),
+    #[error("a project already exists at {0}")]
+    Exists(PathBuf),
     #[error("not an Arcline project: {0}")]
     BadContainer(String),
     #[error("checksum mismatch in {0}")]
@@ -337,15 +339,23 @@ fn latest_snapshot(paths: &ProjectPaths) -> Option<(u64, Project)> {
 
 impl ProjectStore {
     /// Create a new project on disk and open it.
+    ///
+    /// The session lock is taken **before** anything is written (audit F-04), and an existing
+    /// container is refused unless `overwrite` is set, so creating a project can never destroy a
+    /// saved project that another session has open.
     pub fn create(
         path: &Path,
         project: &Project,
         durability: Durability,
+        overwrite: bool,
     ) -> Result<ProjectStore, StoreError> {
         let paths = ProjectPaths::new(path);
-        save_container(path, project, 0)?;
         fs::create_dir_all(&paths.sidecar).map_err(io_err(&paths.sidecar))?;
         let lock = SessionLock::acquire(&paths.lock())?;
+        if !overwrite && path.exists() {
+            return Err(StoreError::Exists(path.to_path_buf()));
+        }
+        save_container(path, project, 0)?;
         let mut store = ProjectStore {
             journal: JournalWriter::new(open_journal(&paths.journal(0), 0)?, 0, durability),
             paths,

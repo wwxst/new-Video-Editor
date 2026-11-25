@@ -62,6 +62,117 @@ fn apply(host: &EngineHost, commands: Vec<Command>) -> ApplyResult {
     .expect("apply")
 }
 
+/// Audit F-04 (experiment H): `create` took the session lock only *after* writing the container, so
+/// `new` on a project that another session had open destroyed that session's saved work. Creation
+/// must take the lock first and leave the existing container alone.
+#[test]
+fn create_over_locked_project_is_refused_without_touching_it() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("h.arcline");
+    let a = EngineHost::create(
+        &path,
+        arc_core::model::Project::new(
+            "PROJECT A",
+            FrameRate::Fps30,
+            arc_core::model::Resolution { w: 640, h: 360 },
+        ),
+        catalog(),
+        Durability::Default,
+        false,
+    )
+    .expect("create A");
+    apply(&a, setup());
+    assert_eq!(a.save().expect("save A"), 1);
+
+    let err = EngineHost::create(
+        &path,
+        arc_core::model::Project::new(
+            "PROJECT B",
+            FrameRate::Fps30,
+            arc_core::model::Resolution { w: 640, h: 360 },
+        ),
+        catalog(),
+        Durability::Default,
+        false,
+    )
+    .expect_err("locked");
+    assert!(
+        matches!(
+            err,
+            arc_core::runtime::HostError::Store(arc_core::store::StoreError::Locked(_))
+        ),
+        "{err:?}"
+    );
+
+    // The container must still be A's saved revision, not B.
+    let (on_disk, m) = arc_core::store::load_container(&path).expect("container");
+    assert_eq!(on_disk.meta.name, "PROJECT A");
+    assert_eq!(m.revision, 1);
+
+    a.shutdown(); // clean close removes the sidecar
+    let reopened = EngineHost::open(&path, catalog(), Durability::Default).expect("reopen");
+    assert_eq!(reopened.published().project.meta.name, "PROJECT A");
+    assert_eq!(reopened.published().revision, 1);
+    reopened.shutdown();
+}
+
+/// Audit F-04: creating over an existing closed project is refused unless the caller opts in.
+#[test]
+fn create_refuses_existing_project_unless_overwrite() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("exists.arcline");
+    let a = EngineHost::create(
+        &path,
+        arc_core::model::Project::new(
+            "PROJECT A",
+            FrameRate::Fps30,
+            arc_core::model::Resolution { w: 640, h: 360 },
+        ),
+        catalog(),
+        Durability::Default,
+        false,
+    )
+    .expect("create A");
+    apply(&a, setup());
+    a.save().expect("save");
+    a.shutdown();
+
+    let b = arc_core::model::Project::new(
+        "PROJECT B",
+        FrameRate::Fps30,
+        arc_core::model::Resolution { w: 640, h: 360 },
+    );
+    let err = EngineHost::create(
+        &path,
+        b.clone(),
+        catalog(),
+        Durability::Default,
+        false,
+    )
+    .expect_err("exists");
+    assert!(
+        matches!(
+            err,
+            arc_core::runtime::HostError::Store(arc_core::store::StoreError::Exists(_))
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        arc_core::store::load_container(&path)
+            .expect("container")
+            .0
+            .meta
+            .name,
+        "PROJECT A"
+    );
+
+    let host = EngineHost::create(&path, b, catalog(), Durability::Default, true)
+        .expect("overwrite");
+    assert_eq!(host.published().project.meta.name, "PROJECT B");
+    assert_eq!(host.published().revision, 0);
+    host.shutdown();
+}
+
 /// Audit F-01 (experiment F): a journal record that decodes but fails replay validation must not
 /// silently swallow later acknowledged edits. The rejected record is kept for support, the journal
 /// restarts at the recovered revision, and the next edits survive the next open.
@@ -76,6 +187,7 @@ fn rejected_replay_record_does_not_lose_later_edits() {
         project(FrameRate::Fps30),
         catalog(),
         Durability::Default,
+        false,
     )
     .expect("create");
     apply(&host, setup());

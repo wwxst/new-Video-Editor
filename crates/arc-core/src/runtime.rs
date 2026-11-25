@@ -117,8 +117,9 @@ impl EngineHost {
         project: Project,
         catalog: Arc<dyn EffectCatalog>,
         durability: Durability,
+        overwrite: bool,
     ) -> Result<EngineHost, HostError> {
-        let store = ProjectStore::create(path, &project, durability)?;
+        let store = ProjectStore::create(path, &project, durability, overwrite)?;
         let engine = Engine::new(project, 0, catalog)?;
         let report = RecoveryReport {
             recovered: false,

@@ -354,7 +354,7 @@ fn run(cli: Cli) -> Result<String, Fail> {
             snapshot,
         } => {
             let codec = arc_media::encode::VideoCodec::parse(codec)
-                .ok_or_else(|| fail("invalid_value", "codec must be ffv1, h264, av1, prores, or dnxhd"))?;
+                .ok_or_else(|| fail("invalid_value", "codec must be ffv1, h264, hevc, av1, prores, or dnxhd"))?;
             arc_media::tools::verify().map_err(|e| fail("ffmpeg_unavailable", e))?;
             let project = match snapshot {
                 Some(s) => {

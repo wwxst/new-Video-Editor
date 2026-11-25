@@ -86,23 +86,35 @@ Deliverables
 - `arcline-cli render`: range, resolution, preset; `export_report.json`.
 - Windows FFmpeg LGPL build pipeline pinned in the repo; macOS/Linux CI per ADR-0011.
 
-**Exit criteria** (status as of 2026-11-25; evidence in
-[HANDOVER §2](../HANDOVER.md) and the [audit follow-up](../reports/audit-follow-up-2026-11-25.md) §4)
+**Exit criteria** (status as of 2026-11-25, batch 2; evidence in
+[HANDOVER §2](../HANDOVER.md), the [audit follow-up](../reports/audit-follow-up-2026-11-25.md) §4 and
+the [Phase B closure report](../reports/phase-b-exit-2026-11-25.md))
 
 - **Met** — `arcline-cli render in.mov out.mp4 --range …` is frame-accurate against a reference decode.
   `render_e2e` verifies every output frame (FFV1, H.264, ranges); long-GOP, B-frame and MPEG-TS
   sources are frame-exact in `seek_accuracy` (audit F-06/F-08 fixed).
-- **Partially met** — hardware H.264/HEVC and AV1 (SVT) encode paths work on the reference machine.
-  H.264 (`h264_qsv`) and AV1 (`libsvtav1`) are tested end to end; **HEVC has no codec option yet**
-  (no `--codec hevc` path, so the hardware HEVC encoder is never selected).
+- **Met on the reference machine** — hardware H.264/HEVC and AV1 (SVT) encode paths work.
+  H.264 (`h264_qsv`), HEVC (`hevc_qsv`) and AV1 (`libsvtav1`) are tested end to end; HEVC is
+  validated with the pinned ffprobe (codec/resolution/frame rate/pixel format) in
+  `render_e2e::hevc_exports_are_decodable_and_match_the_spec`. The shipped package has **no software
+  HEVC encoder** (libx265 is GPL and excluded by D1), so a machine without a hardware HEVC encoder
+  gets a typed `NoEncoder` error naming the candidates; the assertions skip on such machines (CI
+  runners have no GPU).
 - **Partially met** — a corrupt file produces a clean per-clip error; a file that crashes or hangs
   `ffprobe`/`ffmpeg` in the import check is quarantined and the parent process survives
-  (mutated-media corpus). Truncated/zero-byte/text files are classified `offline` and renders report
-  per-clip warnings; the quarantine path exists but has no crashing/hanging fixture, so parent
-  survival is unproven.
+  (mutated-media corpus). The generated corpus (`arc-media/tests/malformed.rs`, nine fixtures under
+  2 MB) is refused by the import check (truncation is now detected through a frame-count check) and
+  converges to typed `MediaError`s, and a mixed good/broken export completes with the broken asset
+  named as unavailable (`render_e2e::mixed_media_export_survives_an_unreadable_asset`). **Still
+  missing:** a fixture that crashes or hangs the import check, so the quarantine/parent-survival
+  half is unproven.
 - **Met** — Windows FFmpeg LGPL build pipeline pinned in the repo (`third_party/ffmpeg/`, manifest
   with hashes, SBOM, `verify.sh`; FFmpeg 9.1, D1 LGPL v2.1+).
-- **Not met** — macOS/Linux CI per ADR-0011: no CI workflow exists yet.
+- **Met (workflow); first GitHub run unobserved** — `.github/workflows/ci.yml`: `core` on
+  ubuntu/windows/macos (Rust 1.95 + clippy, the FFmpeg-free crates) and `media` on Windows (pinned
+  FFmpeg 9.1 built from the in-repo recipe and cached, full build/test/clippy). `gh` was not
+  authenticated in the environment that added it, so the job results are pending; the core steps
+  were run locally and the local verification is recorded in the closure report §3.2.
 
 ## 5. Phase C — Compositor and shell (weeks 10–16)
 

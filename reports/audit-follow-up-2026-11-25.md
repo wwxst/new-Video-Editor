@@ -246,3 +246,11 @@ Per-suite counts at this state: arc-core unit 16, `engine` 14, `journal` 9, `pro
 `recovery` 7, `store` 8; arc-media unit 9, `decode` 3, `audio_blocks` 2, `audio_anchor` 2,
 `param_change` 2, `paths` 2, `runtime` 3, `differential` 1, `seek_accuracy` 4; arc-render 1+1+5;
 arc-audio 3; arc-cli 4+4+4; arc-app 1.
+**Batch 2 (2026-11-25, `feat/phase-b-exit`):** the two open halves above were worked:
+HEVC export is implemented through the hardware encoder (`hevc_qsv` on the reference machine,
+`--codec hevc`, validated with ffprobe) and is **met**; the malformed-media corpus and the mixed
+good/broken export are in place, so the "corrupt file produces a clean per-clip error" half is met
+but the crashing/hanging quarantine fixture is still missing (**partially met**); the CI workflow
+exists and runs the core matrix on GitHub, with the media job building the pinned FFmpeg
+(**met as a workflow; first GitHub run unobserved**). Details and evidence:
+[phase-b-exit-2026-11-25.md](phase-b-exit-2026-11-25.md).

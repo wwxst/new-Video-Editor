@@ -1,0 +1,133 @@
+name: CI
+
+# Windows/Linux/macOS CI (ADR-0011). The `core` job covers the FFmpeg-free crates on every OS; the
+# `media` job builds the pinned FFmpeg 9.1 package from the in-repo recipe and runs the full suite.
+# The media job is Windows-only because the shim is built with MinGW and the pinned package is a
+# Windows cross-build.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  core:
+    name: core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust 1.95 (declared MSRV)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: core-${{ matrix.os }}
+
+      # arc-core, arc-audio and arc-render have no FFmpeg dependency (docs/01 §4), so they build and
+      # test on every OS without the media package.
+      - name: Build the FFmpeg-free crates
+        run: cargo build -p arc-core -p arc-audio
+
+      - name: Check the compositor crate
+        run: cargo check -p arc-render
+
+      - name: Test arc-core
+        run: cargo test -p arc-core
+
+      # The warning strategy is the repository's: clippy must exit 0, warnings are shown but not
+      # denied (HANDOVER §1/§6.1).
+      - name: Clippy
+        run: cargo clippy -p arc-core -p arc-audio -p arc-render --all-targets
+
+  media:
+    name: media (Windows, pinned FFmpeg 9.1)
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: MSYS2 UCRT64 (FFmpeg build host + MinGW for the shim)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-nasm
+            mingw-w64-ucrt-x86_64-pkgconf
+            make
+            diffutils
+            git
+            gnupg
+            curl
+
+      - name: Cache the pinned FFmpeg 9.1 package
+        id: ffmpeg-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\Users\runneradmin\.local\toolchains\ffmpeg-9.1-lgpl
+          key: ffmpeg-9.1-lgpl-${{ hashFiles('third_party/ffmpeg/manifest.json', 'third_party/ffmpeg/configure-9.1.txt', 'third_party/ffmpeg/build.sh') }}
+
+      # The recipe verifies the release signature and the pinned SHA-256 itself; these steps only
+      # fetch the official artifacts. On a cache hit both steps are skipped.
+      - name: Fetch the FFmpeg 9.1 source and signature
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/toolchains/dl-ffmpeg"
+          curl -fsSL -o "$HOME/.local/toolchains/dl-ffmpeg/ffmpeg-9.1.tar.xz" \
+            https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz
+          curl -fsSL -o "$HOME/.local/toolchains/dl-ffmpeg/ffmpeg-9.1.tar.xz.asc" \
+            https://ffmpeg.org/releases/ffmpeg-9.1.tar.xz.asc
+
+      # ~20-40 min on a 4-core runner; later runs restore the cached package in seconds.
+      - name: Build the pinned FFmpeg 9.1 (LGPL 2.1+)
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd "$(cygpath "$GITHUB_WORKSPACE")"
+          bash third_party/ffmpeg/build.sh
+
+      - name: Rust 1.95 (x86_64-pc-windows-gnu host)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0-x86_64-pc-windows-gnu
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: media-windows
+
+      - name: Build, test and lint the whole workspace
+        shell: pwsh
+        env:
+          ARCLINE_FFMPEG_DIR: C:\Users\runneradmin\.local\toolchains\ffmpeg-9.1-lgpl
+          # GitHub Windows runners have no GPU: the compositor tests use the software adapter
+          # (HANDOVER §6.3). Hardware-encoder assertions skip themselves when no encoder exists.
+          ARCLINE_FORCE_FALLBACK_ADAPTER: "1"
+        run: |
+          $env:PATH = "C:\msys64\ucrt64\bin;$env:ARCLINE_FFMPEG_DIR\bin;$env:PATH"
+          cargo build --workspace --all-targets
+          cargo test --workspace
+          cargo clippy --workspace --all-targets

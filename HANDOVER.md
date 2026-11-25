@@ -2,16 +2,17 @@
 
 Checkpoint date: 2026-11-25. Supersedes the earlier WIP handover of `720a99a`.
 
-**State: the workspace builds against the pinned FFmpeg 9.1 package, clippy exits 0 (18 warnings from
-newer lints in untouched code, see the follow-up report §5), and 110 tests pass** (Windows 11, Intel integrated GPU; see §3 for the exact counts and the three-run evidence in
+**State: the workspace builds against the pinned FFmpeg 9.1 package, clippy exits 0 (pre-existing lint
+warnings only), and 115 tests pass** (Windows 11, Intel integrated GPU; see §3 for the exact counts and the three-run evidence in
 `reports/ffmpeg-9.1-differential.md`). All P0 audit defects are fixed, the FFmpeg 8.1.3 → 9.1
 upgrade is implemented (spec steps 0–3), and the follow-up work closed twelve more audit findings
 (F-06, F-07, F-08, F-11, F-12, F-13, F-14, F-24, F-26, F-28, F-29, F-31). The remaining findings
 are deferred with a written reason and recommendation in
-[reports/audit-follow-up-2026-11-25.md](reports/audit-follow-up-2026-11-25.md). The upgrade and the
-follow-up commits are merged into `main` (`e5d444f` plus the follow-up commits). Architecture docs
-under `docs/` remain the source of truth; this file records implementation status, deviations, and
-how to continue.
+[reports/audit-follow-up-2026-11-25.md](reports/audit-follow-up-2026-11-25.md). Phase B closure
+batch 2 adds HEVC export, the malformed-media corpus with error convergence, and CI
+([report](reports/phase-b-exit-2026-11-25.md)). The upgrade and the follow-up commits are merged
+into `main` (`e5d444f` plus the follow-up commits). Architecture docs under `docs/` remain the
+source of truth; this file records implementation status, deviations, and how to continue.
 
 > **Read first: [audit of `88e0707`](reports/audit-2026-11-25-88e0707.md)** (2026-11-25) and its
 > [follow-up status table](reports/audit-follow-up-2026-11-25.md). Its P0 list (F-01, F-02, F-03,
@@ -91,7 +92,7 @@ scripts/dev-env.sh
 |---|---|---|
 | **A Spine** | **Done** (dependency-rule CI check still missing) | Exit criteria met: 10,000-case property test, timecode boundary tests, `new` + `apply` produce valid containers |
 | **P Embedding PoC** | **Done — GO** | All automated criteria pass (docs/poc, ADR-0014 outcome) |
-| **B Headless pipeline** | **Functionally complete; exit criteria open** | Frame-exact `import → edit → render` through FFV1 and H.264 (hardware `h264_qsv` here); AV1 via `libsvtav1` and ProRes/DNxHD encode/decode covered by tests; long-GOP, B-frame and MPEG-TS random access is frame-exact (F-08 fixed) and lossy/resampled audio survives the mixer's block pattern (F-06/F-07 fixed). Open per docs/10 §4: HEVC encode path (no `--codec hevc`), a crashing-media quarantine fixture, macOS/Linux CI — see [follow-up report §4](reports/audit-follow-up-2026-11-25.md) |
+| **B Headless pipeline** | **Exit criteria met except the crashing-media quarantine fixture** | Frame-exact `import → edit → render` through FFV1, H.264 (`h264_qsv`), HEVC (`hevc_qsv`), AV1 (`libsvtav1`), ProRes and DNxHD; long-GOP/B-frame/MPEG-TS random access is frame-exact (F-08) and lossy/resampled audio survives the mixer's block pattern (F-06/F-07); a generated malformed corpus converges to typed errors and a mixed good/broken export completes (goal B); CI runs on ubuntu/windows/macos with the pinned FFmpeg on Windows (goal C). Still open: a fixture that crashes or hangs the import check (quarantine branch unproven) — see [Phase B closure](reports/phase-b-exit-2026-11-25.md) |
 | **C Compositor + shell** | Compositor done; **GUI editor not started** | `arc-app` currently shows the PoC workload, not an editor |
 | **D Audio** | Mixer + export done; **real-time playback (cpal) not started** | |
 | **E Lifecycle** | Journal, recovery, atomic saves, forced-kill done; **crash breadcrumbs, quarantine on relaunch, hang watchdog, relink not started** | |
@@ -107,7 +108,7 @@ arcline-cli timeline <p>                    text timeline (docs/schema/timeline-
 arcline-cli apply <p> [--file f.json]       JSON command batch from file/stdin, then save
 arcline-cli probe <media>                   subprocess import check → ok | quarantined | offline
 arcline-cli import <p> <media...>           import check + asset.import, paths relative to the project
-arcline-cli render <p> -o out --codec ffv1|h264|av1|prores|dnxhd [--from TC --to TC] [--snapshot doc.json]
+arcline-cli render <p> -o out --codec ffv1|h264|hevc|av1|prores|dnxhd [--from TC --to TC] [--snapshot doc.json]
 arcline-cli rpc [--client id]               JSON-RPC 2.0 session on stdio
 arcline [--embed-parent HWND --embed-channel stdio] [--poc-seconds N]
 ```
@@ -121,7 +122,7 @@ JSON-RPC methods implemented: `project.open` (incl. `create`), `project.describe
 Missing versus docs/06 §4.1: `history.list`, `inspect.frame`, `control.request`, `control.release`, and pushed
 notifications.
 
-## 3. Test results (all green, 110 tests, 1 ignored)
+## 3. Test results (all green, 115 tests, 1 ignored)
 
 Three consecutive full `cargo test --workspace` runs and a clean clippy run on the FFmpeg 9.1 switch
 are recorded in [reports/ffmpeg-9.1-differential.md](reports/ffmpeg-9.1-differential.md) §5; the
@@ -135,7 +136,8 @@ per-crate table below is the current suite.
 | arc-core `tests/journal.rs` | 9 | Torn tail at every byte offset, CRC/magic/length corruption, short writes, mid-record failure truncation, failed truncate, durable `fsync` failure, group-flush failure, CRC32C vectors |
 | arc-core `tests/store.rs` | 8 (+1 helper) | Container round trip, future schema refused, save/reopen/clean close, lock, torn-tail recovery with `.rejected`, ack + notifications, **forced kill via child-process `abort()` at 1, 29, 30, 31, 75 edits**, **snapshot rotation publishes only with its journal (F-14)** |
 | arc-core `tests/recovery.rs` | 7 | P0 recovery/creation regressions: rejected replay (F-01), evidence split, create over locked/existing project (F-04), stale sidecar and foreign snapshot id checks (F-05) |
-| arc-media unit + `tests/decode.rs` | 6 + 3 | ffprobe mapping, runtime identity, ffprobe parse; **frame-accurate in-process decode** (sequential, random, repeated, backward) at 29.97 and 25 fps for FFV1 in MKV; sample-addressed audio; import check ok/offline |
+| arc-media unit + `tests/decode.rs` | 11 + 3 | ffprobe mapping, runtime identity, ffprobe parse; **frame-accurate in-process decode** (sequential, random, repeated, backward) at 29.97 and 25 fps for FFV1 in MKV; sample-addressed audio; import check ok/offline |
+| arc-media `tests/malformed.rs` | 1 | Generated malformed corpus (9 fixtures under 2 MB: empty, text, truncated, corrupt header/index/payload): the import check refuses every unreadable file and the decode boundary returns typed errors, never a crash |
 | arc-media `tests/param_change.rs` | 2 | Mid-stream resolution change (F-02) scaled, not overflowing; MP2 stereo→mono (F-03) resampled safely |
 | arc-media `tests/audio_blocks.rs` | 2 | The mixer's 4096+1 block pattern is bit-identical to one continuous read for FLAC 48/44.1 kHz, MP3, Ogg/MKV Opus and AAC (**F-06**) |
 | arc-media `tests/audio_anchor.rs` | 2 | One Opus stream remuxed to Ogg and MKV decodes bit-identically; reads at 20/50/80 s align with the continuous decode (**F-07**) |
@@ -146,7 +148,7 @@ per-crate table below is the current suite.
 | arc-render unit + `tests/plan.rs` + `tests/render.rs` | 1 + 1 + 5 | Manifests; frame planning incl. dissolve weights and handles; GPU bit-exact determinism, 1-LSB pass-through, color correct within 2 LSB of the CPU reference, transforms, linear-light opacity/dissolve, every effect runs or is reported |
 | arc-audio unit | 3 | **Block-size parity** (1…4096 identical) with a synthetic source, positions/gain/pan/fades/varispeed, WAV header. Parity through the real decoder for AAC/MP3/Opus/resampled media still shows the P2 F-06 defect |
 | arc-app unit | 1 | PoC embed messages gated on a PoC session (**F-31**) |
-| arc-cli `tests/cli.rs`, `render_e2e.rs`, `rpc.rs` | 4 + 4 + 4 | CLI contract incl. `new --overwrite`; import checks and scheme/device rejection; **end-to-end: every output frame verified exact** (FFV1, H.264, ranges) with audio and the §4.5 `ffmpeg` report block; AV1/ProRes/DNxHD decode; RPC semantics, create/locked/existing, out-of-process render job |
+| arc-cli `tests/cli.rs`, `render_e2e.rs`, `rpc.rs` | 4 + 6 + 4 | CLI contract incl. `new --overwrite`; import checks and scheme/device rejection; **end-to-end: every output frame verified exact** (FFV1, H.264, ranges) with audio and the §4.5 `ffmpeg` report block; AV1/ProRes/DNxHD decode; RPC semantics, create/locked/existing, out-of-process render job |
 
 Not part of `cargo test`: the embedding PoC (`--example embed_host`). Run it manually; result recorded in
 `docs/poc/embedding-poc-2026-11-25.md`.
@@ -209,10 +211,11 @@ Fold these into docs/02–06 (or an ADR) when convenient; none contradicts an AD
    `CARGO_INCREMENTAL=0 cargo clippy …`, or `cargo clean -p arc-core`. Builds and tests are unaffected.
 2. **MSVC target untested.** The shim should compile with `cl /std:c11` (compound literals are used); `build.rs`
    passes `-std=c11` only where supported — add `/std:c11` for MSVC if needed.
-3. **No CI workflow exists yet** (`.github/workflows`). Planned per ADR-0011: Windows build + test with the
-   pinned FFmpeg 9.1 package restored from the manifest hashes and `ARCLINE_FORCE_FALLBACK_ADAPTER=1` (WARP);
-   macOS/Linux `cargo check` of the FFmpeg-free crates (`arc-core`, `arc-render`, `arc-audio`) plus
-   `arc-core` tests on Linux.
+3. **CI exists** (`.github/workflows/ci.yml`, ADR-0011): `core` on ubuntu/windows/macos (Rust 1.95 + clippy,
+   FFmpeg-free crates) and `media` on Windows (pinned FFmpeg 9.1 built from the in-repo recipe and cached,
+   full workspace build/test/clippy, `ARCLINE_FORCE_FALLBACK_ADAPTER=1`). The first GitHub run is
+   unobserved from the development environment (`gh` unauthenticated); check the Actions tab. The
+   hardware-encoder tests skip themselves on machines without a GPU.
 4. **GPU tests need an adapter.** They ran on Intel integrated graphics here; on CI use the fallback adapter.
 5. **Embedding PoC manual items open:** keyboard focus round-trip, IME placement, DPI change across monitors,
    Electron host (Electron not installed).
@@ -256,6 +259,11 @@ evidence, UNC normalisation, device-namespace rejection).
 accuracy), F-12, F-13, F-14 (see the follow-up report). Remaining P2: F-10 (`--root`/`--output-root`,
 which also bounds the UNC/NTLM exposure noted in §6.11) and F-15 (panic containment with a
 degraded-mode contract); CI workflow, dependency-rule check and `cargo-deny`.
+
+**Phase B closure (batch 2, `2026-11-25`):** HEVC export, the malformed-media corpus with decode
+error convergence and the CI workflow are done — see
+[reports/phase-b-exit-2026-11-25.md](reports/phase-b-exit-2026-11-25.md). The only exit criterion
+piece still open is a fixture that crashes or hangs the import check (the `Quarantined` branch).
 
 **Phase C — the editor (largest remaining piece)**
 1. Replace the PoC workload in `arc-app` with the editor shell: `egui_dock` layout, media bin, inspector

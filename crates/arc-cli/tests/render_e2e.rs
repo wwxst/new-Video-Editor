@@ -2,11 +2,27 @@
 //! frame-exact.
 
 use arc_core::time::FrameRate;
+use arc_media::encode::VideoCodec;
 use arc_media::fixtures::{read_counter, write_counter_video};
 use arc_media::{AudioDecoder, VideoDecoder};
 use serde_json::{Value, json};
 use std::process::Command;
 
+/// True when this machine has a usable encoder for `codec`. The reference machine has hardware
+/// H.264/HEVC (QSV); a CI runner without a GPU has neither, and the hardware-only codec paths
+/// cannot be exercised there. The probe is still run, so the message shows what was tried.
+fn has_encoder(codec: VideoCodec) -> bool {
+    match arc_media::encode::select_encoder(codec) {
+        Ok(name) => {
+            eprintln!("encoder probe: {codec:?} -> {name}");
+            true
+        }
+        Err(e) => {
+            eprintln!("skipping the hardware-encoder assertions: {e}");
+            false
+        }
+    }
+}
 fn cli(args: &[&str], stdin: Option<&str>) -> (i32, String, String) {
     let mut c = Command::new(env!("CARGO_BIN_EXE_arcline-cli"));
     c.args(args);
@@ -296,7 +312,11 @@ fn render_range_and_h264() {
         "range starts at timeline frame 25 = source 35"
     );
 
-    // lossy delivery codec: encoder chosen by capability probe, never GPL x264
+    // lossy delivery codec: encoder chosen by capability probe, never GPL x264. A machine without a
+    // hardware encoder (a GPU-less CI runner) has no H.264 path in the shipped build.
+    if !has_encoder(VideoCodec::H264) {
+        return;
+    }
     let mp4 = dir.path().join("out.mp4");
     let (code, stdout, err) = cli(
         &[
@@ -332,4 +352,180 @@ fn render_range_and_h264() {
         Some(110),
         "frame-accurate through a lossy codec"
     );
+}
+/// Goal A: HEVC export. The shipped FFmpeg 9.1 package has no software HEVC encoder (libx265 is
+/// GPL and excluded by decision D1), so the `hevc` codec selects a hardware encoder and fails with
+/// a typed error when none is usable. The output is validated with `ffprobe`: codec, resolution,
+/// frame rate and pixel format.
+#[test]
+fn hevc_exports_are_decodable_and_match_the_spec() {
+    if !has_encoder(VideoCodec::Hevc) {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tmp");
+    let p = build(dir.path());
+    let ps = p.to_str().expect("utf8");
+    let out = dir.path().join("out_hevc.mp4");
+    let (code, stdout, err) = cli(
+        &[
+            "render",
+            ps,
+            "-o",
+            out.to_str().expect("utf8"),
+            "--codec",
+            "hevc",
+            "--from",
+            "00:00:00:00",
+            "--to",
+            "00:00:00:10",
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{stdout} {err}");
+    let r = j(&stdout);
+    let enc = r["encoder"].as_str().unwrap_or_default();
+    assert!(
+        ["hevc_nvenc", "hevc_qsv", "hevc_amf"].contains(&enc),
+        "hardware HEVC encoder expected, got {enc:?} ({r})"
+    );
+    assert_eq!(r["codec"], json!("hevc"));
+    assert_eq!(r["frames"], json!(10));
+    assert_eq!(r["ffmpeg"]["override"], json!(false));
+
+    // ffprobe end-to-end: codec, resolution, frame rate, pixel format.
+    let probe = Command::new(arc_media::tools::ffprobe_checked().expect("ffprobe"))
+        .args([
+            "-v",
+            "error",
+            "-of",
+            "json",
+            "-show_entries",
+            "stream=codec_name,width,height,pix_fmt,r_frame_rate",
+        ])
+        .arg(format!("file:{}", out.display()))
+        .output()
+        .expect("run ffprobe");
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let streams: Value = serde_json::from_slice(&probe.stdout).expect("ffprobe json");
+    let s = &streams["streams"][0];
+    assert_eq!(s["codec_name"], json!("hevc"), "{s}");
+    assert_eq!(s["width"], json!(320));
+    assert_eq!(s["height"], json!(180));
+    assert_eq!(s["pix_fmt"], json!("yuv420p"), "{s}");
+    let rate: f64 = {
+        let text = s["r_frame_rate"].as_str().expect("r_frame_rate");
+        let (num, den) = text.split_once('/').unwrap_or((text, "1"));
+        num.parse::<f64>().unwrap_or(0.0) / den.parse::<f64>().unwrap_or(1.0)
+    };
+    assert!((rate - 29.97).abs() < 0.02, "frame rate {rate} ({s})");
+
+    // The same decoder reads it back, so the file is a normal Arcline source too.
+    let mut d = VideoDecoder::open(&out).expect("decode hevc output");
+    assert_eq!((d.info().width, d.info().height), (320, 180));
+    assert_eq!(d.info().codec, "hevc");
+    let f = d.frame_at(arc_core::Time::ZERO).expect("hevc frame");
+    assert_eq!((f.width, f.height), (320, 180));
+}
+
+/// Goal B: one unreadable asset must not stop the export. The report marks it unavailable, the
+/// other clips still render frame-exactly, and the project stays usable afterwards.
+#[test]
+fn mixed_media_export_survives_an_unreadable_asset() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let media = dir.path().join("media");
+    std::fs::create_dir_all(&media).expect("mkdir");
+    let good = media.join("good.mkv");
+    let broken = media.join("broken.mkv");
+    write_counter_video(&good, 60, FrameRate::Fps30.rate(), 320, 180, false).expect("fixture");
+    std::fs::copy(&good, &broken).expect("copy");
+
+    let p = dir.path().join("mixed.arcline");
+    let ps = p.to_str().expect("utf8");
+    let (code, out, err) = cli(
+        &["new", ps, "--fps", "30", "--res", "320x180", "--name", "Mixed"],
+        None,
+    );
+    assert_eq!(code, 0, "{out} {err}");
+    let (code, out, err) = cli(
+        &[
+            "import",
+            ps,
+            good.to_str().expect("utf8"),
+            broken.to_str().expect("utf8"),
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{out} {err}");
+    let imp = j(&out);
+    let good_id = imp["imported"][0]["id"].as_str().expect("good id").to_string();
+    let broken_id = imp["imported"][1]["id"]
+        .as_str()
+        .expect("broken id")
+        .to_string();
+
+    // The media is replaced after import: the project references a file that no longer decodes.
+    std::fs::write(&broken, b"corrupted after import, no longer media\n").expect("corrupt");
+
+    let batch = json!([
+        {"op":"track.add","id":"tr_v1","kind":"video"},
+        {"op":"track.add","id":"tr_v2","kind":"video"},
+        {"op":"timeline.add_clip","id":"cl_good","track":"tr_v1","asset":good_id,"start":"00:00:00:00","duration":"00:00:01:00"},
+        {"op":"timeline.add_clip","id":"cl_broken","track":"tr_v2","asset":broken_id,"start":"00:00:01:00","duration":"00:00:01:00"}
+    ]);
+    let (code, out, err) = cli(&["apply", ps], Some(&batch.to_string()));
+    assert_eq!(code, 0, "{out} {err}");
+
+    let output = dir.path().join("out.mkv");
+    let (code, stdout, err) = cli(
+        &[
+            "render",
+            ps,
+            "-o",
+            output.to_str().expect("utf8"),
+            "--codec",
+            "ffv1",
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "export must survive: {stdout} {err}");
+    let report = j(&stdout);
+    assert_eq!(report["frames"], json!(60), "{report}");
+    let warnings = report["warnings"]
+        .as_array()
+        .expect("warnings")
+        .iter()
+        .filter_map(|w| w.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("unavailable") && w.contains(&broken_id)),
+        "the broken asset must be reported as unavailable: {warnings:?}"
+    );
+
+    // The good clip is still frame-exact; the unavailable one renders the background.
+    let rate = FrameRate::Fps30;
+    let mut d = VideoDecoder::open(&output).expect("open output");
+    for k in 0..30i64 {
+        let f = d.frame_at(rate.time_of_frame(k)).expect("good frame");
+        assert_eq!(
+            read_counter(f.rgba, f.width, f.height),
+            Some(k as u32),
+            "frame {k} of the intact clip"
+        );
+    }
+    let f = d.frame_at(rate.time_of_frame(45)).expect("broken-frame slot");
+    assert!(
+        f.rgba.iter().enumerate().all(|(i, b)| i % 4 == 3 || *b == 0),
+        "an unavailable source renders black, not a stale frame"
+    );
+
+    // The project and the session are untouched by the failed asset.
+    let (code, out, err) = cli(&["describe", ps], None);
+    assert_eq!(code, 0, "{out} {err}");
+    assert_eq!(j(&out)["project"]["name"], json!("Mixed"));
 }

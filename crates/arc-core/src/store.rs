@@ -516,12 +516,45 @@ impl ProjectStore {
         };
         let bytes = serde_json::to_vec(&file).map_err(|e| StoreError::Document(e.to_string()))?;
         let path = self.paths.snapshot(rev);
-        write_atomic(&path, &bytes)?;
+        // Write the snapshot aside, open the new journal, and only then publish the snapshot: a
+        // failure between the two used to leave snapshot-rev next to the *old* journal, so recovery
+        // picked rev and lost every later acknowledged record (audit F-14).
+        let mut tmp_name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        tmp_name.push(".tmp");
+        let tmp = path.with_file_name(tmp_name);
+        {
+            let mut f = File::create(&tmp).map_err(io_err(&tmp))?;
+            if let Err(e) = f.write_all(&bytes).and_then(|()| f.sync_all()) {
+                drop(f);
+                let _ = fs::remove_file(&tmp);
+                return Err(StoreError::Io {
+                    path: tmp.clone(),
+                    source: e,
+                });
+            }
+        }
         let old = self.snapshot_rev;
         let jpath = self.paths.journal(rev);
-        if old != rev || !jpath.exists() {
-            let f = open_journal(&jpath, 0)?;
-            self.journal = JournalWriter::new(f, 0, self.durability);
+        let rotating = old != rev || !jpath.exists();
+        let mut next_journal = None;
+        if rotating {
+            match open_journal(&jpath, 0) {
+                Ok(f) => next_journal = Some(JournalWriter::new(f, 0, self.durability)),
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(e);
+                }
+            }
+        }
+        if let Err(e) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(StoreError::Io {
+                path: path.clone(),
+                source: e,
+            });
+        }
+        if let Some(w) = next_journal {
+            self.journal = w;
         }
         if old != rev {
             let _ = fs::remove_file(self.paths.snapshot(old));

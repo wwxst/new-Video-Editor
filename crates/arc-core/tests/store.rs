@@ -217,3 +217,31 @@ fn acknowledgement_and_notifications() {
     assert_eq!(host.published().project.meta.name, "Test");
     let _ = Arc::strong_count(&host.published());
 }
+
+/// F-14: rotating the snapshot and the journal must publish the snapshot only after the new
+/// journal is open. The old order wrote snapshot-rev first, so a failure to open journal-rev left
+/// recovery with rev and an empty journal, losing every later acknowledged record.
+#[test]
+fn snapshot_rotation_publishes_after_the_journal_opens() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("rot.arcline");
+    let p = project(FrameRate::Fps30);
+    let mut s = store::ProjectStore::create(&path, &p, Durability::Default, false).expect("create");
+    // A directory where journal-1.bin belongs makes the journal step fail.
+    let blocked = s.paths().journal(1);
+    std::fs::create_dir(&blocked).expect("block");
+    let err = s.write_snapshot(&p, 1).expect_err("rotation fails");
+    assert!(
+        matches!(err, StoreError::Io { .. }),
+        "expected io_error, got {err:?}"
+    );
+    assert!(
+        !s.paths().snapshot(1).exists(),
+        "no snapshot may be published without its journal"
+    );
+    assert!(s.paths().snapshot(0).exists(), "the previous snapshot survives");
+    assert!(s.paths().journal(0).exists(), "the previous journal survives");
+    std::fs::remove_dir(&blocked).expect("unblock");
+    s.write_snapshot(&p, 1).expect("rotation");
+    assert!(s.paths().snapshot(1).exists());
+}

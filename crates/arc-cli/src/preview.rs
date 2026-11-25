@@ -23,7 +23,7 @@ const DEFAULT_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 
 pub const TITLE_WARNING: &str = "title clips are not rendered yet (text renderer pending); they were skipped";
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum PreviewError {
     #[error("no GPU adapter for the preview renderer: {0}")]
     Renderer(String),

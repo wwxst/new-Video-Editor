@@ -3,7 +3,7 @@
 Checkpoint date: 2026-11-25. Supersedes the earlier WIP handover of `720a99a`.
 
 **State: the workspace builds against the pinned FFmpeg 9.1 package, clippy exits 0 (pre-existing lint
-warnings only), and 136 tests pass** (Windows 11, Intel integrated GPU; see 搂3 for the exact counts and the three-run evidence in
+warnings only), and 152 tests pass** (Windows 11, Intel integrated GPU; see 搂3 for the exact counts and the three-run evidence in
 `reports/ffmpeg-9.1-differential.md`). All P0 audit defects are fixed, the FFmpeg 8.1.3 鈫?9.1
 upgrade is implemented (spec steps 0鈥?), and the follow-up work closed twelve more audit findings
 (F-06, F-07, F-08, F-11, F-12, F-13, F-14, F-24, F-26, F-28, F-29, F-31). The remaining findings
@@ -93,7 +93,7 @@ scripts/dev-env.sh
 | **A Spine** | **Done** (dependency-rule CI check still missing) | Exit criteria met: 10,000-case property test, timecode boundary tests, `new` + `apply` produce valid containers |
 | **P Embedding PoC** | **Done 鈥?GO** | All automated criteria pass (docs/poc, ADR-0014 outcome) |
 | **B Headless pipeline** | **Exit criteria met** | Frame-exact `import 鈫?edit 鈫?render` through FFV1, H.264 (`h264_qsv`), HEVC (`hevc_qsv`), AV1 (`libsvtav1`), ProRes and DNxHD; long-GOP/B-frame/MPEG-TS random access is frame-exact (F-08) and lossy/resampled audio survives the mixer's block pattern (F-06/F-07); a generated malformed corpus converges to typed errors and a mixed good/broken export completes (goal B); CI is green on all four jobs 鈥?core on ubuntu/windows/macos and the Windows media job 鈥?in runs 7, 9 and 12 (goal C). The `Quarantined` branch is covered by a generated stub tool (crash/hang/garbage in the probe **and** decode phases, bounded time) 鈥?see [Phase B closure](reports/phase-b-exit-2026-11-25.md) |
-| **C Compositor + shell** | Compositor done; **preview pipeline (C1) and scheduler (C2) done; GUI editor not started** | C1: `arc_cli::preview` composes frames identical to the export path, with a byte-bounded decoded-source cache ([report](reports/phase-c-c1-2026-11-26.md)). C2: `arc_cli::preview_scheduler` is latest-wins with scrub/full quality, cancel and bounded queues, tested with a stub pipeline ([report](reports/phase-c-c2-2026-11-26.md)). `arc-app` still shows the PoC workload |
+| **C Compositor + shell** | Compositor + viewer done; **editor shell started (C1-C3); timeline canvas (C4) not started** | C1: `arc_cli::preview` composes frames identical to the export path, with a byte-bounded decoded-source cache ([report](reports/phase-c-c1-2026-11-26.md)). C2: `arc_cli::preview_scheduler` is latest-wins with scrub/full quality, cancel and bounded queues, tested with a stub pipeline ([report](reports/phase-c-c2-2026-11-26.md)). C3: `arcline --project <file>` shows the composed frame with play/pause/step/scrub in `arc-app`, backed by `arc_cli::preview_transport` (composited-frame cache) ([report](reports/phase-c-c3-2026-11-26.md)); benchmark 1080p/4 tracks/8 effects = 29.92 fps full, 87.84 fps half on the Intel iGPU (0.3 % below the 30 fps criterion, tracked). The PoC workload remains the default without `--project` |
 | **D Audio** | Mixer + export done; **real-time playback (cpal) not started** | |
 | **E Lifecycle** | Journal, recovery, atomic saves, forced-kill done; **crash breadcrumbs, quarantine on relaunch, hang watchdog, relink not started** | |
 | **F Agent surface** | **Started**: JSON-RPC session with 11 of 15 methods; **MCP, local IPC, live attach, control methods, notifications over RPC not started** | |
@@ -122,7 +122,7 @@ JSON-RPC methods implemented: `project.open` (incl. `create`), `project.describe
 Missing versus docs/06 搂4.1: `history.list`, `inspect.frame`, `control.request`, `control.release`, and pushed
 notifications.
 
-## 3. Test results (all green, 136 tests, 1 ignored)
+## 3. Test results (all green, 152 tests, 1 ignored)
 
 Three consecutive full `cargo test --workspace` runs and a clean clippy run on the FFmpeg 9.1 switch
 are recorded in [reports/ffmpeg-9.1-differential.md](reports/ffmpeg-9.1-differential.md) 搂5; the
@@ -150,7 +150,9 @@ per-crate table below is the current suite.
 | arc-audio unit | 3 | **Block-size parity** (1鈥?096 identical) with a synthetic source, positions/gain/pan/fades/varispeed, WAV header. Parity through the real decoder for AAC/MP3/Opus/resampled media still shows the P2 F-06 defect |
 | arc-cli `tests/preview.rs` | 14 | Phase C C1: preview frame equals the export frame (single layer and two-track transformed overlay), half quality at native source decode, decoded-source cache hits/steps and byte-budget eviction, quality switch, unavailable asset/title warnings, out-of-range/missing-sequence typed errors, relinked asset reopens |
 | arc-cli `tests/preview_scheduler.rs` | 6 | Phase C C2: latest-wins coalescing (200 requests 鈫?2 renders), slow render never queues the newest, settle upgrade to full quality, cancel drops pending/in-flight work, shutdown/drop leave no worker |
-| arc-app unit | 1 | PoC embed messages gated on a PoC session (**F-31**) |
+| arc-cli `tests/preview_transport.rs` | 8 | Phase C C3: viewer transport - seek/step/play advanced by elapsed time, pause, clamping, restart from the end, composited-frame cache hit without re-composition, settle upgrade replaces the scrub frame |
+| arc-cli `tests/preview_benchmark.rs` | 1 | C3 benchmark: 1080p, 4 tracks, 8 effects - full 29.92 fps / half 87.84 fps on the Intel iGPU (asserts only a sane floor) |
+| arc-app unit + editor | 3 | Viewer helpers (`fit_size`, `timecode`) and PoC embed gating (**F-31**) |
 | arc-cli `tests/cli.rs`, `render_e2e.rs`, `rpc.rs` | 4 + 6 + 4 | CLI contract incl. `new --overwrite`; import checks and scheme/device rejection; **end-to-end: every output frame verified exact** (FFV1, H.264, ranges) with audio and the 搂4.5 `ffmpeg` report block; AV1/ProRes/DNxHD decode; RPC semantics, create/locked/existing, out-of-process render job |
 
 Not part of `cargo test`: the embedding PoC (`--example embed_host`). Run it manually; result recorded in

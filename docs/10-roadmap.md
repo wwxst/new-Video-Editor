@@ -125,7 +125,7 @@ the [Phase B closure report](../reports/phase-b-exit-2026-11-25.md))
 
 **Goal:** the editor exists: timeline, preview, multi-track compositing.
 
-**Status (2026-11-26):** plan written ([docs/specs/phase-c-plan.md](specs/phase-c-plan.md)); **C1** (headless preview frame pipeline, `arc_cli::preview`) implemented with pixel parity to the export path ([report](../reports/phase-c-c1-2026-11-26.md)); **C2** (preview scheduler: latest-wins, settle upgrade, cancel, backpressure, stub-pipeline tests) implemented ([report](../reports/phase-c-c2-2026-11-26.md)). Next: C3 shell/viewer (egui texture + docs/03 section 3 GPU frame cache).
+**Status (2026-11-26):** plan written ([docs/specs/phase-c-plan.md](specs/phase-c-plan.md)); **C1** (headless preview frame pipeline, `arc_cli::preview`) implemented with pixel parity to the export path ([report](../reports/phase-c-c1-2026-11-26.md)); **C2** (preview scheduler: latest-wins, settle upgrade, cancel, backpressure, stub-pipeline tests) implemented ([report](../reports/phase-c-c2-2026-11-26.md)); **C3** (editor shell: viewer + transport in `arc-app`, composited-frame cache, first benchmark) implemented ([report](../reports/phase-c-c3-2026-11-26.md)). **Benchmark (reference machine, Intel iGPU, 1080p, 4 tracks, 8 effects):** full quality **29.92 fps** (33.42 ms/frame), half quality **87.84 fps** (11.38 ms/frame) — the full-quality number is 0.3 % below the 30 fps exit criterion and is tracked as a gap (GPU composited-frame cache, zero-copy texture upload, GPU YUV upload). Next: C4 timeline canvas; the docs/03 section 3 GPU frame cache is the follow-up compositor step.
 
 Deliverables
 

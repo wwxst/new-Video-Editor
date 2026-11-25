@@ -80,6 +80,12 @@ texture; transport (play/pause/step), keyboard focus and IME.
    [docs/03 §3](../03-render-engine.md) (key: clip, source frame, effect chain hash, resolved
    parameter hash; 2 GB budget), layered on the C1 decoded-source cache.
 
+**Status (2026-11-26):** viewer + transport implemented (`arc-app` shell, `arc_cli::preview_transport`),
+with a minimal composited-frame LRU; the docs/03 §3 per-clip GPU texture cache is **deferred** to the
+next compositor step (needs per-item render targets in `arc-render`). First benchmark: 1080p, 4 tracks,
+8 effects → 29.92 fps full / 87.84 fps half on the Intel iGPU — 0.3 % below the 30 fps exit criterion,
+recorded as a gap. Details: [reports/phase-c-c3-2026-11-26.md](../reports/phase-c-c3-2026-11-26.md).
+
 ### C4 — Timeline canvas
 
 Paint, virtualization and LOD, hit testing, move/trim/split, snapping; gestures become command

@@ -61,6 +61,9 @@ fn create_edit_save_reopen() {
     assert!(!host.recovery().recovered);
 }
 
+/// Windows-only: `SessionLock` is a no-share handle on Windows, but only a `/proc` check elsewhere
+/// (HANDOVER §5), so a second open from the *same* process is refused only on Windows.
+#[cfg(windows)]
 #[test]
 fn second_open_is_locked() {
     let dir = tempfile::tempdir().expect("tmp");

@@ -28,8 +28,20 @@ pub fn has_url_scheme(s: &str) -> bool {
 
 /// Store a media path relative to the project folder when the media lives below it. The stored
 /// form uses forward slashes and never keeps a Windows verbatim prefix (audit F-09 follow-up).
+///
+/// An absolute path is not canonicalised: `canonicalize` on a UNC path performs network I/O (and
+/// can block on an unreachable share), and the document must accept a path before the media is
+/// opened. Relative paths are resolved/canonicalised as before.
 pub fn project_relative(project: &Path, media: &Path) -> String {
-    let abs = std::fs::canonicalize(media).unwrap_or_else(|_| media.to_path_buf());
+    let raw = media.to_string_lossy();
+    let unc = media.is_absolute() && raw.starts_with(r"\\");
+    let abs = if unc {
+        // `canonicalize` on a UNC path performs network I/O and can block on an unreachable
+        // share; storing the path must not contact it (the import check/decoder will).
+        media.to_path_buf()
+    } else {
+        std::fs::canonicalize(media).unwrap_or_else(|_| media.to_path_buf())
+    };
     let root = project.parent().and_then(|p| std::fs::canonicalize(p).ok());
     let rel = root
         .as_ref()

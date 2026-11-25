@@ -30,6 +30,14 @@ pub struct Options {
     pub poc_seconds: Option<f64>,
 }
 
+/// Longest `poc.hang` request honoured by a PoC session.
+const POC_HANG_MAX_MS: u64 = 5_000;
+
+/// PoC-only messages are accepted only in a `--poc-seconds` session (audit F-31).
+fn poc_enabled(poc_seconds: Option<f64>) -> bool {
+    poc_seconds.is_some()
+}
+
 struct Gfx {
     window: Arc<Window>,
     state: egui_winit::State,
@@ -225,8 +233,22 @@ impl App {
                     self.pop_out(el, &reason);
                 }
             }
-            HostMsg::PocHang { ms } => std::thread::sleep(Duration::from_millis(ms)),
-            HostMsg::PocStats => embed::send(&AppMsg::Stats(self.stats())),
+            // PoC messages are hung-watchdog test seams: a product binary must not let the host
+            // block its UI thread on request, so they only work with --poc-seconds (audit F-31).
+            HostMsg::PocHang { ms } => {
+                if poc_enabled(self.opts.poc_seconds) {
+                    std::thread::sleep(Duration::from_millis(ms.min(POC_HANG_MAX_MS)));
+                } else {
+                    eprintln!("arcline: ignoring poc.hang (not a PoC session; use --poc-seconds)");
+                }
+            }
+            HostMsg::PocStats => {
+                if poc_enabled(self.opts.poc_seconds) {
+                    embed::send(&AppMsg::Stats(self.stats()));
+                } else {
+                    eprintln!("arcline: ignoring poc.stats (not a PoC session; use --poc-seconds)");
+                }
+            }
         }
     }
 }
@@ -310,5 +332,18 @@ impl ApplicationHandler<UserEvent> for App {
         if let Some(mut g) = self.gfx.take() {
             g.painter.destroy();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F-31: PoC embed messages must be gated on a PoC session.
+    #[test]
+    fn poc_messages_are_gated_on_a_poc_session() {
+        assert!(!poc_enabled(None));
+        assert!(poc_enabled(Some(2.0)));
+        assert_eq!(POC_HANG_MAX_MS, 5_000);
     }
 }

@@ -254,6 +254,77 @@ fn create_does_not_resurrect_a_stale_sidecar() {
     );
 }
 
+/// Audit follow-up: a foreign snapshot at a *higher* revision must not cause the matching
+/// snapshot's journal to be quarantined with it. The id check already ignores the foreign file;
+/// only a sidecar without any matching snapshot may be moved aside.
+#[test]
+fn foreign_higher_snapshot_does_not_discard_the_matching_journal() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("mixed.arcline");
+    let a = EngineHost::create(
+        &path,
+        arc_core::model::Project::new(
+            "PROJECT A",
+            FrameRate::Fps30,
+            arc_core::model::Resolution { w: 640, h: 360 },
+        ),
+        catalog(),
+        Durability::Default,
+        false,
+    )
+    .expect("create A");
+    apply(
+        &a,
+        vec![Command::ProjectRename {
+            name: "A saved".into(),
+        }],
+    );
+    a.save().expect("save");
+    apply(
+        &a,
+        vec![Command::ProjectRename {
+            name: "A unsaved".into(),
+        }],
+    );
+    drop(a);
+
+    let sidecar = ProjectPaths::new(&path).sidecar;
+    assert!(sidecar.join("snapshot-1.json").exists());
+    assert!(sidecar.join("journal-1.bin").exists());
+
+    // A valid snapshot from a different project, at a revision above A's.
+    let foreign = arc_core::model::Project::new(
+        "FOREIGN",
+        FrameRate::Fps30,
+        arc_core::model::Resolution { w: 640, h: 360 },
+    );
+    let snap = serde_json::json!({
+        "revision": 9,
+        "hash": foreign.canonical_hash(),
+        "project": serde_json::to_value(&foreign).expect("project json"),
+    });
+    std::fs::write(
+        sidecar.join("snapshot-9.json"),
+        serde_json::to_vec(&snap).expect("snapshot json"),
+    )
+    .expect("write foreign snapshot");
+
+    let host = EngineHost::open(&path, catalog(), Durability::Default).expect("open");
+    assert_eq!(host.recovery().replayed, 1, "revision 2 was replayed");
+    assert_eq!(host.published().revision, 2);
+    assert_eq!(host.published().project.meta.name, "A unsaved");
+    // Normal rotation after a successful replay writes snapshot-2; nothing was quarantined.
+    assert!(sidecar.join("snapshot-2.json").exists());
+    let stale: Vec<String> = std::fs::read_dir(dir.path())
+        .expect("dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains(".stale-"))
+        .collect();
+    assert!(stale.is_empty(), "nothing moved aside: {stale:?}");
+    host.shutdown();
+}
+
 /// Audit F-05: when the container identifies a different project than the sidecar snapshots, the
 /// sidecar is not replayed (and the journal that belongs to the foreign project is not applied).
 #[test]

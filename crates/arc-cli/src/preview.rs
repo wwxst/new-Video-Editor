@@ -9,13 +9,14 @@
 
 use crate::export::resolve;
 use arc_core::ids::AssetId;
-use arc_core::model::Project;
+use arc_core::model::{Asset, Project};
 use arc_core::time::Time;
 use arc_media::VideoDecoder;
 use arc_render::plan::{frame_count, plan_frame, SourcePlan};
 use arc_render::{DrawItem, DrawLayer, Image, Renderer};
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use std::sync::Arc;
 
 /// Decoded source bytes kept in memory (docs/03 §3: in-memory, no disk cache in v1). A byte budget,
@@ -103,6 +104,24 @@ struct FrameKey {
     time: Time,
 }
 
+/// Identity of an asset file on disk: path, size and modification time. A repaired or replaced file
+/// at the same path changes this, so a decoder or an "unavailable" verdict can be invalidated
+/// without waiting for an edit (P3-4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileFingerprint {
+    path: PathBuf,
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+fn file_fingerprint(root: &Path, asset: &Asset) -> FileFingerprint {
+    let path = resolve(root, &asset.path);
+    let (len, modified) = std::fs::metadata(&path)
+        .map(|m| (m.len(), m.modified().ok()))
+        .unwrap_or((0, None));
+    FileFingerprint { path, len, modified }
+}
+
 fn push_warning(warnings: &mut Vec<String>, message: String) {
     if !warnings.contains(&message) {
         warnings.push(message);
@@ -117,9 +136,11 @@ pub struct PreviewEngine {
     media_root: PathBuf,
     quality: PreviewQuality,
     renderer: Renderer,
-    decoders: HashMap<AssetId, VideoDecoder>,
-    /// Assets whose file could not be opened, with the path that failed: a changed path is retried.
-    unavailable: HashMap<AssetId, PathBuf>,
+    /// Open decoders with the file identity they were opened from.
+    decoders: HashMap<AssetId, (FileFingerprint, VideoDecoder)>,
+    /// Assets whose file could not be opened, with the identity that failed: a changed file is
+    /// retried on the next frame (repair in place or relink).
+    unavailable: HashMap<AssetId, FileFingerprint>,
     cache: HashMap<FrameKey, Arc<CachedFrame>>,
     order: VecDeque<FrameKey>,
     cache_bytes: u64,
@@ -182,16 +203,17 @@ impl PreviewEngine {
     pub fn set_project(&mut self, project: Project) {
         // Keep a decoder (and an "unavailable" verdict) only while the asset's path is unchanged;
         // a relink or a repaired file must be retried instead of serving a stale decoder.
-        self.decoders.retain(|id, _| {
-            project.assets.get(id).is_some_and(|a| {
-                self.project.assets.get(id).is_some_and(|old| old.path == a.path)
-            })
-        });
-        self.unavailable.retain(|id, path| {
+        self.decoders.retain(|id, (known, _)| {
             project
                 .assets
                 .get(id)
-                .is_some_and(|a| resolve(&self.media_root, &a.path) == *path)
+                .is_some_and(|asset| *known == file_fingerprint(&self.media_root, asset))
+        });
+        self.unavailable.retain(|id, known| {
+            project
+                .assets
+                .get(id)
+                .is_some_and(|asset| *known == file_fingerprint(&self.media_root, asset))
         });
         self.cache.clear();
         self.order.clear();
@@ -327,32 +349,41 @@ impl PreviewEngine {
             self.touch(&key);
             return Some(cached);
         }
-        if self.unavailable.contains_key(asset) {
-            push_warning(warnings, format!("video for {asset} unavailable"));
+        let Some(asset_info) = self.project.assets.get(asset) else {
+            push_warning(warnings, format!("video for {asset} unavailable: unknown asset"));
             return None;
+        };
+        let current = file_fingerprint(&self.media_root, asset_info);
+        if let Some(failed) = self.unavailable.get(asset) {
+            if *failed == current {
+                push_warning(warnings, format!("video for {asset} unavailable"));
+                return None;
+            }
+            // The file changed since it failed (repaired in place or relinked): retry it.
+            self.unavailable.remove(asset);
+        }
+        if self
+            .decoders
+            .get(asset)
+            .is_some_and(|(known, _)| *known != current)
+        {
+            // The file was replaced under an open decoder: drop it so the new file is decoded.
+            self.decoders.remove(asset);
         }
         if !self.decoders.contains_key(asset) {
-            let path = match self.project.assets.get(asset) {
-                Some(a) => resolve(&self.media_root, &a.path),
-                None => {
-                    push_warning(warnings, format!("video for {asset} unavailable: unknown asset"));
-                    self.unavailable
-                        .insert(asset.clone(), PathBuf::from("<unknown>"));
-                    return None;
-                }
-            };
+            let path = current.path.clone();
             match VideoDecoder::open(&path) {
                 Ok(d) => {
-                    self.decoders.insert(asset.clone(), d);
+                    self.decoders.insert(asset.clone(), (current.clone(), d));
                 }
                 Err(e) => {
                     push_warning(warnings, format!("video for {asset} unavailable: {e}"));
-                    self.unavailable.insert(asset.clone(), path);
+                    self.unavailable.insert(asset.clone(), current);
                     return None;
                 }
             }
         }
-        let decoder = self.decoders.get_mut(asset)?;
+        let (_, decoder) = self.decoders.get_mut(asset)?;
         match decoder.frame_at(time) {
             Ok(f) => {
                 self.stats.decodes += 1;

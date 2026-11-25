@@ -158,7 +158,9 @@ impl EngineHost {
             // (audit F-01; docs/08 §4.6).
             let jpath = store.paths().journal(store.snapshot_revision());
             if let Ok(bytes) = std::fs::read(&jpath) {
-                let _ = std::fs::write(jpath.with_extension("bin.rejected"), &bytes);
+                // Distinct from the torn-tail evidence that `ProjectStore::open` writes to
+                // `journal-<rev>.bin.rejected`; both may occur in the same recovery.
+                let _ = std::fs::write(jpath.with_extension("bin.replay-rejected"), &bytes);
             }
             let p = store
                 .paths()

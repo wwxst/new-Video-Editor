@@ -325,6 +325,62 @@ fn foreign_higher_snapshot_does_not_discard_the_matching_journal() {
     host.shutdown();
 }
 
+/// Audit follow-up: a torn journal tail and a semantic replay rejection must both be preserved.
+/// They used to share `journal-<rev>.bin.rejected`, so the replay copy overwrote the torn tail.
+#[test]
+fn torn_tail_and_replay_rejection_keep_separate_evidence() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("evidence.arcline");
+    let host = EngineHost::create(
+        &path,
+        project(FrameRate::Fps30),
+        catalog(),
+        Durability::Default,
+        false,
+    )
+    .expect("create");
+    apply(&host, setup());
+    host.save().expect("save");
+    apply(
+        &host,
+        vec![Command::EffectAdd {
+            id: Some(EffectId::parse("fx_a").expect("effect id")),
+            clip: clip(),
+            effect: "core.color.correct".into(),
+            params: Default::default(),
+        }],
+    );
+    drop(host);
+
+    let sidecar = ProjectPaths::new(&path).sidecar;
+    let journal = sidecar.join("journal-1.bin");
+    let tail = [0x41u8, 0x52, 0x43, 0x4A, 200, 0, 0, 0, 1, 2, 3];
+    let mut bytes = std::fs::read(&journal).expect("journal");
+    let valid_len = bytes.len();
+    bytes.extend_from_slice(&tail);
+    std::fs::write(&journal, &bytes).expect("append torn tail");
+
+    let host = EngineHost::open(&path, empty_catalog(), Durability::Default).expect("open");
+    assert!(host.recovery().discarded_records);
+    assert!(host.recovery().tail_error.is_some());
+
+    // The torn tail is kept exactly as it was ...
+    let tail_file = sidecar.join("journal-1.bin.rejected");
+    assert_eq!(
+        std::fs::read(&tail_file).expect("tail evidence"),
+        tail.to_vec(),
+        "torn tail preserved byte for byte"
+    );
+    // ... and the semantically rejected replay has its own file.
+    let replay_file = sidecar.join("journal-1.bin.replay-rejected");
+    let replay = std::fs::read(&replay_file).expect("replay evidence");
+    assert!(
+        replay.starts_with(b"ARCJ") && replay.len() == valid_len,
+        "replay evidence holds the decoded-before-rejection journal"
+    );
+    drop(host);
+}
+
 /// Audit F-05: when the container identifies a different project than the sidecar snapshots, the
 /// sidecar is not replayed (and the journal that belongs to the foreign project is not applied).
 #[test]
@@ -451,7 +507,7 @@ fn rejected_replay_record_does_not_lose_later_edits() {
 
     // The rejected bytes are kept for support (docs/08 §4.6).
     let paths = arc_core::store::ProjectPaths::new(&path);
-    let rejected = paths.sidecar.join("journal-1.bin.rejected");
+    let rejected = paths.sidecar.join("journal-1.bin.replay-rejected");
     assert!(
         std::fs::metadata(&rejected).is_ok_and(|m| m.len() > 0),
         "rejected journal kept at {}",

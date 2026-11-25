@@ -86,8 +86,7 @@ enum Cmd {
         path: PathBuf,
         #[arg(short, long)]
         output: PathBuf,
-        /// ffv1 | h264 | av1 | prores | dnxhd
-        #[arg(long, default_value = "h264")]
+        #[arg(long, default_value = "h264", help = arc_media::encode::VideoCodec::HELP)]
         codec: String,
         /// Start timecode (inclusive)
         #[arg(long)]
@@ -353,8 +352,15 @@ fn run(cli: Cli) -> Result<String, Fail> {
             to,
             snapshot,
         } => {
-            let codec = arc_media::encode::VideoCodec::parse(codec)
-                .ok_or_else(|| fail("invalid_value", "codec must be ffv1, h264, hevc, av1, prores, or dnxhd"))?;
+            let codec = arc_media::encode::VideoCodec::parse(codec).ok_or_else(|| {
+                fail(
+                    "invalid_value",
+                    format!(
+                        "codec must be one of: {}",
+                        arc_media::encode::VideoCodec::HELP
+                    ),
+                )
+            })?;
             arc_media::tools::verify().map_err(|e| fail("ffmpeg_unavailable", e))?;
             let project = match snapshot {
                 Some(s) => {

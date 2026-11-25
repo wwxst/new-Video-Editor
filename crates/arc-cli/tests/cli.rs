@@ -198,3 +198,16 @@ fn usage_and_frame_rate_errors() {
     let (code, _) = cli(&["frobnicate"], None);
     assert_eq!(code, 64);
 }
+/// P3-3: `render --help` and the codec parser share one list, so `hevc` must appear in both.
+#[test]
+fn render_help_and_parse_offer_the_same_codecs() {
+    let (code, out) = cli(&["render", "--help"], None);
+    assert_eq!(code, 0, "{out}");
+    for name in ["ffv1", "h264", "hevc", "av1", "prores", "dnxhd"] {
+        assert!(out.contains(name), "{name} missing from --help: {out}");
+    }
+    let (code, out) = cli(&["render", "unused.arcline", "-o", "out.mkv", "--codec", "bogus"], None);
+    assert_eq!(code, 2, "{out}");
+    assert!(out.contains("codec must be one of"), "{out}");
+    assert!(out.contains("hevc"), "{out}");
+}

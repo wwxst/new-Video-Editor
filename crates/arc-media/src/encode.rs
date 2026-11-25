@@ -32,6 +32,12 @@ pub enum VideoCodec {
 }
 
 impl VideoCodec {
+    /// Every codec name accepted by [`VideoCodec::parse`], in help-text order.
+    pub const NAMES: [&'static str; 6] = ["ffv1", "h264", "hevc", "av1", "prores", "dnxhd"];
+
+    /// `--codec` help text. Kept next to [`VideoCodec::NAMES`]; a unit test keeps them in sync.
+    pub const HELP: &'static str = "ffv1 | h264 | hevc | av1 | prores | dnxhd";
+
     pub fn parse(s: &str) -> Option<VideoCodec> {
         match s {
             "ffv1" => Some(VideoCodec::Ffv1),
@@ -339,6 +345,17 @@ mod tests {
 
     /// The shipped package has no software HEVC encoder (libx265 is GPL and excluded), so the
     /// candidate list is hardware only and the failure is a typed error naming every candidate.
+    /// The CLI help and the parser must offer the same codec names (P3-3).
+    #[test]
+    fn help_lists_every_parsable_codec_name() {
+        assert_eq!(VideoCodec::NAMES.len(), 6);
+        for name in VideoCodec::NAMES {
+            assert!(VideoCodec::parse(name).is_some(), "{name} must parse");
+            assert!(VideoCodec::HELP.contains(name), "{name} missing from HELP");
+        }
+        assert_eq!(VideoCodec::HELP.matches('|').count(), VideoCodec::NAMES.len() - 1);
+    }
+
     #[test]
     fn hevc_candidates_are_hardware_only_and_the_error_names_them() {
         assert_eq!(

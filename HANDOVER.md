@@ -2,8 +2,8 @@
 
 Checkpoint date: 2026-11-25. Supersedes the earlier WIP handover of `720a99a`.
 
-**State: the workspace builds against the pinned FFmpeg 9.1 package, clippy is clean, and 110 tests
-pass** (Windows 11, Intel integrated GPU; see §3 for the exact counts and the three-run evidence in
+**State: the workspace builds against the pinned FFmpeg 9.1 package, clippy exits 0 (18 warnings from
+newer lints in untouched code, see the follow-up report §5), and 110 tests pass** (Windows 11, Intel integrated GPU; see §3 for the exact counts and the three-run evidence in
 `reports/ffmpeg-9.1-differential.md`). All P0 audit defects are fixed, the FFmpeg 8.1.3 → 9.1
 upgrade is implemented (spec steps 0–3), and the follow-up work closed twelve more audit findings
 (F-06, F-07, F-08, F-11, F-12, F-13, F-14, F-24, F-26, F-28, F-29, F-31). The remaining findings

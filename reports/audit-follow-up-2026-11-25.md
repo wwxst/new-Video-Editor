@@ -5,7 +5,9 @@
 FFmpeg 9.1 merge (`e5d444f`) and the follow-up commits listed below.
 
 **State:** `cargo build --workspace --all-targets` exit 0; `cargo test --workspace` → **110 passed,
-0 failed, 1 ignored**; `CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets` → 0 lints.
+0 failed, 1 ignored**; `CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets` exit 0 (18
+warnings from lints that rustc 1.100's clippy added to untouched code — 15 `collapsible_if`,
+2 `manual_is_multiple_of`, 1 `chunks_exact` — and none from the follow-up changes, see §5).
 Every finding is either fixed with a named regression test or deferred with the reason and the
 recommended next step; nothing is silently open.
 
@@ -226,3 +228,21 @@ The audit's F-11 correction is kept and updated with the fixes above:
 
 Phase B therefore remains "functionally complete; exit criteria open" in HANDOVER §2: the
 frame-accuracy and FFmpeg-package criteria are met, HEVC and the crashing-media corpus are not.
+## 5. Verification at the merge state (2026-11-25)
+
+Run from the repository root with `scripts/dev-env.sh` applied (`ARCLINE_FFMPEG_DIR` = the pinned
+`~/.local/toolchains/ffmpeg-9.1-lgpl`, MinGW on `PATH`), Windows 11, rustc 1.100.0
+`x86_64-pc-windows-gnu`:
+
+| Command | Result |
+|---|---|
+| `cargo build --workspace --all-targets` | exit 0 (`Finished dev profile … in 2m 08s`) |
+| `cargo test --workspace` | **110 passed, 0 failed, 1 ignored** across 27 test binaries (the ignored test is the forced-kill child half) |
+| `CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets` | exit 0; 18 warnings, all from newer clippy lints in code not touched by this work (`collapsible_if` ×15, `manual_is_multiple_of` ×2, `chunks_exact` ×1). No follow-up change produces a lint. A dedicated lint-cleanup commit is recommended but was kept out of this change (no unrelated refactoring) |
+| differential harness (`ARCLINE_CORPUS_DIR=…arcline-corpus-8.1.3`, allow-list) | `1 passed`, 12 fields explained (F-06/F-07/F-08 fixes), **0 unexplained** |
+| `third_party/ffmpeg/verify.sh` | not re-run (no package change); last run exit 0, 40 checks |
+
+Per-suite counts at this state: arc-core unit 16, `engine` 14, `journal` 9, `property` 1,
+`recovery` 7, `store` 8; arc-media unit 9, `decode` 3, `audio_blocks` 2, `audio_anchor` 2,
+`param_change` 2, `paths` 2, `runtime` 3, `differential` 1, `seek_accuracy` 4; arc-render 1+1+5;
+arc-audio 3; arc-cli 4+4+4; arc-app 1.

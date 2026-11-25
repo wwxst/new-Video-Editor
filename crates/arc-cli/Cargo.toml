@@ -17,6 +17,7 @@ arc-render.workspace = true
 arc-media.workspace = true
 arc-audio.workspace = true
 blake3.workspace = true
+thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 clap = { version = "4", features = ["derive"] }

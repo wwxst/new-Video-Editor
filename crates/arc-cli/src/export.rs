@@ -54,7 +54,7 @@ pub struct RendererInfo {
 /// width, height, RGBA8 pixels
 type DecodedFrame = (u32, u32, Vec<u8>);
 
-fn resolve(root: &Path, p: &str) -> PathBuf {
+pub(crate) fn resolve(root: &Path, p: &str) -> PathBuf {
     let path = Path::new(p);
     if path.is_absolute() {
         path.to_path_buf()
@@ -235,9 +235,7 @@ pub fn export(
     let enc = encoder.finish().map_err(|e| e.to_string())?;
     let _ = std::fs::remove_file(&wav);
     if titles_skipped {
-        warnings.push(
-            "title clips are not rendered yet (text renderer pending); they were skipped".into(),
-        );
+        warnings.push(crate::preview::TITLE_WARNING.to_string());
     }
     for e in &unsupported {
         warnings.push(format!(

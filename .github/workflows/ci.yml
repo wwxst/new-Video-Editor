@@ -120,6 +120,15 @@ jobs:
           cd "$(cygpath "$GITHUB_WORKSPACE")"
           bash third_party/ffmpeg/build.sh
 
+      # Save immediately after a successful build: the automatic post-job save is skipped when a
+      # later step fails, which would make every trial run rebuild FFmpeg for ~25 minutes.
+      - name: Save the FFmpeg package cache
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: C:\Users\runneradmin\.local\toolchains\ffmpeg-9.1-lgpl
+          key: ffmpeg-9.1-lgpl-${{ hashFiles('third_party/ffmpeg/manifest.json', 'third_party/ffmpeg/configure-9.1.txt', 'third_party/ffmpeg/build.sh') }}
+
       - name: Rust 1.95 (x86_64-pc-windows-gnu host)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -131,15 +140,33 @@ jobs:
         with:
           key: media-windows
 
-      - name: Build, test and lint the whole workspace
+      # Separate steps so a red run says which one failed (job logs need repository admin rights,
+      # so the step name is the first-line diagnostic).
+      - name: Build the whole workspace
+        shell: pwsh
+        env:
+          ARCLINE_FFMPEG_DIR: C:\Users\runneradmin\.local\toolchains\ffmpeg-9.1-lgpl
+          ARCLINE_FORCE_FALLBACK_ADAPTER: "1"
+        run: |
+          $env:PATH = "C:\msys64\ucrt64\bin;$env:ARCLINE_FFMPEG_DIR\bin;$env:PATH"
+          cargo build --workspace --all-targets
+
+      - name: Test the whole workspace
         shell: pwsh
         env:
           ARCLINE_FFMPEG_DIR: C:\Users\runneradmin\.local\toolchains\ffmpeg-9.1-lgpl
           # GitHub Windows runners have no GPU: the compositor tests use the software adapter
           # (HANDOVER §6.3). Hardware-encoder assertions skip themselves when no encoder exists.
           ARCLINE_FORCE_FALLBACK_ADAPTER: "1"
+          RUST_BACKTRACE: "1"
         run: |
           $env:PATH = "C:\msys64\ucrt64\bin;$env:ARCLINE_FFMPEG_DIR\bin;$env:PATH"
-          cargo build --workspace --all-targets
-          cargo test --workspace
+          cargo test --workspace --no-fail-fast
+
+      - name: Clippy
+        shell: pwsh
+        env:
+          ARCLINE_FFMPEG_DIR: C:\Users\runneradmin\.local\toolchains\ffmpeg-9.1-lgpl
+        run: |
+          $env:PATH = "C:\msys64\ucrt64\bin;$env:ARCLINE_FFMPEG_DIR\bin;$env:PATH"
           cargo clippy --workspace --all-targets

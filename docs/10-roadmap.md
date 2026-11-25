@@ -110,11 +110,12 @@ the [Phase B closure report](../reports/phase-b-exit-2026-11-25.md))
   half is unproven.
 - **Met** — Windows FFmpeg LGPL build pipeline pinned in the repo (`third_party/ffmpeg/`, manifest
   with hashes, SBOM, `verify.sh`; FFmpeg 9.1, D1 LGPL v2.1+).
-- **Met** — `.github/workflows/ci.yml`: `core` on ubuntu/windows/macos (Rust 1.95 + clippy, the
-  FFmpeg-free crates) is **green on GitHub** (Actions run 2: windows, ubuntu and macos); `media` on
-  Windows builds the pinned FFmpeg 9.1 from the in-repo recipe (cached) and runs the full
-  build/test/clippy — its first cold build is long, and the run result is linked in the closure
-  report §3.2.
+- **Met for the core matrix; `media` job constrained** — `.github/workflows/ci.yml`: `core` on
+  ubuntu/windows/macos (Rust 1.95 + clippy, the FFmpeg-free crates) is **green on GitHub** (Actions
+  run 2: windows, ubuntu and macos). The Windows `media` job builds the pinned FFmpeg 9.1 from the
+  in-repo recipe successfully **in CI**, then its workspace build/test/clippy step fails without a
+  readable log (repository admin rights needed); the same suite is 115/115 green locally. Split
+  Build/Test/Clippy steps were added for the next diagnosis — see the closure report §3.2/§4.
 
 ## 5. Phase C — Compositor and shell (weeks 10–16)
 

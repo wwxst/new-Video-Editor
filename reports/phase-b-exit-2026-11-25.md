@@ -116,7 +116,15 @@ need repository admin rights). Runs, `https://github.com/wwxst/new-Video-Editor/
 | Run | Commit | Result |
 |---|---|---|
 | [#1](https://github.com/wwxst/new-Video-Editor/actions/runs/45643845772) | `a394f37` | `core (windows)` success; `core (ubuntu)`, `core (macos)` failed in `cargo test -p arc-core`; `media` failed in the FFmpeg build step |
-| [#2](https://github.com/wwxst/new-Video-Editor/actions/runs/45645526473) | `5a1a3ac` | **`core` success on windows, ubuntu and macos**; `media` in progress (FFmpeg 9.1 build, ~30–60 min cold, cached afterwards) |
+| [#2](https://github.com/wwxst/new-Video-Editor/actions/runs/45645526473) | `5a1a3ac` | **`core` success on windows, ubuntu and macos**; `media`: MSYS2 setup, cargo cache, the **FFmpeg 9.1 build (step 6) and Rust 1.95 (step 7) succeeded**, then the combined workspace build/test/clippy step failed (logs need repository admin rights) |
+
+The media job's FFmpeg build succeeding in CI is the important half: the in-repo recipe (source
+fetch + signature/SHA verification + configure profile) works on a clean `windows-latest` runner.
+The failing step runs the same suite that is green locally (115/115) on the reference machine; the
+remaining differences are the runner's **Rust 1.95** toolchain, its **GPU-less** environment
+(WARP/software adapter) and its MinGW/UCRT setup. This is the one constrained item of this batch
+(§4). The combined step was split into separate **Build**, **Test** and **Clippy** steps so the next
+run's step name tells which one fails, since the log body is not readable without admin rights.
 
 Run 1 diagnosed two real problems, both fixed in `5a1a3ac`:
 
@@ -158,10 +166,15 @@ in §5. Its first cold build is the long pole; the result is recorded in the run
 - **Quarantine fixture.** The remaining Phase B gap is a crashing/hanging media sample. A fuzzed
   corpus (cargo-fuzz against the shim, `-fsanitize=address` where available) is the right way to
   produce one, and it also serves the "mutated-media corpus" wording of the criterion.
-- **CI first run.** Without `gh` the first GitHub run is unobserved; if the `media` job fails, the
-  log will show whether it is the FFmpeg build (MSYS2 package set / build time) or a test that
-  assumes the reference machine's accelerators. The hardware tests already skip, so the likely
-  remaining risk is the FFmpeg build step.
+- **`media` job is the constrained item.** Its FFmpeg build is green in CI; the workspace
+  build/test/clippy step is red and its log is unreadable without a repository token. Locally the
+  same package and suite are green (115/115). Next steps, in order: (1) read the log of the now
+  split Build/Test steps with `gh run view --log-failed` once `gh auth login` is available;
+  (2) if the failure is the GPU-less runner, either mark the GPU test binaries as skipped when
+  `ARCLINE_FORCE_FALLBACK_ADAPTER` cannot obtain an adapter (the renderer already has the seam) or
+  attach a self-hosted runner with a GPU; (3) if it is Rust 1.95, bump the CI pin to 1.100 — the
+  declared MSRV stays 1.95 but the tested toolchain is 1.100. The `core` matrix is green either way
+  and covers the deterministic core.
 - **Rust 1.95 in CI vs 1.100 locally.** The declared MSRV is 1.95; CI pins it. If a dependency
   starts requiring newer, the `core` job will fail first and that is the intended signal.
 

@@ -333,3 +333,77 @@ fn render_range_and_h264() {
         "frame-accurate through a lossy codec"
     );
 }
+/// Goal A: HEVC export. The shipped FFmpeg 9.1 package has no software HEVC encoder (libx265 is
+/// GPL and excluded by decision D1), so the `hevc` codec selects a hardware encoder and fails with
+/// a typed error when none is usable. The output is validated with `ffprobe`: codec, resolution,
+/// frame rate and pixel format.
+#[test]
+fn hevc_exports_are_decodable_and_match_the_spec() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let p = build(dir.path());
+    let ps = p.to_str().expect("utf8");
+    let out = dir.path().join("out_hevc.mp4");
+    let (code, stdout, err) = cli(
+        &[
+            "render",
+            ps,
+            "-o",
+            out.to_str().expect("utf8"),
+            "--codec",
+            "hevc",
+            "--from",
+            "00:00:00:00",
+            "--to",
+            "00:00:00:10",
+        ],
+        None,
+    );
+    assert_eq!(code, 0, "{stdout} {err}");
+    let r = j(&stdout);
+    let enc = r["encoder"].as_str().unwrap_or_default();
+    assert!(
+        ["hevc_nvenc", "hevc_qsv", "hevc_amf"].contains(&enc),
+        "hardware HEVC encoder expected, got {enc:?} ({r})"
+    );
+    assert_eq!(r["codec"], json!("hevc"));
+    assert_eq!(r["frames"], json!(10));
+    assert_eq!(r["ffmpeg"]["override"], json!(false));
+
+    // ffprobe end-to-end: codec, resolution, frame rate, pixel format.
+    let probe = Command::new(arc_media::tools::ffprobe_checked().expect("ffprobe"))
+        .args([
+            "-v",
+            "error",
+            "-of",
+            "json",
+            "-show_entries",
+            "stream=codec_name,width,height,pix_fmt,r_frame_rate",
+        ])
+        .arg(format!("file:{}", out.display()))
+        .output()
+        .expect("run ffprobe");
+    assert!(
+        probe.status.success(),
+        "{}",
+        String::from_utf8_lossy(&probe.stderr)
+    );
+    let streams: Value = serde_json::from_slice(&probe.stdout).expect("ffprobe json");
+    let s = &streams["streams"][0];
+    assert_eq!(s["codec_name"], json!("hevc"), "{s}");
+    assert_eq!(s["width"], json!(320));
+    assert_eq!(s["height"], json!(180));
+    assert_eq!(s["pix_fmt"], json!("yuv420p"), "{s}");
+    let rate: f64 = {
+        let text = s["r_frame_rate"].as_str().expect("r_frame_rate");
+        let (num, den) = text.split_once('/').unwrap_or((text, "1"));
+        num.parse::<f64>().unwrap_or(0.0) / den.parse::<f64>().unwrap_or(1.0)
+    };
+    assert!((rate - 29.97).abs() < 0.02, "frame rate {rate} ({s})");
+
+    // The same decoder reads it back, so the file is a normal Arcline source too.
+    let mut d = VideoDecoder::open(&out).expect("decode hevc output");
+    assert_eq!((d.info().width, d.info().height), (320, 180));
+    assert_eq!(d.info().codec, "hevc");
+    let f = d.frame_at(arc_core::Time::ZERO).expect("hevc frame");
+    assert_eq!((f.width, f.height), (320, 180));
+}

@@ -3,7 +3,9 @@
 //! Runs inside the export process (`arcline-cli render`), which is itself a child of the GUI.
 //! Frames are streamed as raw RGBA to an `ffmpeg` child that encodes and muxes. Encoders are
 //! chosen by a capability probe (a one-frame trial encode), never guessed; the choice is
-//! recorded in the export report. H.264/HEVC use hardware encoders or OpenH264 — never GPL x264.
+//! recorded in the export report. H.264/HEVC use hardware encoders — never GPL x264/x265. The
+//! shipped 9.1 package contains no software HEVC encoder (`libx265` is GPL and excluded by D1), so
+//! `hevc` selects `hevc_nvenc`/`hevc_qsv`/`hevc_amf` and reports `NoEncoder` when none is usable.
 
 use crate::tools::{self, Exit};
 use arc_core::time::Ratio;
@@ -25,6 +27,8 @@ pub enum VideoCodec {
     /// SMPTE VC-3 / DNxHD (89/145/220 Mbit/s family; the encoder picks the profile from the size
     /// and the 36 Mbit/s rate used here).
     DnxHd,
+    /// HEVC (H.265) through a hardware encoder; the shipped package has no software encoder.
+    Hevc,
 }
 
 impl VideoCodec {
@@ -35,6 +39,7 @@ impl VideoCodec {
             "av1" => Some(VideoCodec::Av1),
             "prores" => Some(VideoCodec::ProRes),
             "dnxhd" => Some(VideoCodec::DnxHd),
+            "hevc" => Some(VideoCodec::Hevc),
             _ => None,
         }
     }
@@ -53,13 +58,16 @@ impl VideoCodec {
             VideoCodec::Av1 => &["av1_nvenc", "av1_qsv", "av1_amf", "libsvtav1"],
             VideoCodec::ProRes => &["prores_ks"],
             VideoCodec::DnxHd => &["dnxhd"],
+            // Hardware only: the shipped 9.1 build has no `libx265` (GPL, D1) and no `hevc_mf`
+            // (D2), so there is no software fallback by design.
+            VideoCodec::Hevc => &["hevc_nvenc", "hevc_qsv", "hevc_amf"],
         }
     }
 
     fn pix_fmt(self) -> &'static str {
         match self {
             VideoCodec::Ffv1 => "bgr0",
-            VideoCodec::H264 | VideoCodec::Av1 => "yuv420p",
+            VideoCodec::H264 | VideoCodec::Av1 | VideoCodec::Hevc => "yuv420p",
             VideoCodec::ProRes => "yuv422p10le",
             VideoCodec::DnxHd => "yuv422p",
         }
@@ -323,5 +331,33 @@ impl Encoder {
             audio_codec: has_audio
                 .then(|| self.spec.codec.audio_codec(&self.spec.output).to_string()),
         })
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped package has no software HEVC encoder (libx265 is GPL and excluded), so the
+    /// candidate list is hardware only and the failure is a typed error naming every candidate.
+    #[test]
+    fn hevc_candidates_are_hardware_only_and_the_error_names_them() {
+        assert_eq!(
+            VideoCodec::Hevc.candidates(),
+            &["hevc_nvenc", "hevc_qsv", "hevc_amf"]
+        );
+        assert_eq!(VideoCodec::Hevc.pix_fmt(), "yuv420p");
+        assert_eq!(VideoCodec::parse("hevc"), Some(VideoCodec::Hevc));
+        let err = EncodeError::NoEncoder(
+            VideoCodec::Hevc,
+            VideoCodec::Hevc.candidates()
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        );
+        let msg = err.to_string();
+        for c in VideoCodec::Hevc.candidates() {
+            assert!(msg.contains(c), "{msg}");
+        }
+        assert!(msg.contains("no working encoder"), "{msg}");
     }
 }

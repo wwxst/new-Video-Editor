@@ -5,7 +5,7 @@
 //! same process, so the session survives (docs/13 §2.5).
 
 use crate::embed::{self, AppMsg, HostMsg};
-use crate::editor::Editor;
+use crate::shell::Shell;
 use crate::poc::Workload;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -52,8 +52,8 @@ pub struct App {
     opts: Options,
     gfx: Option<Gfx>,
     workload: Workload,
-    /// Editor session when `--project` was given (viewer + transport).
-    editor: Option<Editor>,
+    /// Four-panel editor shell (media / preview / inspector / timeline).
+    shell: Shell,
     /// Parent currently in use; cleared by pop-out.
     parent: Option<isize>,
     started: Instant,
@@ -72,13 +72,12 @@ impl std::fmt::Debug for App {
 
 impl App {
     pub fn new(opts: Options) -> App {
-        let editor = opts.project.as_deref().map(Editor::open);
         App {
             parent: opts.parent,
             opts,
             gfx: None,
             workload: Workload::new(),
-            editor,
+            shell: Shell::default(),
             started: Instant::now(),
             popped_out: None,
             exit_requested: false,
@@ -86,8 +85,15 @@ impl App {
     }
 
     fn create_window(&mut self, el: &ActiveEventLoop) -> Result<(), String> {
+        let title = self
+            .opts
+            .project
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| format!("Arcline — {}", s.to_string_lossy()))
+            .unwrap_or_else(|| "Arcline".to_string());
         let mut attrs = Window::default_attributes()
-            .with_title("Arcline")
+            .with_title(title)
             .with_inner_size(PhysicalSize::new(1280u32, 720u32));
         if let Some(hwnd) = self.parent {
             let handle =
@@ -175,13 +181,16 @@ impl App {
             size.height,
             self.started.elapsed().as_secs_f32()
         );
-        let mut out = if let Some(editor) = self.editor.as_mut() {
-            g.ctx.run_ui(input, |ui| editor.ui(ui))
-        } else {
+        let poc_mode =
+            self.opts.poc_seconds.is_some() || self.opts.parent.is_some() || self.opts.embed_stdio;
+        let mut out = if poc_mode {
             let workload = &mut self.workload;
             g.ctx.run_ui(input, |ui| {
                 workload.ui(ui, "Arcline - embedding PoC", &live)
             })
+        } else {
+            let shell = &mut self.shell;
+            g.ctx.run_ui(input, |ui| shell.ui(ui))
         };
         g.state
             .handle_platform_output(&g.window, out.platform_output);

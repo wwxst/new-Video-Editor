@@ -8,9 +8,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+#[allow(dead_code)]
 mod editor;
 mod embed;
 mod poc;
+mod shell;
 
 use std::process::ExitCode;
 

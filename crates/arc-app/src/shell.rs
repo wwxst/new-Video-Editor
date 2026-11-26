@@ -109,15 +109,17 @@ pub fn layout(rect: Rect, sizes: PanelSizes) -> Panels {
 }
 
 /// The shell state: panel fractions, adjusted by dragging the splitters.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Shell {
     pub sizes: PanelSizes,
+    pub timeline: crate::timeline::Timeline,
 }
 
 impl Default for Shell {
     fn default() -> Self {
         Shell {
             sizes: PanelSizes::default(),
+            timeline: crate::timeline::Timeline::default(),
         }
     }
 }
@@ -133,7 +135,9 @@ impl Shell {
         card(ui, "MEDIA", panels.left);
         card(ui, "PREVIEW", panels.center);
         card(ui, "INSPECTOR", panels.right);
-        card(ui, "TIMELINE", panels.bottom);
+        card_content(ui, "TIMELINE", panels.bottom, |ui, content| {
+            self.timeline.ui(ui, content)
+        });
 
         self.splitters(&panels, ui);
     }
@@ -177,6 +181,31 @@ impl Shell {
             ui.painter().rect_filled(bar, 2.0, color);
         }
     }
+}
+fn card_content(
+    ui: &mut Ui,
+    title: &str,
+    rect: Rect,
+    add: impl FnOnce(&mut Ui, Rect),
+) {
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(10),
+        CARD_BG,
+        Stroke::new(1.0, BORDER),
+        egui::StrokeKind::Inside,
+    );
+    let inner = rect.shrink2(egui::vec2(10.0, 8.0));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(inner)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    child.label(egui::RichText::new(title).size(13.0).strong().color(TEXT));
+    child.add_space(4.0);
+    let top = child.min_rect().bottom();
+    let content = Rect::from_min_max(egui::pos2(inner.left(), top), inner.max);
+    add(&mut child, content);
 }
 fn card(ui: &mut Ui, title: &str, rect: Rect) {
     // The card fills its rect; the inner Ui only lays out the title block.

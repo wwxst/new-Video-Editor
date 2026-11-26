@@ -13,6 +13,7 @@ mod editor;
 mod embed;
 mod poc;
 mod shell;
+mod timeline;
 
 use std::process::ExitCode;
 

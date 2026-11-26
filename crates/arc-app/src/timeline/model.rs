@@ -68,9 +68,9 @@ impl TrackKind {
             TrackKind::Text => Color32::from_rgb(0x8a, 0x45, 0x3c),
             TrackKind::Effect => Color32::from_rgb(0x6d, 0x5a, 0x30),
             TrackKind::Sticker => Color32::from_rgb(0x5c, 0x4a, 0x6e),
-            TrackKind::Video => Color32::from_rgb(0x1f, 0x6f, 0x6a),
-            TrackKind::Image => Color32::from_rgb(0x3f, 0x58, 0x78),
-            TrackKind::Audio => Color32::from_rgb(0x24, 0x50, 0x7a),
+            TrackKind::Video => Color32::from_rgb(0x06, 0x4f, 0x58),
+            TrackKind::Image => Color32::from_rgb(0x10, 0x4a, 0x4f),
+            TrackKind::Audio => Color32::from_rgb(0x10, 0x36, 0x57),
         }
     }
 }
@@ -203,62 +203,95 @@ pub struct TimelineModel {
 }
 
 impl TimelineModel {
-    /// Mock project used by the app until the engine feed is wired.
+    /// Sample project used by the app until the engine feed is wired.
+    ///
+    /// The media is real, licenced footage, photographs and audio (`assets/demo/README.md`):
+    /// people in a city street and a market, ocean cliffs, a passing train and seagulls behind a
+    /// ferry, a landscape and a portrait photograph, piano music and a human voice reading. The
+    /// text track carries Chinese titles and subtitles; all six track kinds are present, with
+    /// visual tracks above the main video and audio tracks below it.
     pub fn mock() -> TimelineModel {
         if std::env::var_os("ARCLINE_TIMELINE_EMPTY").is_some() {
             return TimelineModel::empty();
         }
         let mut tracks = Vec::new();
 
-        let mut text = Track::new("Text");
-        text.add_clip(Clip::new(TrackKind::Text, "Opening title", 0.0, 2.8));
-        text.add_clip(Clip::new(TrackKind::Text, "Lower third", 4.5, 2.5));
+        let mut text = Track::new("Text / subtitles");
+        text.add_clip(Clip::new(TrackKind::Text, "开场 · 山海之间", 0.0, 2.5));
+        text.add_clip(Clip::new(
+            TrackKind::Text,
+            "字幕 · 海浪拍打冰岛海岸",
+            2.5,
+            4.5,
+        ));
+        text.add_clip(Clip::new(TrackKind::Text, "字幕 · 城市街角的人流", 7.0, 3.0));
+        text.add_clip(Clip::new(TrackKind::Text, "字幕 · 集市里的烟火气", 10.0, 3.0));
+        text.add_clip(Clip::new(TrackKind::Text, "字幕 · 海鸥追随渡轮", 13.0, 4.0));
+        text.add_clip(Clip::new(TrackKind::Text, "片尾 · 谢谢观看", 17.5, 2.5));
         tracks.push(text);
 
-        let mut effect = Track::new("Effect");
-        effect.add_clip(Clip::new(TrackKind::Effect, "Color correct", 1.0, 4.0));
-        effect.add_clip(Clip::new(TrackKind::Effect, "Blur", 6.0, 2.0));
-        effect.add_clip(Clip::new(TrackKind::Effect, "Sharpen", 9.0, 1.5));
+        let mut effect = Track::new("Effects");
+        effect.add_clip(Clip::new(TrackKind::Effect, "调色 · 暖阳", 0.5, 5.0));
+        effect.add_clip(Clip::new(TrackKind::Effect, "虚化 · 柔光", 7.5, 3.5));
+        effect.add_clip(Clip::new(TrackKind::Effect, "锐化 · 细节", 13.0, 3.5));
         tracks.push(effect);
 
-        let mut sticker = Track::new("Sticker");
-        sticker.add_clip(Clip::new(TrackKind::Sticker, "Badge", 3.0, 2.0));
+        let mut sticker = Track::new("Stickers");
+        sticker.add_clip(Clip::new(TrackKind::Sticker, "海浪贴纸", 2.0, 2.5));
+        sticker.add_clip(Clip::new(TrackKind::Sticker, "集市贴纸", 9.0, 3.0));
+        sticker.add_clip(Clip::new(TrackKind::Sticker, "飞鸟贴纸", 14.0, 2.5));
         tracks.push(sticker);
 
-        let mut image = Track::new("Image");
+        let mut image = Track::new("Images");
         image.add_clip(
-            Clip::new(TrackKind::Image, "poster.png", 6.0, 3.0)
-                .with_source(demo_media("poster.png")),
+            Clip::new(TrackKind::Image, "mountain_lake.png", 7.5, 3.5)
+                .with_source(demo_media("mountain_lake.png")),
+        );
+        image.add_clip(
+            Clip::new(TrackKind::Image, "studio_portrait.png", 14.0, 3.5)
+                .with_source(demo_media("studio_portrait.png")),
         );
         tracks.push(image);
 
-        let mut supporting = Track::new("Video (b-roll)");
+        let mut supporting = Track::new("B-roll");
         supporting.add_clip(
-            Clip::new(TrackKind::Video, "broll.mp4", 0.5, 5.5)
-                .with_source(demo_media("broll.mp4")),
+            Clip::new(TrackKind::Video, "ocean_cliffs.mp4", 2.0, 5.0)
+                .with_source(demo_media("ocean_cliffs.mp4")),
+        );
+        supporting.add_clip(
+            Clip::new(TrackKind::Video, "seagulls.mp4", 12.5, 4.5)
+                .with_source(demo_media("seagulls.mp4")),
         );
         tracks.push(supporting);
 
         let mut main = Track::new("Main video");
         main.add_clip(
-            Clip::new(TrackKind::Video, "main.mp4", 0.0, 9.5)
-                .with_source(demo_media("main.mp4")),
+            Clip::new(TrackKind::Video, "city_street.mp4", 0.0, 5.0)
+                .with_source(demo_media("city_street.mp4")),
+        );
+        main.add_clip(
+            Clip::new(TrackKind::Video, "train_station.mp4", 5.0, 4.0)
+                .with_source(demo_media("train_station.mp4")),
+        );
+        main.add_clip(
+            Clip::new(TrackKind::Video, "market_crowd.mp4", 9.0, 4.0)
+                .with_source(demo_media("market_crowd.mp4")),
         );
         tracks.push(main);
 
         let mut music = Track::new("Music");
         music.add_clip(
-            Clip::new(TrackKind::Audio, "voice.wav", 0.0, 6.0)
-                .with_source(demo_media("voice.wav")),
+            Clip::new(TrackKind::Audio, "piano_theme.wav", 0.0, 20.0)
+                .with_source(demo_media("piano_theme.wav")),
         );
         tracks.push(music);
 
-        let mut voice = Track::new("Voice");
-        voice.add_clip(
-            Clip::new(TrackKind::Audio, "narration.wav", 3.0, 8.0)
+        let mut narration = Track::new("Narration");
+        narration.add_clip(
+            Clip::new(TrackKind::Audio, "narration.wav", 1.0, 18.0)
                 .with_source(demo_media("narration.wav")),
         );
-        tracks.push(voice);
+        tracks.push(narration);
 
         TimelineModel {
             tracks,
@@ -293,6 +326,11 @@ impl TimelineModel {
 
 /// Vertical gap between adjacent lanes.
 pub const LANE_GAP: f32 = 4.0;
+
+/// Frame rate of the sample project, used to format clip durations as `HH:MM:SS:FF`.
+///
+/// The sample video files are 24 fps, so a 4.5 s clip reads `00:00:04:12`, never `4.5s`.
+pub const PROJECT_FPS: f64 = 24.0;
 
 #[cfg(test)]
 mod tests {
@@ -372,14 +410,35 @@ mod tests {
             .filter(|c| c.kind == TrackKind::Text)
             .map(|c| c.name.as_str())
             .collect();
-        assert_eq!(text, ["Opening title", "Lower third"]);
+        assert_eq!(
+            text,
+            [
+                "开场 · 山海之间",
+                "字幕 · 海浪拍打冰岛海岸",
+                "字幕 · 城市街角的人流",
+                "字幕 · 集市里的烟火气",
+                "字幕 · 海鸥追随渡轮",
+                "片尾 · 谢谢观看",
+            ]
+        );
+        assert!(
+            text.iter().all(|name| name.chars().any(|c| c as u32 >= 0x4E00)),
+            "the text track must contain Chinese characters"
+        );
 
         let effects: Vec<&str> = clips
             .iter()
             .filter(|c| c.kind == TrackKind::Effect)
             .map(|c| c.name.as_str())
             .collect();
-        assert_eq!(effects, ["Color correct", "Blur", "Sharpen"]);
+        assert_eq!(effects, ["调色 · 暖阳", "虚化 · 柔光", "锐化 · 细节"]);
+
+        let stickers: Vec<&str> = clips
+            .iter()
+            .filter(|c| c.kind == TrackKind::Sticker)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(stickers, ["海浪贴纸", "集市贴纸", "飞鸟贴纸"]);
 
         let demo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/demo");
         for clip in &clips {
@@ -391,6 +450,7 @@ mod tests {
                         "{} is not demo media",
                         source.display()
                     );
+                    assert!(source.is_file(), "{} is missing", source.display());
                     assert_eq!(
                         clip.source_name().as_deref(),
                         source.file_name().and_then(|n| n.to_str())
@@ -402,6 +462,42 @@ mod tests {
                 ),
             }
         }
+    }
+
+    #[test]
+    fn mock_has_real_video_photos_music_and_narration() {
+        let model = TimelineModel::mock();
+        let clips: Vec<&Clip> = model.tracks.iter().flat_map(|t| t.clips.iter()).collect();
+        let videos: Vec<String> = clips
+            .iter()
+            .filter(|c| c.kind == TrackKind::Video)
+            .filter_map(|c| c.source_name())
+            .collect();
+        assert_eq!(
+            videos,
+            [
+                "ocean_cliffs.mp4",
+                "seagulls.mp4",
+                "city_street.mp4",
+                "train_station.mp4",
+                "market_crowd.mp4",
+            ],
+            "three to five real video clips across the main and supporting tracks"
+        );
+
+        let images: Vec<String> = clips
+            .iter()
+            .filter(|c| c.kind == TrackKind::Image)
+            .filter_map(|c| c.source_name())
+            .collect();
+        assert_eq!(images, ["mountain_lake.png", "studio_portrait.png"]);
+
+        let audio: Vec<String> = clips
+            .iter()
+            .filter(|c| c.kind == TrackKind::Audio)
+            .filter_map(|c| c.source_name())
+            .collect();
+        assert_eq!(audio, ["piano_theme.wav", "narration.wav"]);
     }
 
     #[test]

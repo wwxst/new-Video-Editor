@@ -230,6 +230,8 @@ pub struct MediaHub {
     thumbs: Lru<Key, ThumbVisual>,
     stills: Lru<Key, StillVisual>,
     waves: Lru<Key, Arc<Waveform>>,
+    /// Whether a source has an audio stream; asked once per path and cached.
+    audio_presence: HashMap<PathBuf, bool>,
     failures: HashMap<PathBuf, String>,
     pending: HashSet<Key>,
     budget: u32,
@@ -267,6 +269,7 @@ impl MediaHub {
             thumbs: Lru::new(THUMB_CAPACITY),
             stills: Lru::new(STILL_CAPACITY),
             waves: Lru::new(WAVE_CAPACITY),
+            audio_presence: HashMap::new(),
             failures: HashMap::new(),
             pending: HashSet::new(),
             budget: MAX_REQUESTS_PER_FRAME,
@@ -356,6 +359,20 @@ impl MediaHub {
             }
         }
         None
+    }
+
+    /// Whether `path` contains an audio stream, cached per file.
+    ///
+    /// Opening an [`AudioDecoder`] is cheap and does not decode a frame, so the answer is available
+    /// on the first painted frame; caching it avoids reopening the file on every repaint. A video
+    /// without audio keeps the larger thumbnail region, a video with audio reserves its waveform.
+    pub fn has_audio(&mut self, path: &Path) -> bool {
+        if let Some(has_audio) = self.audio_presence.get(path) {
+            return *has_audio;
+        }
+        let has_audio = AudioDecoder::open(path, 8_000).is_ok();
+        self.audio_presence.insert(path.to_path_buf(), has_audio);
+        has_audio
     }
 
     /// Why `path` could not be decoded, if it failed.
@@ -753,7 +770,7 @@ mod tests {
     #[test]
     fn pending_requests_are_deduplicated() {
         let mut hub = MediaHub::new();
-        let path = std::path::Path::new("assets/demo/main.mp4");
+        let path = std::path::Path::new("assets/demo/city_street.mp4");
         assert!(hub.video_frame(path, 1.0).is_none());
         assert!(hub.video_frame(path, 1.0).is_none());
         // One request for the same quantised timestamp, even when painted twice in one frame.
@@ -778,11 +795,13 @@ mod tests {
     fn real_demo_media_decodes() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/demo");
         let mut decoders = Lru::new(DECODER_CAPACITY);
-        let (w, h, rgba) = decode_frame(&mut decoders, &root.join("main.mp4"), 3.0).expect("frame");
+        let (w, h, rgba) =
+            decode_frame(&mut decoders, &root.join("city_street.mp4"), 3.0).expect("frame");
         assert!(w > 0 && h > 0 && rgba.len() == (w * h * 4) as usize);
-        let (iw, ih, _) = decode_still(&mut decoders, &root.join("poster.png")).expect("still");
+        let (iw, ih, _) =
+            decode_still(&mut decoders, &root.join("mountain_lake.png")).expect("still");
         assert!(iw > 0 && ih > 0);
-        let wave = decode_peaks(&root.join("voice.wav")).expect("peaks");
+        let wave = decode_peaks(&root.join("narration.wav")).expect("peaks");
         assert!(!wave.is_empty());
         assert!(wave.duration > 5.0);
         let loudest = wave
@@ -791,5 +810,20 @@ mod tests {
             .map(|p| p.max)
             .fold(0.0f32, f32::max);
         assert!(loudest > 0.05, "the demo speech must not be silent");
+
+        // Video audio is decoded by the same envelope path and used for the embedded strip.
+        let embedded = decode_peaks(&root.join("city_street.mp4")).expect("video audio");
+        assert!(!embedded.is_empty());
+        let loudest_video = embedded
+            .peaks()
+            .iter()
+            .map(|p| p.max.max(-p.min))
+            .fold(0.0f32, f32::max);
+        assert!(loudest_video > 0.01, "the street ambience must not be silent");
+
+        // A silent video must be recognised as such so it keeps the larger thumbnail region.
+        let mut hub = MediaHub::new();
+        assert!(hub.has_audio(&root.join("city_street.mp4")));
+        assert!(!hub.has_audio(&root.join("market_crowd.mp4")));
     }
 }

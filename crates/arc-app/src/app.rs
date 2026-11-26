@@ -113,6 +113,7 @@ impl App {
         }
         let window = Arc::new(el.create_window(attrs).map_err(|e| e.to_string())?);
         let ctx = egui::Context::default();
+        install_cjk_font(&ctx);
         let mut painter = pollster::block_on(egui_wgpu::winit::Painter::new(
             ctx.clone(),
             egui_wgpu::WgpuConfiguration::default(),
@@ -353,6 +354,29 @@ impl ApplicationHandler<UserEvent> for App {
             g.painter.destroy();
         }
     }
+}
+
+/// Add a CJK fallback to egui's bundled Latin fonts.
+///
+/// The sample project's title and subtitle clips are Chinese, and egui's default font set has no
+/// CJK glyphs. The bundled subset only carries the sample's characters (plus common punctuation),
+/// so Latin text still comes from egui's own fonts and Chinese falls back to Noto Sans SC.
+fn install_cjk_font(ctx: &egui::Context) {
+    const CJK_FONT: &[u8] = include_bytes!("../../../assets/fonts/NotoSansSC-Arcline.ttf");
+
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "arcline-cjk".to_owned(),
+        Arc::new(egui::FontData::from_static(CJK_FONT)),
+    );
+    for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        fonts
+            .families
+            .entry(family)
+            .or_default()
+            .push("arcline-cjk".to_owned());
+    }
+    ctx.set_fonts(fonts);
 }
 
 #[cfg(test)]

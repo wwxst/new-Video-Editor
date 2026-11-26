@@ -1,5 +1,11 @@
 # Timeline Phase 1 — real media clip visualisation (2026-11-26)
 
+> **Superseded:** the synthetic Mandelbrot/SAPI demo files described here were replaced by real,
+> publicly licensed media on 2026-11-26. See
+> [timeline-real-media-2026-11-26.md](timeline-real-media-2026-11-26.md) and
+> [assets/demo/README.md](../assets/demo/README.md). The decoding and painting design below is
+> unchanged; only the assets and sample project data changed.
+
 Phase 1 only: the mock timeline's clips now show **real decoded media** — video frames, still images
 and audio waveforms — with real text/effect/sticker names. No editing commands, engine or document
 changes were made, and the approved timeline layout, track heights and the fixed left column are

@@ -487,9 +487,11 @@ impl Timeline {
                 continue;
             }
             let is_selected = *selected == Some((index, clip_index));
-            draw::draw_clip_body(&painter, visible, clip.kind, is_selected);
+            draw::draw_clip_body(&painter, visible, clip.kind);
             paint_clip_content(media.as_mut(), &painter, body, rect, clip, *zoom);
-            draw::draw_clip_label(&painter, visible, &clip_label(clip));
+            draw::draw_clip_outline(&painter, visible, is_selected);
+            let label_rect = clip_label_rect(clip.kind, rect, content);
+            draw::draw_clip_label(&painter, label_rect, &clip_label(clip));
 
             let hit = visible.intersect(content);
             if hit.width() < 2.0 || hit.height() < 2.0 {
@@ -586,22 +588,50 @@ impl Timeline {
 }
 
 
-/// Paint the label text of one clip: the actual text/effect/sticker name, or file name and duration
-/// for media clips.
+/// Header rect a clip label may occupy, clipped to the visible content area.
+///
+/// The intersection with `content` is what keeps the label at the leftmost visible part of a
+/// horizontally scrolled clip and off the fixed control column. Text/effect/sticker clips use the
+/// whole clip; media clips use their dedicated header strip.
+fn clip_label_rect(kind: model::TrackKind, clip_rect: Rect, content: Rect) -> Rect {
+    let label = match kind {
+        model::TrackKind::Video => Rect::from_min_size(
+            clip_rect.min,
+            Vec2::new(clip_rect.width(), draw::VIDEO_HEADER_H),
+        ),
+        model::TrackKind::Image => Rect::from_min_size(
+            clip_rect.min,
+            Vec2::new(clip_rect.width(), draw::IMAGE_HEADER_H),
+        ),
+        model::TrackKind::Audio => Rect::from_min_size(
+            clip_rect.min,
+            Vec2::new(clip_rect.width(), draw::AUDIO_HEADER_H),
+        ),
+        _ => clip_rect,
+    };
+    label.intersect(content)
+}
+
+/// Label of one clip: actual text/effect/sticker content and `HH:MM:SS:FF` durations, never a
+/// decimal duration. Text clips carry only their text; media, effects and stickers also show the
+/// clip duration on the same line when the clip is wide enough.
 fn clip_label(clip: &model::Clip) -> String {
+    let duration = draw::timecode_hhmmssff(clip.duration, model::PROJECT_FPS);
     match clip.kind {
-        model::TrackKind::Text | model::TrackKind::Sticker => clip.name.clone(),
-        model::TrackKind::Effect => format!("{}  {:.1}s", clip.name, clip.duration),
+        model::TrackKind::Text => clip.name.clone(),
+        model::TrackKind::Effect | model::TrackKind::Sticker => {
+            format!("{}  {duration}", clip.name)
+        }
         _ => {
             let name = clip.source_name().unwrap_or_else(|| clip.name.clone());
-            format!("{name}  {:.1}s", clip.duration)
+            format!("{name}  {duration}")
         }
     }
 }
 
-/// Paint the decoded media of one clip into `clip_rect` (the clip's full rectangle, unclipped; the
-/// painter is already clipped to the canvas body). Missing or undecodable sources get the explicit
-/// fallback, never a fake thumbnail or waveform.
+/// Paint the decoded media of one clip into its internal regions. The clip rectangle is the full
+/// clip; the painter is already clipped to the canvas body. Missing or undecodable sources get the
+/// explicit fallback, never a fake thumbnail or waveform.
 fn paint_clip_content(
     media: Option<&mut MediaHub>,
     painter: &egui::Painter,
@@ -633,26 +663,67 @@ fn paint_clip_content(
         return;
     }
     match clip.kind {
-        model::TrackKind::Video => paint_video(media, painter, body, clip_rect, source, zoom),
-        model::TrackKind::Image => paint_image(media, painter, clip_rect, source),
-        model::TrackKind::Audio => paint_audio(media, painter, body, clip_rect, source, zoom),
+        model::TrackKind::Video => {
+            let has_audio = media.has_audio(source);
+            let header_h = draw::VIDEO_HEADER_H;
+            let thumb_h = if has_audio {
+                draw::VIDEO_THUMB_H
+            } else {
+                (clip_rect.height() - header_h).max(1.0)
+            };
+            let thumb_rect = Rect::from_min_size(
+                egui::pos2(clip_rect.left(), clip_rect.top() + header_h),
+                Vec2::new(clip_rect.width(), thumb_h),
+            );
+            paint_video(media, painter, body, clip_rect, thumb_rect, source, zoom);
+            if has_audio {
+                let audio_rect = Rect::from_min_size(
+                    egui::pos2(clip_rect.left(), thumb_rect.bottom()),
+                    Vec2::new(clip_rect.width(), draw::VIDEO_AUDIO_H),
+                );
+                paint_video_audio(media, painter, body, clip_rect, audio_rect, source, zoom);
+            }
+        }
+        model::TrackKind::Image => {
+            let image_rect = Rect::from_min_size(
+                egui::pos2(clip_rect.left(), clip_rect.top() + draw::IMAGE_HEADER_H),
+                Vec2::new(
+                    clip_rect.width(),
+                    (clip_rect.height() - draw::IMAGE_HEADER_H).max(1.0),
+                ),
+            );
+            paint_image(media, painter, body, clip_rect, image_rect, source);
+        }
+        model::TrackKind::Audio => {
+            let wave_rect = Rect::from_min_size(
+                egui::pos2(clip_rect.left(), clip_rect.top() + draw::AUDIO_HEADER_H),
+                Vec2::new(clip_rect.width(), draw::AUDIO_WAVE_H),
+            );
+            paint_audio(media, painter, body, clip_rect, wave_rect, source, zoom);
+        }
         _ => {}
     }
 }
 
-/// Real decoded frames, tiled across the clip. Each tile is one source timestamp; the tile width is
-/// a ladder-quantised source-time step, so thumbnails stay cached while the timeline scrolls.
+/// Real decoded frames, tiled continuously across the thumbnail region. Each tile is one source
+/// timestamp; the tile width is a ladder-quantised source-time step, so thumbnails stay cached while
+/// the timeline scrolls. `uv_fill` centre-crops each frame into its tile, so nothing is distorted.
 fn paint_video(
     media: &mut MediaHub,
     painter: &egui::Painter,
     body: Rect,
     clip_rect: Rect,
+    thumb_rect: Rect,
     source: &Path,
     zoom: f32,
 ) {
     let zoom = zoom.max(1.0);
-    let inner = clip_rect.shrink2(Vec2::new(1.0, 1.0));
-    let tile_w = (inner.height() * 16.0 / 9.0).max(24.0);
+    let visible = thumb_rect.intersect(body);
+    if visible.width() < 2.0 || visible.height() < 2.0 {
+        return;
+    }
+    let painter = painter.with_clip_rect(visible);
+    let tile_w = (thumb_rect.height() * 16.0 / 9.0).max(24.0);
     let step = media::thumb_step(zoom, tile_w);
     let view_start = ((body.left() - clip_rect.left()) / zoom) as f64;
     let view_end = ((body.right() - clip_rect.left()) / zoom) as f64;
@@ -662,12 +733,12 @@ fn paint_video(
     for index in tiles {
         let rect = Rect::from_min_size(
             egui::pos2(
-                clip_rect.left() + 1.0 + index as f32 * tile_px,
-                inner.top(),
+                clip_rect.left() + index as f32 * tile_px,
+                thumb_rect.top(),
             ),
-            Vec2::new(tile_px, inner.height()),
+            Vec2::new(tile_px, thumb_rect.height()),
         );
-        if !rect.intersects(body) {
+        if !rect.intersects(visible) {
             continue;
         }
         let time = index as f64 * step + step * 0.5;
@@ -678,54 +749,92 @@ fn paint_video(
     }
 }
 
-/// The decoded still image, fitted into the clip by aspect ratio and centred.
-fn paint_image(media: &mut MediaHub, painter: &egui::Painter, clip_rect: Rect, source: &Path) {
-    let Some(still) = media.still(source) else {
-        return;
-    };
-    let inner = clip_rect.shrink2(Vec2::new(2.0, 2.0));
-    if inner.width() < 2.0 || inner.height() < 2.0 {
-        return;
-    }
-    let mut height = inner.height();
-    let mut width = height * still.aspect.max(0.05);
-    if width > inner.width() {
-        width = inner.width();
-        height = width / still.aspect.max(0.05);
-    }
-    let rect = Rect::from_center_size(inner.center(), Vec2::new(width, height));
-    painter.image(
-        still.texture.id(),
-        rect,
-        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-        Color32::WHITE,
-    );
-}
-
-/// The decoded waveform envelope, one min/max bar per painted column.
-fn paint_audio(
+/// Embedded audio of a video, drawn in the reserved bottom strip with the same decoded envelope and
+/// bottom-anchored bar style as the audio tracks.
+fn paint_video_audio(
     media: &mut MediaHub,
     painter: &egui::Painter,
     body: Rect,
     clip_rect: Rect,
+    audio_rect: Rect,
     source: &Path,
     zoom: f32,
 ) {
     let Some(wave) = media.waveform(source) else {
         return;
     };
-    let visible = clip_rect.intersect(body);
-    if visible.width() < 3.0 || visible.height() < 8.0 {
+    let visible = audio_rect.intersect(body);
+    if visible.width() < 3.0 || visible.height() < 4.0 {
         return;
     }
     let rect = Rect::from_min_max(
-        egui::pos2(visible.left() + 2.0, visible.top() + 3.0),
+        egui::pos2(visible.left() + 2.0, visible.top() + 1.0),
         egui::pos2(
             (visible.right() - 2.0).max(visible.left() + 3.0),
-            (visible.bottom() - 3.0).max(visible.top() + 4.0),
+            (visible.bottom() - 1.0).max(visible.top() + 2.0),
         ),
     );
-    draw::draw_waveform(painter, rect, clip_rect.left(), zoom.max(1.0), &wave);
+    draw::draw_waveform_bars(painter, rect, clip_rect.left(), zoom.max(1.0), &wave);
+}
+
+/// The decoded still image, repeated across the image region. Every repeat keeps the image's
+/// proportions via `uv_fill` (centre crop), so the row has no empty areas and no distortion.
+fn paint_image(
+    media: &mut MediaHub,
+    painter: &egui::Painter,
+    body: Rect,
+    clip_rect: Rect,
+    image_rect: Rect,
+    source: &Path,
+) {
+    let Some(still) = media.still(source) else {
+        return;
+    };
+    let visible = image_rect.intersect(body);
+    if visible.width() < 2.0 || visible.height() < 2.0 {
+        return;
+    }
+    let painter = painter.with_clip_rect(visible);
+    let tile_w = 72.0f32.max(image_rect.height() * 1.2);
+    let mut x = clip_rect.left();
+    while x < clip_rect.right() {
+        let rect = Rect::from_min_size(
+            egui::pos2(x, image_rect.top()),
+            Vec2::new(tile_w, image_rect.height()),
+        );
+        if rect.intersects(visible) {
+            let uv = draw::uv_fill(still.aspect, rect);
+            painter.image(still.texture.id(), rect, uv, Color32::WHITE);
+        }
+        x += tile_w;
+    }
+}
+
+/// The decoded waveform envelope for an audio clip, bottom-anchored bars in the 30 pt wave region.
+fn paint_audio(
+    media: &mut MediaHub,
+    painter: &egui::Painter,
+    body: Rect,
+    clip_rect: Rect,
+    wave_rect: Rect,
+    source: &Path,
+    zoom: f32,
+) {
+    let Some(wave) = media.waveform(source) else {
+        return;
+    };
+    let visible = wave_rect.intersect(body);
+    if visible.width() < 3.0 || visible.height() < 4.0 {
+        return;
+    }
+    let rect = Rect::from_min_max(
+        egui::pos2(visible.left() + 2.0, visible.top() + 1.0),
+        egui::pos2(
+            (visible.right() - 2.0).max(visible.left() + 3.0),
+            (visible.bottom() - 1.0).max(visible.top() + 2.0),
+        ),
+    );
+    draw::draw_waveform_bars(painter, rect, clip_rect.left(), zoom.max(1.0), &wave);
 }
 
 #[cfg(test)]
@@ -777,9 +886,9 @@ mod tests {
             assert_eq!(row.left(), body.left());
             assert_eq!(row.width(), body.width());
         }
-        assert_eq!(rows[0].height(), 24.0);
-        assert_eq!(rows[3].height(), 76.0);
-        assert_eq!(rows[6].height(), 50.0);
+        assert_eq!(rows[0].height(), model::TrackKind::Text.lane_height());
+        assert!(rows.iter().any(|row| row.height() == 76.0));
+        assert!(rows.iter().any(|row| row.height() == 50.0));
         for pair in rows.windows(2) {
             assert_eq!(pair[1].top(), pair[0].bottom() + model::LANE_GAP);
         }
@@ -795,6 +904,74 @@ mod tests {
         for (row, track) in shifted.iter().zip(&t.model.tracks) {
             assert_eq!(row.height(), track.height());
         }
+    }
+
+    #[test]
+    fn clip_labels_stick_to_the_visible_left_edge_and_off_the_panel() {
+        let content = Rect::from_min_max(egui::pos2(112.0, 0.0), egui::pos2(500.0, 100.0));
+
+        // A video clipped on the left by the fixed column starts its label at the content edge.
+        let partly_under_panel = Rect::from_min_size(egui::pos2(40.0, 0.0), egui::vec2(200.0, 72.0));
+        let label = clip_label_rect(model::TrackKind::Video, partly_under_panel, content);
+        assert_eq!(label.left(), content.left());
+        assert_eq!(label.height(), draw::VIDEO_HEADER_H);
+        assert_eq!(label.right(), partly_under_panel.right());
+
+        // A clip wholly inside the content keeps its own left edge.
+        let inside = Rect::from_min_size(egui::pos2(200.0, 0.0), egui::vec2(100.0, 72.0));
+        assert_eq!(
+            clip_label_rect(model::TrackKind::Video, inside, content).left(),
+            200.0
+        );
+
+        // A clip wholly left of the content has no drawable label.
+        let behind_panel = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(80.0, 72.0));
+        assert!(
+            clip_label_rect(model::TrackKind::Video, behind_panel, content).width() < 14.0
+        );
+
+        // Audio uses its shorter 16 pt header; text/effect/sticker use the whole 20 pt clip.
+        let audio = Rect::from_min_size(egui::pos2(200.0, 0.0), egui::vec2(100.0, 46.0));
+        assert_eq!(
+            clip_label_rect(model::TrackKind::Audio, audio, content).height(),
+            draw::AUDIO_HEADER_H
+        );
+        let text = Rect::from_min_size(egui::pos2(200.0, 0.0), egui::vec2(100.0, 20.0));
+        assert_eq!(
+            clip_label_rect(model::TrackKind::Text, text, content).height(),
+            20.0
+        );
+    }
+
+    #[test]
+    fn clip_labels_use_frame_timecode_without_decimals() {
+        let model = model::TimelineModel::mock();
+        let clips: Vec<&model::Clip> = model.tracks.iter().flat_map(|t| t.clips.iter()).collect();
+
+        let video = clips
+            .iter()
+            .find(|c| c.source_name().as_deref() == Some("city_street.mp4"))
+            .expect("city street clip");
+        assert_eq!(clip_label(video), "city_street.mp4  00:00:05:00");
+        assert!(!clip_label(video).contains(".0s"));
+
+        let effect = clips
+            .iter()
+            .find(|c| c.name == "调色 · 暖阳")
+            .expect("effect clip");
+        assert_eq!(clip_label(effect), "调色 · 暖阳  00:00:05:00");
+
+        let text = clips
+            .iter()
+            .find(|c| c.name == "开场 · 山海之间")
+            .expect("text clip");
+        assert_eq!(clip_label(text), "开场 · 山海之间");
+
+        let audio = clips
+            .iter()
+            .find(|c| c.source_name().as_deref() == Some("narration.wav"))
+            .expect("narration clip");
+        assert_eq!(clip_label(audio), "narration.wav  00:00:18:00");
     }
 
     #[test]
@@ -815,11 +992,11 @@ mod tests {
         let content_w = t.model.content_width(t.zoom);
         assert!((max.x - (content_w - canvas.width()).max(0.0)).abs() < 0.01);
 
-        // In the real card the canvas is much shorter than eight lanes; a short viewport must scroll.
+        // In the real card the canvas is much shorter than the sample lanes; a short viewport must scroll.
         let short = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 300.0));
         let small = layout(short).canvas;
         let max = t.max_scroll(small);
-        assert!(max.y > 0.0, "eight mock tracks overflow a {small:?} canvas");
+        assert!(max.y > 0.0, "the sample tracks overflow a {small:?} canvas");
     }
 
     #[test]

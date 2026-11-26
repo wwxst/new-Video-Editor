@@ -20,6 +20,22 @@ pub const ACCENT: Color32 = Color32::from_rgb(0x4c, 0x8d, 0xff);
 pub const PLAYHEAD: Color32 = Color32::from_rgb(0xe8, 0x5d, 0x5d);
 pub const TICK: Color32 = Color32::from_rgb(0x4a, 0x4f, 0x58);
 
+/// Internal regions of a 72 pt video clip: header, thumbnails and embedded audio.
+pub const VIDEO_HEADER_H: f32 = 18.0;
+pub const VIDEO_THUMB_H: f32 = 38.0;
+pub const VIDEO_AUDIO_H: f32 = 16.0;
+/// Internal regions of a 72 pt image clip (the thumbnail area uses the rest of the clip).
+pub const IMAGE_HEADER_H: f32 = 18.0;
+/// Internal regions of a 46 pt audio clip.
+pub const AUDIO_HEADER_H: f32 = 16.0;
+pub const AUDIO_WAVE_H: f32 = 30.0;
+/// Shared label typography and padding.
+pub const LABEL_FONT_PT: f32 = 10.5;
+pub const LABEL_PAD_X: f32 = 6.0;
+pub const LABEL_TEXT: Color32 = Color32::from_rgb(0xf2, 0xf4, 0xf6);
+/// Bright blue used by every waveform (audio clips and embedded video audio).
+pub const WAVE_BLUE: Color32 = Color32::from_rgb(0x2b, 0xb3, 0xff);
+
 pub fn lane_bg(index: usize) -> Color32 {
     if index % 2 == 0 {
         LANE_BG_A
@@ -56,9 +72,18 @@ pub fn draw_panel_edge(painter: &Painter, column: Rect, bounds: Rect) {
     }
 }
 
-/// Clip body: the kind's colour, a subtle top highlight and the selection outline.
-pub fn draw_clip_body(painter: &Painter, rect: Rect, kind: TrackKind, selected: bool) {
+/// Clip body: the kind's colour and a subtle top highlight.
+pub fn draw_clip_body(painter: &Painter, rect: Rect, kind: TrackKind) {
     painter.rect_filled(rect, CornerRadius::same(4), kind.clip_color());
+    let top = Rect::from_min_max(
+        rect.min,
+        egui::pos2(rect.right(), (rect.top() + 2.0).min(rect.bottom())),
+    );
+    painter.rect_filled(top, CornerRadius::same(2), Color32::from_white_alpha(10));
+}
+
+/// Selection outline, painted after clip content so thumbnails and images cannot cover it.
+pub fn draw_clip_outline(painter: &Painter, rect: Rect, selected: bool) {
     if selected {
         painter.rect_stroke(
             rect,
@@ -67,32 +92,23 @@ pub fn draw_clip_body(painter: &Painter, rect: Rect, kind: TrackKind, selected: 
             StrokeKind::Inside,
         );
     }
-    let top = Rect::from_min_max(
-        rect.min,
-        egui::pos2(rect.right(), (rect.top() + 2.0).min(rect.bottom())),
-    );
-    painter.rect_filled(top, CornerRadius::same(2), Color32::from_white_alpha(10));
 }
 
-/// Compact label in the clip's top-left corner, elided so it never leaves the clip.
-pub fn draw_clip_label(painter: &Painter, rect: Rect, text: &str) {
-    if rect.width() < 16.0 || rect.height() < 12.0 || text.is_empty() {
+/// Plain clip label: no background box, left-aligned, vertically centred and elided to fit.
+///
+/// `label_rect` is already the leftmost visible part of the clip (clipped to the content area and
+/// the clip boundary), so the text never slides under the fixed control column or a neighbour.
+pub fn draw_clip_label(painter: &Painter, label_rect: Rect, text: &str) {
+    if label_rect.width() < 14.0 || label_rect.height() < 9.0 || text.is_empty() {
         return;
     }
-    let font = FontId::proportional(10.5);
-    let text = elide(painter, text, &font, (rect.width() - 10.0).max(6.0));
-    let pos = rect.left_top() + egui::vec2(5.0, 3.0);
-    let galley = painter.layout_no_wrap(text, font, Color32::from_rgb(0xf2, 0xf4, 0xf6));
-    let bg = Rect::from_min_size(pos - egui::vec2(2.0, 1.0), galley.size() + egui::vec2(4.0, 2.0))
-        .intersect(rect.shrink(0.5));
-    if bg.width() > 4.0 {
-        painter.rect_filled(bg, CornerRadius::same(3), Color32::from_black_alpha(120));
-    }
-    painter.with_clip_rect(rect.shrink(1.0)).galley(
-        pos,
-        galley,
-        Color32::from_rgb(0xf2, 0xf4, 0xf6),
-    );
+    let font = FontId::proportional(LABEL_FONT_PT);
+    let max_width = (label_rect.width() - 2.0 * LABEL_PAD_X).max(4.0);
+    let text = elide(painter, text, &font, max_width);
+    let pos = egui::pos2(label_rect.left() + LABEL_PAD_X, label_rect.center().y);
+    painter
+        .with_clip_rect(label_rect)
+        .text(pos, Align2::LEFT_CENTER, text, font, LABEL_TEXT);
 }
 
 /// Clear fallback for missing or undecodable media: a hatched body and a warning label. Never a
@@ -120,43 +136,47 @@ pub fn draw_missing(painter: &Painter, rect: Rect, message: &str) {
     );
 }
 
-/// Dense min/max waveform for the visible part of an audio clip. `clip_left` is the clip's content
-/// x and `zoom` the timeline scale, so every painted column maps to its real source time.
-pub fn draw_waveform(
+/// Dense, bottom-anchored waveform bars for one clip.
+///
+/// Every painted column aggregates the decoded envelope over the source-time range that column
+/// covers at the current zoom. Bars grow upward from a single baseline, so silence stays flat and
+/// loud passages stand tall; the source-time aggregation is what makes the density follow the
+/// timeline zoom without re-decoding.
+pub fn draw_waveform_bars(
     painter: &Painter,
     rect: Rect,
     clip_left: f32,
     zoom: f32,
     wave: &super::media::Waveform,
 ) {
-    if rect.width() < 2.0 || rect.height() < 6.0 || zoom <= 0.0 {
+    if rect.width() < 2.0 || rect.height() < 4.0 || zoom <= 0.0 {
         return;
     }
-    let mid = rect.center().y;
-    let amplitude = rect.height() * 0.5 - 2.0;
-    let color = Color32::from_rgba_unmultiplied(0xcf, 0xe6, 0xff, 190);
+    let baseline = rect.bottom() - 1.0;
+    let amplitude = (rect.height() - 2.0).max(1.0);
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), baseline),
+            egui::pos2(rect.right(), baseline),
+        ],
+        Stroke::new(0.7, Color32::from_rgba_unmultiplied(0x2b, 0xb3, 0xff, 70)),
+    );
     let mut x = rect.left();
     while x < rect.right() {
         let t0 = ((x - clip_left) / zoom) as f64;
         let t1 = t0 + 1.0 / zoom as f64;
         if let Some(peak) = wave.envelope(t0, t1) {
-            let a = mid - peak.max.clamp(-1.0, 1.0) * amplitude;
-            let b = mid - peak.min.clamp(-1.0, 1.0) * amplitude;
-            let (top, bottom) = (a.min(b), a.max(b));
-            painter.line_segment(
-                [egui::pos2(x, top), egui::pos2(x, bottom.max(top + 0.5))],
-                Stroke::new(1.0, color),
-            );
+            let level = peak.max.max(-peak.min).clamp(0.0, 1.0);
+            if level > 0.004 {
+                let top = (baseline - level * amplitude).max(rect.top());
+                painter.line_segment(
+                    [egui::pos2(x, baseline), egui::pos2(x, top)],
+                    Stroke::new(1.0, WAVE_BLUE),
+                );
+            }
         }
         x += 1.0;
     }
-    painter.line_segment(
-        [
-            egui::pos2(rect.left(), mid),
-            egui::pos2(rect.right(), mid),
-        ],
-        Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xcf, 0xe6, 0xff, 40)),
-    );
 }
 
 /// UV rectangle that centre-crops an image of `aspect` (width / height) into `rect` without
@@ -514,6 +534,18 @@ pub fn timecode(seconds: f64) -> String {
     }
 }
 
+/// Project-frame-aware clip timecode: `HH:MM:SS:FF`, never a decimal duration.
+pub fn timecode_hhmmssff(seconds: f64, fps: f64) -> String {
+    let fps = fps.round().max(1.0) as u64;
+    let total_frames = (seconds.max(0.0) * fps as f64).round().max(0.0) as u64;
+    let frames = total_frames % fps;
+    let total_seconds = total_frames / fps;
+    let secs = total_seconds % 60;
+    let minutes = (total_seconds / 60) % 60;
+    let hours = total_seconds / 3600;
+    format!("{hours:02}:{minutes:02}:{secs:02}:{frames:02}")
+}
+
 /// Compact icon button; returns the interaction response for tooltips.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ToolbarIcon {
@@ -773,6 +805,23 @@ mod tests {
         let wide_tile = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(160.0, 90.0));
         let uv = uv_fill(16.0 / 9.0, wide_tile);
         assert!((uv.width() - 1.0).abs() < 1e-6 && (uv.height() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn clip_timecode_is_frame_accurate_and_never_decimal() {
+        assert_eq!(timecode_hhmmssff(0.0, 24.0), "00:00:00:00");
+        assert_eq!(timecode_hhmmssff(5.0, 24.0), "00:00:05:00");
+        assert_eq!(timecode_hhmmssff(4.5, 24.0), "00:00:04:12");
+        assert_eq!(timecode_hhmmssff(18.0, 24.0), "00:00:18:00");
+        assert_eq!(timecode_hhmmssff(3661.5, 24.0), "01:01:01:12");
+    }
+
+    #[test]
+    fn internal_clip_regions_fill_the_approved_heights() {
+        assert_eq!(VIDEO_HEADER_H + VIDEO_THUMB_H + VIDEO_AUDIO_H, 72.0);
+        assert_eq!(VIDEO_HEADER_H + 54.0, 72.0, "silent video uses the full rest");
+        assert_eq!(IMAGE_HEADER_H + 54.0, 72.0);
+        assert_eq!(AUDIO_HEADER_H + AUDIO_WAVE_H, 46.0);
     }
 }
 

@@ -12,6 +12,10 @@ and in the acceptance matrix row 9).
 **Revision 3 (2026-11-26, later still):** the left column is now a fixed foreground layer painted
 over the canvas instead of a sibling panel next to it; see "Left panel hierarchy" below.
 
+**Revision 4 (2026-11-26):** the playhead handle and its vertical line are resolved from one shared
+time-to-pixel mapping and move together in the same frame, including while dragging; see "Playhead
+synchronization" below.
+
 ## What was built
 
 - **Chrome:** compact toolbar (selection, undo, redo, split, delete, link, snapping, zoom −/+, zoom
@@ -44,7 +48,7 @@ over the canvas instead of a sibling panel next to it; see "Left panel hierarchy
 
 | Path | Change |
 |---|---|
-| `crates/arc-app/src/timeline/mod.rs` | New: `Timeline` state, `layout()` (toolbar / ruler / header / controls / canvas / full-width underlay), toolbar, wheel/zoom, ruler/playhead, layered lanes, fixed control panel, scrollbars, tests |
+| `crates/arc-app/src/timeline/mod.rs` | New: `Timeline` state, `layout()` (toolbar / ruler / header / controls / canvas / full-width underlay), toolbar, wheel/zoom, shared `time_to_x`/`x_to_time` playhead mapping, ruler/playhead, layered lanes, fixed control panel, scrollbars, tests |
 | `crates/arc-app/src/timeline/model.rs` | New: `TrackKind`, `Clip`, `Track` (dynamic typing rules), `TimelineModel` + mock project, tests |
 | `crates/arc-app/src/timeline/draw.rs` | New: vector drawing for toolbar icons, track/control icons, lanes, clips (thumbnails, waveforms), ruler, scrollbars; revision 3 adds `draw_panel_edge` (hairline + shadow) |
 | `crates/arc-app/src/shell.rs` | `card_content` hosts the timeline in the TIMELINE card; other panels unchanged |
@@ -94,19 +98,49 @@ there. All geometry stays in logical points (DPI-aware).
 | 7 | Rows perfectly aligned | Shared `lane_rows()`; `lane_rows_are_fixed_across_horizontal_scroll` |
 | 8 | Heights and type rules preserved | Revision-2 model rules and tests unchanged; 25 tests pass |
 
+## Playhead synchronization (revision 4, 2026-11-26)
+
+The handle and the vertical line used to be positioned by two separate expressions (one in the
+ruler, one in the lane canvas), and a drag updated the playhead only after the handle had already
+been painted, so the line could jump to the pointer while the handle stayed behind for a frame.
+
+Now `timeline::ui()` resolves the playhead once per frame and both elements are painted from that
+single value:
+
+- `time_to_x(origin, view_start, zoom, time)` is the only time-to-pixel formula; the ruler handle,
+  the lane line and the drag hit test all use it, the drag through its inverse `x_to_time()`.
+- `drag_playhead()` runs before painting, so a click or drag in the current frame moves the handle
+  and the line together; the handle stays inside the ruler, the line spans the tracks.
+
+| # | Criterion | Evidence |
+|---|---|---|
+| 1 | Handle centre and line share one x | `painted_playhead` test reads the painted shapes; captures measure the handle span centre against the line |
+| 2 | One coordinate calculation | `time_to_x()`; `ui()` passes the same `playhead_x` to `ruler()` and `lanes()` |
+| 3 | Same scroll offset and zoom | the mapping takes `view_start` and `zoom`; tests sweep both |
+| 4 | Horizontal scrolling moves them together | `horizontal_scroll_moves_the_handle_and_the_line_together`; `playhead-base.png` → `playhead-scrolled.png` shifts both by 73 px |
+| 5 | Zooming does not make them drift | `playhead_handle_and_line_share_one_x_across_scroll_and_zoom`; `playhead-zoomed.png` |
+| 6 | Dragging updates both in the same frame | `dragging_the_playhead_moves_the_handle_and_the_line_in_the_same_frame`; `playhead-dragging.png` (handle under the pointer while the button is still down) |
+| 7 | Handle centre on the line | the same tests assert the handle span centre equals the line x |
+| 8 | Handle in the ruler, line through the tracks | tests assert the handle y range lies inside the ruler and the line runs from body top to bottom |
+
+Pixel checks on the captures (red channel scan): base handle centre 258 / line 257.5; scrolled 185 /
+184.5; mid-drag 760 / 759.5; after zoom 960 / 959.5 — the sub-pixel difference is the 1.5 pt line's
+rasterisation, not a layout offset.
+
 ## Tests
 
-`cargo test -p arc-app --profile dev` → **25 passed** (0 failed):
+`cargo test -p arc-app --profile dev` → **28 passed** (0 failed):
 
 - model: fixed lane/clip heights per content type, equal height for every track of a type,
   dynamic typing (first clip, rejection, untyped after removal), mock ordering (audio below the
   main video) and content height;
 - layout: ruler/canvas/control/underlay alignment, lane rows fixed across horizontal scroll,
-  view start and zoom, max scroll for short viewports, empty timeline, playhead position,
-  tick-step growth;
+  view start and zoom, max scroll for short viewports, empty timeline, playhead position and its
+  inverse, tick-step growth;
 - interaction: splitter drag, scrollbar drags (both axes), lane-edge drag leaves heights and scroll
   untouched, horizontal zoom leaves heights and content height untouched, clicks on the fixed
-  column never select a clip scrolled beneath it.
+  column never select a clip scrolled beneath it, and the painted playhead handle and line share one
+  x across scroll, zoom and drag.
 
 The full workspace suite was not run in this pass (the build artifacts live in
 `%TEMP%\arcline-target` with `CARGO_PROFILE_DEV_DEBUG=0`); CI will cover it. No engine or document

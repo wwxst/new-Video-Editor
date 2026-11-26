@@ -84,6 +84,17 @@ pub fn layout(rect: Rect) -> Layout {
     }
 }
 
+/// Time-to-pixel mapping of the timeline canvas: the single formula shared by the ruler handle, the
+/// playhead line and the drag hit test.
+fn time_to_x(origin: f32, view_start: f64, zoom: f32, time: f64) -> f32 {
+    origin + ((time - view_start) as f32 * zoom)
+}
+
+/// Inverse of [`time_to_x`].
+fn x_to_time(origin: f32, view_start: f64, zoom: f32, x: f32) -> f64 {
+    view_start + ((x - origin) / zoom) as f64
+}
+
 /// Timeline UI state. All values are in points, so DPI scaling is automatic.
 #[derive(Debug, Clone)]
 pub struct Timeline {
@@ -162,10 +173,38 @@ impl Timeline {
 
         let body = self.body_rect(l.underlay);
         let origin = l.canvas.left();
-        self.ruler(ui, l.ruler, view_start, origin);
-        let rows = self.lanes(ui, &l, body, origin, view_start);
+
+        // Resolve the playhead before painting: a drag in this frame must move the handle and the
+        // line together, and both are painted from this one x.
+        self.drag_playhead(ui, l.ruler, view_start, origin);
+        let playhead_x = self.playhead_x(origin, view_start);
+
+        self.ruler(ui, l.ruler, view_start, playhead_x);
+        let rows = self.lanes(ui, &l, body, origin, view_start, playhead_x);
         self.control_panel(ui, &l, body, &rows);
         self.scrollbars(ui, l.canvas, body);
+    }
+
+    /// Screen x of the playhead. The ruler handle, the vertical line and the drag hit test all use
+    /// this one time-to-pixel mapping, so they cannot drift apart.
+    fn playhead_x(&self, origin: f32, view_start: f64) -> f32 {
+        time_to_x(origin, view_start, self.zoom, self.model.playhead)
+    }
+
+    /// Update the playhead from a click or drag on the ruler. Runs before painting so the handle and
+    /// the line move in the same frame as the pointer.
+    fn drag_playhead(&mut self, ui: &mut Ui, ruler: Rect, view_start: f64, origin: f32) {
+        let id = ui.make_persistent_id("tl-playhead");
+        let response = ui.interact(ruler, id, Sense::click_and_drag());
+        if (response.clicked() || response.dragged())
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            let t = x_to_time(origin, view_start, self.zoom, pos.x);
+            self.model.playhead = t.clamp(0.0, self.model.duration.max(0.0));
+        }
+        if response.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
     }
 
     /// Full body minus the scrollbar strips: the canvas paints here, under the fixed column too.
@@ -274,10 +313,13 @@ impl Timeline {
             return;
         }
         if ctrl {
-            let t = self.view_start() + ((pos.x - l.canvas.left()) / self.zoom) as f64;
+            let origin = l.canvas.left();
+            let view_start = self.view_start();
+            let t = x_to_time(origin, view_start, self.zoom, pos.x);
             let factor: f32 = (1.0 + delta.y * 0.004).clamp(0.8, 1.25);
             self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-            self.scroll.x = (t as f32 * self.zoom - (pos.x - l.canvas.left())).max(0.0);
+            // Keep the time under the pointer where it is while zooming.
+            self.scroll.x = (t as f32 * self.zoom - (pos.x - origin)).max(0.0);
         } else if shift {
             self.scroll.x -= delta.y;
         } else {
@@ -286,8 +328,7 @@ impl Timeline {
         }
     }
 
-    fn ruler(&mut self, ui: &mut Ui, rect: Rect, view_start: f64, origin: f32) {
-        let playhead_x = origin + ((self.model.playhead - view_start) as f32 * self.zoom);
+    fn ruler(&self, ui: &mut Ui, rect: Rect, view_start: f64, playhead_x: f32) {
         let visible = playhead_x >= rect.left() - 2.0 && playhead_x <= rect.right() + 2.0;
         draw::draw_ruler(
             ui.painter(),
@@ -296,18 +337,6 @@ impl Timeline {
             self.zoom,
             visible.then_some(playhead_x),
         );
-
-        let id = ui.make_persistent_id("tl-playhead");
-        let response = ui.interact(rect, id, Sense::click_and_drag());
-        if (response.clicked() || response.dragged())
-            && let Some(pos) = response.interact_pointer_pos()
-        {
-            let t = view_start + ((pos.x - origin) / self.zoom) as f64;
-            self.model.playhead = t.clamp(0.0, self.model.duration.max(0.0));
-        }
-        if response.hovered() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        }
     }
 
     /// Lane rows in screen space for the current vertical scroll. The canvas and the fixed column
@@ -337,6 +366,7 @@ impl Timeline {
         body: Rect,
         origin: f32,
         view_start: f64,
+        playhead_x: f32,
     ) -> Vec<Rect> {
         let painter = ui.painter().with_clip_rect(body);
         painter.rect_filled(body, CornerRadius::ZERO, CANVAS_BG);
@@ -369,12 +399,11 @@ impl Timeline {
         }
 
         // Playhead across every lane; the foreground column covers the part scrolled beneath it.
-        let x = origin + ((self.model.playhead - view_start) as f32 * self.zoom);
-        if x >= body.left() && x <= body.right() {
+        if playhead_x >= body.left() && playhead_x <= body.right() {
             painter.line_segment(
                 [
-                    egui::pos2(x, body.top()),
-                    egui::pos2(x, body.bottom()),
+                    egui::pos2(playhead_x, body.top()),
+                    egui::pos2(playhead_x, body.bottom()),
                 ],
                 Stroke::new(1.5, draw::PLAYHEAD),
             );
@@ -611,9 +640,11 @@ mod tests {
     #[test]
     fn playhead_position_matches_time_and_scroll() {
         let t = Timeline::default();
-        let body = Rect::from_min_size(egui::pos2(112.0, 60.0), egui::vec2(800.0, 300.0));
-        let x = body.left() + ((t.model.playhead - t.view_start()) as f32 * t.zoom);
-        assert!((x - (112.0 + t.model.playhead as f32 * t.zoom)).abs() < 0.01);
+        let origin = 112.0;
+        let x = time_to_x(origin, t.view_start(), t.zoom, t.model.playhead);
+        assert!((x - (origin + t.model.playhead as f32 * t.zoom)).abs() < 0.01);
+        // The drag path inverts the same mapping, so a dragged playhead lands under the pointer.
+        assert!((x_to_time(origin, t.view_start(), t.zoom, x) - t.model.playhead).abs() < 1e-9);
     }
 
     /// The scrollbar thumbs must be draggable; this exercises the same hit rects the app uses.
@@ -780,6 +811,199 @@ mod tests {
         // Right of the boundary the visible part of the same clip is reachable.
         click(&ctx, &mut t, screen, egui::pos2(l.canvas.left() + 20.0, row_y));
         assert_eq!(t.selected, Some((0, 0)));
+    }
+
+    /// The playhead as painted in one frame: the handle centre and the vertical line, with their
+    /// vertical extents.
+    #[derive(Debug, Clone, Copy)]
+    struct PaintedPlayhead {
+        handle_x: f32,
+        handle_top: f32,
+        handle_bottom: f32,
+        line_x: f32,
+        line_top: f32,
+        line_bottom: f32,
+    }
+
+    /// Run one frame and read the painted playhead shapes out of it. Fails the test when either the
+    /// handle or the line is missing, so a regression cannot silently pass.
+    fn painted_playhead(
+        ctx: &egui::Context,
+        t: &mut Timeline,
+        screen: Rect,
+        events: Vec<egui::Event>,
+    ) -> PaintedPlayhead {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| t.ui(ui, screen));
+        out.textures_delta.clear();
+
+        let mut handle = None;
+        let mut line = None;
+        for clipped in &out.shapes {
+            match &clipped.shape {
+                egui::Shape::Path(path) if path.closed && path.fill == draw::PLAYHEAD => {
+                    let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+                    let (mut top, mut bottom) = (f32::INFINITY, f32::NEG_INFINITY);
+                    for p in &path.points {
+                        lo = lo.min(p.x);
+                        hi = hi.max(p.x);
+                        top = top.min(p.y);
+                        bottom = bottom.max(p.y);
+                    }
+                    handle = Some(((lo + hi) * 0.5, top, bottom));
+                }
+                egui::Shape::LineSegment { points, stroke } if stroke.color == draw::PLAYHEAD => {
+                    line = Some((
+                        points[0].x,
+                        points[0].y.min(points[1].y),
+                        points[0].y.max(points[1].y),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        let (handle_x, handle_top, handle_bottom) =
+            handle.expect("the ruler paints the playhead handle");
+        let (line_x, line_top, line_bottom) = line.expect("the canvas paints the playhead line");
+        PaintedPlayhead {
+            handle_x,
+            handle_top,
+            handle_bottom,
+            line_x,
+            line_top,
+            line_bottom,
+        }
+    }
+
+    #[test]
+    fn playhead_handle_and_line_share_one_x_across_scroll_and_zoom() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline::default();
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        let l = layout(screen);
+        let body = t.body_rect(l.underlay);
+        painted_playhead(&ctx, &mut t, screen, Vec::new());
+
+        for zoom in [MIN_ZOOM, 58.0, 120.0, MAX_ZOOM] {
+            t.zoom = zoom;
+            let max = t.max_scroll(l.canvas).x;
+            for cursor in [0.25f64, 0.5, 1.0] {
+                // Place the playhead `cursor` seconds into the visible canvas.
+                let scroll = ((t.model.playhead - cursor) * zoom as f64) as f32;
+                t.scroll.x = scroll.clamp(0.0, max);
+                let p = painted_playhead(&ctx, &mut t, screen, Vec::new());
+
+                assert!(
+                    (p.handle_x - p.line_x).abs() < 0.01,
+                    "zoom {zoom}, scroll {}: handle x {} vs line x {}",
+                    t.scroll.x,
+                    p.handle_x,
+                    p.line_x
+                );
+                let expected = time_to_x(l.canvas.left(), t.view_start(), t.zoom, t.model.playhead);
+                assert!(
+                    (p.line_x - expected).abs() < 0.01,
+                    "the line must use the shared time-to-pixel mapping"
+                );
+                // The handle stays inside the ruler, the line runs through the tracks.
+                assert!(p.handle_top >= l.ruler.top() && p.handle_bottom <= l.ruler.bottom());
+                assert!((p.line_top - body.top()).abs() < 0.01);
+                assert!((p.line_bottom - body.bottom()).abs() < 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn horizontal_scroll_moves_the_handle_and_the_line_together() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline {
+            zoom: 120.0, // make the 20 s mock wider than the viewport
+            ..Timeline::default()
+        };
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        let max = t.max_scroll(layout(screen).canvas).x;
+        assert!(max > 400.0);
+        painted_playhead(&ctx, &mut t, screen, Vec::new());
+        let mut previous = painted_playhead(&ctx, &mut t, screen, Vec::new());
+
+        for step in [40.0f32, 60.0, 100.0] {
+            let before_scroll = t.scroll.x;
+            t.scroll.x = (t.scroll.x + step).min(max);
+            let shift = t.scroll.x - before_scroll;
+            assert!(shift > 0.0);
+            let now = painted_playhead(&ctx, &mut t, screen, Vec::new());
+
+            assert!(
+                (previous.handle_x - now.handle_x - shift).abs() < 0.01,
+                "the handle must follow the scroll"
+            );
+            assert!(
+                (previous.line_x - now.line_x - shift).abs() < 0.01,
+                "the line must follow the scroll"
+            );
+            assert!((now.handle_x - now.line_x).abs() < 0.01);
+            previous = now;
+        }
+    }
+
+    #[test]
+    fn dragging_the_playhead_moves_the_handle_and_the_line_in_the_same_frame() {
+        let ctx = egui::Context::default();
+        // Scrolled, but with the playhead still on screen at the start of the drag.
+        let mut t = Timeline {
+            zoom: 58.0,
+            scroll: egui::vec2(60.0, 0.0),
+            ..Timeline::default()
+        };
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        let l = layout(screen);
+        let origin = l.canvas.left();
+        painted_playhead(&ctx, &mut t, screen, Vec::new());
+
+        let start = egui::pos2(origin + 100.0, l.ruler.center().y);
+        let end = start + egui::vec2(240.0, 0.0);
+        painted_playhead(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerMoved(start)],
+        );
+        painted_playhead(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let dragged = painted_playhead(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerMoved(end)],
+        );
+
+        // Same frame: the drag already moved both elements, so the handle cannot trail the line.
+        assert!(
+            (dragged.handle_x - dragged.line_x).abs() < 0.01,
+            "handle x {} vs line x {}",
+            dragged.handle_x,
+            dragged.line_x
+        );
+        assert!((dragged.line_x - end.x).abs() < 0.01, "the line is under the pointer");
+        assert!(
+            (dragged.handle_x - end.x).abs() < 0.01,
+            "the handle centre is under the pointer"
+        );
+        let expected_time = x_to_time(origin, t.view_start(), t.zoom, end.x);
+        assert!((t.model.playhead - expected_time).abs() < 0.001);
     }
 
     #[test]

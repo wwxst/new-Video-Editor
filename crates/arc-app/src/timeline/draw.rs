@@ -28,6 +28,34 @@ pub fn lane_bg(index: usize) -> Color32 {
     }
 }
 
+/// Boundary between the fixed control column and the scrolling canvas: a hairline at the column's
+/// right edge plus a short, soft shadow that falls on the canvas, so the column reads as a layer
+/// above the timeline instead of an equal neighbour.
+pub fn draw_panel_edge(painter: &Painter, column: Rect, bounds: Rect) {
+    let x = column.right() - 0.5;
+    painter.line_segment(
+        [
+            egui::pos2(x, column.top()),
+            egui::pos2(x, column.bottom()),
+        ],
+        Stroke::new(1.0, Color32::from_rgb(0x0e, 0x0f, 0x12)),
+    );
+    const STEPS: usize = 6;
+    for i in 0..STEPS {
+        let alpha = 44 - 7 * i as u8;
+        let x0 = column.right() + i as f32;
+        let strip = Rect::from_min_max(
+            egui::pos2(x0, column.top()),
+            egui::pos2(x0 + 1.0, column.bottom()),
+        )
+        .intersect(bounds);
+        if strip.width() <= 0.0 || strip.height() <= 0.0 {
+            continue;
+        }
+        painter.rect_filled(strip, CornerRadius::ZERO, Color32::from_black_alpha(alpha));
+    }
+}
+
 /// Solid clip body plus a subtle top highlight, with the kind's colour.
 pub fn draw_clip(painter: &Painter, rect: Rect, clip: &Clip, selected: bool) {
     let fill = clip.kind.clip_color();

@@ -31,12 +31,20 @@ fn tb(ui: &mut Ui, x: &mut f32, y: f32, icon: ToolbarIcon, active: bool) -> egui
 }
 
 /// Rectangles of the timeline chrome inside the timeline card.
+///
+/// The left column is a fixed foreground layer: [`Layout::header`] and [`Layout::controls`] are
+/// painted after the canvas, so they cover whatever slides underneath. [`Layout::canvas`] is the
+/// visible content area right of the column, and the origin the ruler, scroll math and playhead
+/// share; [`Layout::underlay`] is the full-width body the canvas paints into, running under the
+/// column.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Layout {
     pub toolbar: Rect,
     pub ruler: Rect,
+    pub header: Rect,
     pub controls: Rect,
     pub canvas: Rect,
+    pub underlay: Rect,
 }
 
 /// Resolve the timeline areas from the card content rect.
@@ -44,26 +52,35 @@ pub fn layout(rect: Rect) -> Layout {
     let w = rect.width().max(1.0);
     let h = rect.height().max(1.0);
     let toolbar = Rect::from_min_size(rect.min, Vec2::new(w, TOOLBAR_H.min(h)));
+    let column_w = CONTROL_W.min(w - 1.0);
+    let content_x = rect.left() + column_w;
     let ruler_h = RULER_H.min((h - TOOLBAR_H).max(0.0));
     let ruler = Rect::from_min_size(
-        egui::pos2(rect.left() + CONTROL_W.min(w - 1.0), rect.top() + TOOLBAR_H),
-        Vec2::new((w - CONTROL_W).max(1.0), ruler_h),
+        egui::pos2(content_x, rect.top() + TOOLBAR_H),
+        Vec2::new((w - column_w).max(1.0), ruler_h),
+    );
+    let header = Rect::from_min_size(
+        egui::pos2(rect.left(), rect.top() + TOOLBAR_H),
+        Vec2::new(column_w, ruler_h),
     );
     let body_top = rect.top() + TOOLBAR_H + ruler_h;
     let body_h = (h - TOOLBAR_H - ruler_h).max(0.0);
     let controls = Rect::from_min_size(
         egui::pos2(rect.left(), body_top),
-        Vec2::new(CONTROL_W.min(w), body_h),
+        Vec2::new(column_w, body_h),
     );
     let canvas = Rect::from_min_size(
-        egui::pos2(rect.left() + CONTROL_W.min(w), body_top),
-        Vec2::new((w - CONTROL_W).max(1.0), body_h),
+        egui::pos2(content_x, body_top),
+        Vec2::new((w - column_w).max(1.0), body_h),
     );
+    let underlay = Rect::from_min_size(egui::pos2(rect.left(), body_top), Vec2::new(w, body_h));
     Layout {
         toolbar,
         ruler,
+        header,
         controls,
         canvas,
+        underlay,
     }
 }
 
@@ -120,6 +137,11 @@ impl Timeline {
     }
 
     /// Draw and drive the timeline. `rect` is the timeline card's content area.
+    ///
+    /// The timeline is two layers: the canvas (lane backgrounds, clips, playhead) is painted first
+    /// across the full body width, then the fixed left column is painted opaquely on top. A
+    /// horizontal scroll therefore slides the canvas beneath the column instead of meeting it at a
+    /// shared edge.
     pub fn ui(&mut self, ui: &mut Ui, rect: Rect) {
         let l = layout(rect);
         if l.toolbar.width() < 40.0 || l.canvas.height() < 20.0 {
@@ -128,9 +150,7 @@ impl Timeline {
         ui.painter()
             .rect_filled(l.toolbar, CornerRadius::ZERO, TOOLBAR_BG);
         ui.painter()
-            .rect_filled(l.canvas, CornerRadius::ZERO, CANVAS_BG);
-        ui.painter()
-            .rect_filled(l.controls, CornerRadius::ZERO, CONTROLS_BG);
+            .rect_filled(l.underlay, CornerRadius::ZERO, CANVAS_BG);
 
         self.toolbar(ui, l.toolbar);
         self.wheel(ui, &l);
@@ -140,17 +160,19 @@ impl Timeline {
         self.scroll = Vec2::new(self.scroll.x.clamp(0.0, max.x), self.scroll.y.clamp(0.0, max.y));
         let view_start = self.view_start();
 
-        let body = self.body_rect(l.canvas);
-        self.ruler(ui, l.ruler, view_start, body);
-        self.lanes(ui, &l, body, view_start);
+        let body = self.body_rect(l.underlay);
+        let origin = l.canvas.left();
+        self.ruler(ui, l.ruler, view_start, origin);
+        let rows = self.lanes(ui, &l, body, origin, view_start);
+        self.control_panel(ui, &l, body, &rows);
         self.scrollbars(ui, l.canvas, body);
     }
 
-    /// Canvas minus the scrollbar strips (the lane viewport).
-    fn body_rect(&self, canvas: Rect) -> Rect {
+    /// Full body minus the scrollbar strips: the canvas paints here, under the fixed column too.
+    fn body_rect(&self, underlay: Rect) -> Rect {
         Rect::from_min_max(
-            canvas.min,
-            egui::pos2(canvas.right() - SCROLLBAR_W, canvas.bottom() - SCROLLBAR_W),
+            underlay.min,
+            egui::pos2(underlay.right() - SCROLLBAR_W, underlay.bottom() - SCROLLBAR_W),
         )
     }
 
@@ -234,7 +256,11 @@ impl Timeline {
         let Some(pos) = ui.ctx().pointer_hover_pos() else {
             return;
         };
-        if !(l.canvas.contains(pos) || l.controls.contains(pos) || l.ruler.contains(pos)) {
+        if !(l.canvas.contains(pos)
+            || l.controls.contains(pos)
+            || l.header.contains(pos)
+            || l.ruler.contains(pos))
+        {
             return;
         }
         let (delta, ctrl, shift) = ui.input(|i| {
@@ -260,9 +286,9 @@ impl Timeline {
         }
     }
 
-    fn ruler(&mut self, ui: &mut Ui, rect: Rect, view_start: f64, body: Rect) {
-        let playhead_x = body.left() + ((self.model.playhead - view_start) as f32 * self.zoom);
-        let visible = playhead_x >= body.left() - 2.0 && playhead_x <= body.right() + 2.0;
+    fn ruler(&mut self, ui: &mut Ui, rect: Rect, view_start: f64, origin: f32) {
+        let playhead_x = origin + ((self.model.playhead - view_start) as f32 * self.zoom);
+        let visible = playhead_x >= rect.left() - 2.0 && playhead_x <= rect.right() + 2.0;
         draw::draw_ruler(
             ui.painter(),
             rect,
@@ -276,7 +302,7 @@ impl Timeline {
         if (response.clicked() || response.dragged())
             && let Some(pos) = response.interact_pointer_pos()
         {
-            let t = view_start + ((pos.x - body.left()) / self.zoom) as f64;
+            let t = view_start + ((pos.x - origin) / self.zoom) as f64;
             self.model.playhead = t.clamp(0.0, self.model.duration.max(0.0));
         }
         if response.hovered() {
@@ -284,49 +310,66 @@ impl Timeline {
         }
     }
 
-    fn lanes(&mut self, ui: &mut Ui, l: &Layout, body: Rect, view_start: f64) {
+    /// Lane rows in screen space for the current vertical scroll. The canvas and the fixed column
+    /// share this one list, so the rows on both sides cannot drift apart.
+    fn lane_rows(&self, body: Rect) -> Vec<Rect> {
+        let mut y = body.top() - self.scroll.y;
+        self.model
+            .tracks
+            .iter()
+            .map(|track| {
+                let row = Rect::from_min_size(
+                    egui::pos2(body.left(), y),
+                    Vec2::new(body.width(), track.height()),
+                );
+                y += track.height() + model::LANE_GAP;
+                row
+            })
+            .collect()
+    }
+
+    /// Canvas layer: lane backgrounds, clips and playhead, clipped to `body`, which runs under the
+    /// fixed column. Returns the lane rows so the foreground column can align with them.
+    fn lanes(
+        &mut self,
+        ui: &mut Ui,
+        l: &Layout,
+        body: Rect,
+        origin: f32,
+        view_start: f64,
+    ) -> Vec<Rect> {
         let painter = ui.painter().with_clip_rect(body);
         painter.rect_filled(body, CornerRadius::ZERO, CANVAS_BG);
 
+        // The fixed column's own area never receives canvas-content interactions.
+        let content = Rect::from_min_max(egui::pos2(l.controls.right(), body.top()), body.max);
         if self.model.is_empty() {
             painter.text(
-                body.center(),
+                content.center(),
                 Align2::CENTER_CENTER,
                 "Drag media here to start a timeline",
                 FontId::proportional(13.0),
                 DIM,
             );
-            return;
+            return Vec::new();
         }
 
-        // Lane rectangles in content space, shifted by the vertical scroll. Heights are fixed per
-        // content type (model::Track::height); zoom only scales the horizontal axis.
-        let heights: Vec<f32> = self.model.tracks.iter().map(|t| t.height()).collect();
-        let mut y = body.top() - self.scroll.y;
-        let mut lanes = Vec::with_capacity(heights.len());
-        for height in heights {
-            lanes.push(Rect::from_min_size(
-                egui::pos2(body.left(), y),
-                Vec2::new(body.width(), height),
-            ));
-            y += height + model::LANE_GAP;
-        }
-
-        // Lane backgrounds: alternating subtle tones, no dividers, continuous canvas.
-        for (index, lane) in lanes.iter().enumerate() {
+        let rows = self.lane_rows(body);
+        for (index, lane) in rows.iter().enumerate() {
             if lane.bottom() < body.top() || lane.top() > body.bottom() {
                 continue;
             }
+            // Backgrounds span the full body width; the fixed column is painted over them later.
             let clipped = Rect::from_min_max(
                 egui::pos2(body.left(), lane.top().max(body.top())),
                 egui::pos2(body.right(), lane.bottom().min(body.bottom())),
             );
             painter.rect_filled(clipped, CornerRadius::ZERO, draw::lane_bg(index));
-            self.lane_content(ui, body, *lane, index, view_start);
+            self.lane_content(ui, body, content, *lane, index, origin, view_start);
         }
 
-        // Playhead across every lane.
-        let x = body.left() + ((self.model.playhead - view_start) as f32 * self.zoom);
+        // Playhead across every lane; the foreground column covers the part scrolled beneath it.
+        let x = origin + ((self.model.playhead - view_start) as f32 * self.zoom);
         if x >= body.left() && x <= body.right() {
             painter.line_segment(
                 [
@@ -336,26 +379,20 @@ impl Timeline {
                 Stroke::new(1.5, draw::PLAYHEAD),
             );
         }
-
-        // Track-control column, vertically in sync with the lanes.
-        self.controls(ui, l.controls, &lanes);
-
-        // Vertical hairline between the control column and the canvas.
-        painter.line_segment(
-            [
-                egui::pos2(body.left() - 0.5, body.top()),
-                egui::pos2(body.left() - 0.5, body.bottom()),
-            ],
-            Stroke::new(1.0, Color32::from_rgb(0x22, 0x25, 0x2a)),
-        );
+        rows
     }
 
+    /// Clips of one lane. They are painted clipped to the full `body` (so a horizontal scroll slides
+    /// them beneath the fixed column) but hit-tested only inside `content`, right of the column.
+    #[allow(clippy::too_many_arguments)]
     fn lane_content(
         &mut self,
         ui: &mut Ui,
         body: Rect,
+        content: Rect,
         lane: Rect,
         index: usize,
+        origin: f32,
         view_start: f64,
     ) {
         let painter = ui.painter().with_clip_rect(body);
@@ -364,7 +401,7 @@ impl Timeline {
         let clip_h = kind.map(|k| k.clip_height()).unwrap_or(track.height() - 4.0);
         let clip_y = lane.top() + (lane.height() - clip_h) * 0.5;
         for (clip_index, clip) in track.clips.iter().enumerate() {
-            let x = body.left() + ((clip.start - view_start) as f32 * self.zoom);
+            let x = origin + ((clip.start - view_start) as f32 * self.zoom);
             let w = (clip.duration as f32 * self.zoom).max(3.0);
             let rect = Rect::from_min_size(egui::pos2(x, clip_y), Vec2::new(w, clip_h));
             let visible = rect.intersect(body);
@@ -374,41 +411,59 @@ impl Timeline {
             let selected = self.selected == Some((index, clip_index));
             draw::draw_clip(&painter, visible, clip, selected);
 
+            let hit = visible.intersect(content);
+            if hit.width() < 2.0 || hit.height() < 2.0 {
+                continue;
+            }
             let id = ui.make_persistent_id(("tl-clip", index, clip_index));
-            let response = ui.interact(visible, id, Sense::click());
+            let response = ui.interact(hit, id, Sense::click());
             if response.clicked() {
                 self.selected = Some((index, clip_index));
             }
         }
     }
 
-    fn controls(&mut self, ui: &mut Ui, column: Rect, lanes: &[Rect]) {
-        let painter = ui.painter().with_clip_rect(column);
-        for (index, lane) in lanes.iter().enumerate() {
-            if lane.bottom() < column.top() || lane.top() > column.bottom() {
+    /// Foreground layer: the fixed control column, painted opaquely over the canvas so clips and the
+    /// playhead always disappear beneath it, plus the boundary that separates the two layers.
+    fn control_panel(&mut self, ui: &mut Ui, l: &Layout, body: Rect, rows: &[Rect]) {
+        let painter = ui.painter();
+        painter.rect_filled(l.header, CornerRadius::ZERO, CONTROLS_BG);
+        painter.rect_filled(l.controls, CornerRadius::ZERO, CONTROLS_BG);
+        // Continue the ruler baseline under the header cell, so the column reads as one piece.
+        painter.line_segment(
+            [
+                egui::pos2(l.header.left(), l.header.bottom() - 0.5),
+                egui::pos2(l.header.right(), l.header.bottom() - 0.5),
+            ],
+            Stroke::new(1.0, draw::FAINT),
+        );
+        draw::draw_panel_edge(painter, l.header.union(l.controls), body);
+
+        let column = ui.painter().with_clip_rect(l.controls);
+        for (index, row) in rows.iter().enumerate() {
+            if row.bottom() < l.controls.top() || row.top() > l.controls.bottom() {
                 continue;
             }
             let clipped = Rect::from_min_max(
-                egui::pos2(column.left(), lane.top().max(column.top())),
-                egui::pos2(column.right(), lane.bottom().min(column.bottom())),
+                egui::pos2(l.controls.left(), row.top().max(l.controls.top())),
+                egui::pos2(l.controls.right(), row.bottom().min(l.controls.bottom())),
             );
             let hovered = ui
                 .ctx()
                 .pointer_hover_pos()
                 .is_some_and(|p| clipped.contains(p));
             if hovered {
-                painter.rect_filled(clipped, CornerRadius::ZERO, Color32::from_rgb(0x1c, 0x1f, 0x24));
+                column.rect_filled(clipped, CornerRadius::ZERO, Color32::from_rgb(0x1c, 0x1f, 0x24));
             }
             draw::draw_track_controls(
                 ui,
-                &painter,
-                column,
+                &column,
+                l.controls,
                 clipped,
                 &mut self.model.tracks[index],
                 index,
             );
         }
-
     }
 
     fn scrollbars(&mut self, ui: &mut Ui, canvas: Rect, body: Rect) {
@@ -475,10 +530,49 @@ mod tests {
         let l = layout(rect());
         assert_eq!(l.toolbar.height(), TOOLBAR_H);
         assert_eq!(l.ruler.top(), l.toolbar.bottom());
-        assert_eq!(l.ruler.left(), l.canvas.left());
-        assert_eq!(l.canvas.top(), l.controls.top());
+        assert_eq!(l.header.top(), l.ruler.top());
+        assert_eq!(l.header.height(), RULER_H);
+        assert_eq!(l.header.right(), l.canvas.left());
+        assert_eq!(l.controls.right(), l.canvas.left());
+        assert_eq!(l.controls.top(), l.canvas.top());
         assert_eq!(l.controls.width(), CONTROL_W);
+        assert_eq!(l.ruler.left(), l.canvas.left());
         assert_eq!(l.ruler.width(), l.canvas.width());
+        // The canvas paints into a full-width underlay that runs beneath the fixed column.
+        assert_eq!(l.underlay.left(), l.header.left());
+        assert_eq!(l.underlay.width(), l.header.width() + l.canvas.width());
+        assert_eq!(l.underlay.top(), l.canvas.top());
+    }
+
+    #[test]
+    fn lane_rows_are_fixed_across_horizontal_scroll() {
+        let mut t = Timeline::default();
+        let body = Rect::from_min_size(egui::pos2(0.0, 56.0), egui::vec2(900.0, 300.0));
+        let rows = t.lane_rows(body);
+        assert_eq!(rows.len(), t.model.tracks.len());
+        for (row, track) in rows.iter().zip(&t.model.tracks) {
+            assert_eq!(row.height(), track.height());
+            assert_eq!(row.left(), body.left());
+            assert_eq!(row.width(), body.width());
+        }
+        assert_eq!(rows[0].height(), 24.0);
+        assert_eq!(rows[3].height(), 76.0);
+        assert_eq!(rows[6].height(), 50.0);
+        for pair in rows.windows(2) {
+            assert_eq!(pair[1].top(), pair[0].bottom() + model::LANE_GAP);
+        }
+
+        // Horizontal scroll slides the canvas under the rows; it never moves or resizes them.
+        t.scroll.x = 480.0;
+        assert_eq!(t.lane_rows(body), rows, "horizontal scroll moved the lane rows");
+
+        // Vertical scroll moves the rows with the lanes, keeping the same fixed heights.
+        t.scroll.y = 20.0;
+        let shifted = t.lane_rows(body);
+        assert_eq!(shifted[0].top(), rows[0].top() - 20.0);
+        for (row, track) in shifted.iter().zip(&t.model.tracks) {
+            assert_eq!(row.height(), track.height());
+        }
     }
 
     #[test]
@@ -530,10 +624,7 @@ mod tests {
         let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
         frame(&ctx, &mut t, screen, Vec::new());
         let l = layout(screen);
-        let body = Rect::from_min_max(
-            l.canvas.min,
-            egui::pos2(l.canvas.right() - SCROLLBAR_W, l.canvas.bottom() - SCROLLBAR_W),
-        );
+        let body = t.body_rect(l.underlay);
         let vbar = Rect::from_min_max(
             egui::pos2(l.canvas.right() - SCROLLBAR_W, l.canvas.top()),
             egui::pos2(l.canvas.right(), body.bottom()),
@@ -597,7 +688,10 @@ mod tests {
         let content_h = t.model.content_height();
 
         // The lower edge of the first (text) lane, in the gap before the next lane.
-        let edge = egui::pos2(body.left() + 60.0, body.top() + t.model.tracks[0].height());
+        let edge = egui::pos2(
+            l.canvas.left() + 60.0,
+            body.top() + t.model.tracks[0].height(),
+        );
         let moved = edge + egui::vec2(0.0, 40.0);
         frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(edge)]);
         frame(&ctx, &mut t, screen, vec![egui::Event::PointerButton {
@@ -630,6 +724,62 @@ mod tests {
             assert_eq!(heights(&t), before, "zoom {zoom} changed lane heights");
             assert_eq!(t.model.content_height(), content_h);
         }
+    }
+
+    /// One click at `pos` (press and release in separate frames, like a real pointer).
+    fn click(ctx: &egui::Context, t: &mut Timeline, screen: Rect, pos: egui::Pos2) {
+        frame(ctx, t, screen, vec![egui::Event::PointerMoved(pos)]);
+        frame(
+            ctx,
+            t,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        frame(
+            ctx,
+            t,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+
+    /// The fixed column is a foreground layer: a clip scrolled underneath it is not clickable there,
+    /// while the visible part of the same clip right of the boundary still is.
+    #[test]
+    fn the_fixed_column_swallows_clicks_on_clips_scrolled_beneath_it() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline::default();
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        frame(&ctx, &mut t, screen, Vec::new());
+        let l = layout(screen);
+        let body = t.body_rect(l.underlay);
+
+        // Scroll right so the first text clip (0..2.8 s) starts beneath the fixed column.
+        t.scroll.x = 120.0;
+        frame(&ctx, &mut t, screen, Vec::new());
+        assert!(t.view_start() > 0.0);
+
+        let row_y = body.top() + 10.0;
+        // A click over the column (x = 100) lands on the clip that is scrolled underneath.
+        click(&ctx, &mut t, screen, egui::pos2(100.0, row_y));
+        assert_eq!(
+            t.selected, None,
+            "a click on the fixed column must not select a clip beneath it"
+        );
+
+        // Right of the boundary the visible part of the same clip is reachable.
+        click(&ctx, &mut t, screen, egui::pos2(l.canvas.left() + 20.0, row_y));
+        assert_eq!(t.selected, Some((0, 0)));
     }
 
     #[test]

@@ -37,7 +37,8 @@ impl TrackKind {
         }
     }
 
-    /// Default lane height in points at 100 % scaling.
+    /// Fixed lane height in logical points for this content type. It never changes: all tracks of
+    /// one type share it, zoom does not scale it, and the UI offers no way to edit it.
     pub fn lane_height(self) -> f32 {
         match self {
             TrackKind::Text | TrackKind::Effect | TrackKind::Sticker => 24.0,
@@ -109,12 +110,18 @@ impl Clip {
     }
 }
 
+/// Lane height, in points, of a track that holds no clips yet. The first clip gives the track its
+/// content type and with it the fixed height for that type.
+pub const UNTYPED_LANE_H: f32 = 24.0;
+
 /// A lane. Its type is not stored: it is derived from the clips it holds, so an empty track is
 /// untyped and removing every clip re-opens it for another kind.
+///
+/// The lane height is not editable state: it is derived from the content type (see [`Track::height`]),
+/// so all tracks of one type always share the same height and nothing can resize an individual lane.
 #[derive(Debug, Clone)]
 pub struct Track {
     pub name: String,
-    pub height: f32,
     pub clips: Vec<Clip>,
     pub locked: bool,
     pub visible: bool,
@@ -125,7 +132,6 @@ impl Track {
     pub fn new(name: &str) -> Track {
         Track {
             name: name.to_string(),
-            height: TrackKind::Video.lane_height(),
             clips: Vec::new(),
             locked: false,
             visible: true,
@@ -138,6 +144,13 @@ impl Track {
         self.clips.first().map(|c| c.kind)
     }
 
+    /// Fixed lane height in logical points for this track: [`TrackKind::lane_height`] once the track
+    /// has content type, and [`UNTYPED_LANE_H`] while it is empty. It is a pure function of the
+    /// content type, so zoom, scroll and DPI scaling cannot change it.
+    pub fn height(&self) -> f32 {
+        self.kind().map_or(UNTYPED_LANE_H, TrackKind::lane_height)
+    }
+
     /// A track accepts the first content type it is given, and only that one afterwards.
     pub fn can_accept(&self, kind: TrackKind) -> bool {
         self.clips.iter().all(|c| c.kind == kind)
@@ -147,9 +160,6 @@ impl Track {
     pub fn add_clip(&mut self, clip: Clip) -> bool {
         if !self.can_accept(clip.kind) {
             return false;
-        }
-        if self.clips.is_empty() {
-            self.height = clip.kind.lane_height();
         }
         self.clips.push(clip);
         true
@@ -240,7 +250,7 @@ impl TimelineModel {
 
     /// Sum of lane heights plus the gaps, in points.
     pub fn content_height(&self) -> f32 {
-        let heights: f32 = self.tracks.iter().map(|t| t.height).sum();
+        let heights: f32 = self.tracks.iter().map(Track::height).sum();
         heights + LANE_GAP * self.tracks.len().saturating_sub(1) as f32
     }
 
@@ -270,11 +280,46 @@ mod tests {
     }
 
     #[test]
+    fn lane_height_follows_the_content_type_and_is_not_editable_state() {
+        let mut track = Track::new("T");
+        assert_eq!(track.height(), UNTYPED_LANE_H, "an empty lane is compact");
+        assert!(track.add_clip(Clip::new(TrackKind::Text, "t", 0.0, 1.0)));
+        assert_eq!(track.height(), TrackKind::Text.lane_height());
+        assert!(track.add_clip(Clip::new(TrackKind::Text, "t2", 1.0, 1.0)));
+        assert_eq!(
+            track.height(),
+            TrackKind::Text.lane_height(),
+            "more clips never change the fixed height"
+        );
+        track.remove_clip(0);
+        track.remove_clip(0);
+        assert_eq!(track.height(), UNTYPED_LANE_H, "empty again, compact again");
+    }
+
+    #[test]
+    fn tracks_of_the_same_type_share_one_height() {
+        let model = TimelineModel::mock();
+        for kind in TrackKind::ALL {
+            let heights: Vec<f32> = model
+                .tracks
+                .iter()
+                .filter(|t| t.kind() == Some(kind))
+                .map(Track::height)
+                .collect();
+            assert!(!heights.is_empty(), "{kind:?} has no mock track");
+            for height in heights {
+                assert_eq!(height, kind.lane_height(), "{kind:?} lane height");
+            }
+        }
+    }
+
+    #[test]
     fn a_track_type_comes_from_its_content() {
         let mut track = Track::new("T");
         assert_eq!(track.kind(), None);
         assert!(track.can_accept(TrackKind::Audio));
         assert!(track.add_clip(Clip::new(TrackKind::Video, "a", 0.0, 1.0)));
+        assert_eq!(track.clips[0].end(), 1.0, "clip end = start + duration");
         assert_eq!(track.kind(), Some(TrackKind::Video));
         assert!(track.can_accept(TrackKind::Video));
         assert!(!track.can_accept(TrackKind::Audio));

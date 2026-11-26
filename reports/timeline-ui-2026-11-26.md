@@ -4,6 +4,11 @@ Implemented inside the TIMELINE card of the four-panel shell. Only the timeline 
 shell's card hosting changed; Media, Preview, Inspector and the application architecture are
 untouched. No engine, document or Agent code was modified.
 
+**Revision (2026-11-26, later the same day):** the track-height rule was corrected. Lane heights are
+fixed by content type and can never be resized by the user, so the earlier manual-resize behavior,
+its 20–220 pt clamps and its edge drag handles were removed (details in "Fixed lane heights" below
+and in the acceptance matrix row 9).
+
 ## What was built
 
 - **Chrome:** compact toolbar (selection, undo, redo, split, delete, link, snapping, zoom −/+, zoom
@@ -23,8 +28,12 @@ untouched. No engine, document or Agent code was modified.
   the pointer; both scrollbar strips are draggable (hit area widened 6 pt inward); zoom 12–480 px/s.
 - **Track controls:** type icon (tooltip names the lane), lock, visibility for visual lanes, mute for
   audio-capable lanes; only applicable controls are shown, vertically centred per lane.
-- **Track resizing:** drag a lane's lower edge in the canvas; height clamps to 20–220 pt, the lane's
-  controls and clips follow, and type defaults are restored when a track gets its first clip.
+- **Fixed lane heights:** the height is a property of the content type, never of the lane instance:
+  Text/Effect/Sticker 24 pt, Video/Image 76 pt, Audio 50 pt. All tracks of one type therefore share
+  the same height, an empty track stays compact (24 pt) until its first clip, and there is no
+  manual resize: no drag handles, no lane-edge hit zones, no 20–220 pt clamps. Horizontal zoom
+  changes only the time scale; heights are unaffected. All geometry is in logical points, so
+  DPI scaling is handled by egui.
 - **Empty state:** with no clips the chrome stays and the canvas shows "Drag media here to start a
   timeline"; no fake lanes or clips. (`ARCLINE_TIMELINE_EMPTY=1` is a mock aid used to inspect it.)
 
@@ -45,28 +54,32 @@ untouched. No engine, document or Agent code was modified.
 |---|---|---|
 | 1 | Build and run | `cargo build -p arc-app` exit 0; app launched (screenshots) |
 | 2 | Six track types render | `timeline-top.png` (text, effect, sticker, image, video) + `timeline-scrolled.png` (main video, audio × 2) |
-| 3 | Different track heights | 24 / 24 / 24 / 76 / 76 / 76 / 50 / 50 pt lanes visible; unit test `default_heights_match_the_specification` |
+| 3 | Heights differ only by content type | 24 / 24 / 24 / 76 / 76 / 76 / 50 / 50 pt lanes visible; unit test `default_heights_match_the_specification` |
 | 4 | 4 pt lane spacing | `layout` gaps visible; `content_height` test (428 = 400 + 7×4); no divider lines drawn |
 | 5 | Clip heights and layouts | 20 pt text/effect/sticker, 72 pt video/image (thumbnails + waveform), 46 pt audio (waveform); screenshots |
 | 6 | Icons/controls aligned | Type icon, lock, eye/mute centred per lane in the control column; screenshots |
 | 7 | No prominent borders / card tracks | Lanes are alternating fills inside one continuous canvas; clips are the only rounded blocks |
 | 8 | Horizontal and vertical scrolling | Vertical: wheel (`timeline-scrolled.png`); horizontal: Shift+wheel (ruler and clips moved together); scrollbar drags covered by `dragging_the_scrollbars_changes_the_scroll_offsets` |
-| 9 | Track height resizing | Drag test in the app (`timeline-resized.png`, music lane grew); implemented with 20–220 pt clamps |
+| 9 | Fixed, non-resizable track heights | Per-type constants 24/76/50 pt (`default_heights_match_the_specification`, `tracks_of_the_same_type_share_one_height`, `lane_height_follows_the_content_type_and_is_not_editable_state`); a lane-edge drag changes no height and does not scroll (`dragging_a_lane_edge_does_not_resize_it`); zoom invariance (`horizontal_zoom_does_not_change_track_heights`, and `timeline-zoom-heights.png` shows the same lane heights at 113 px/s as `run-fixed-heights.png` at 58 px/s) |
 | 10 | Four-panel layout unchanged | All screenshots keep the media/preview/inspector/timeline arrangement; shells' panel code untouched |
+| 11 | No height drag handles / no resize cursor | No lane-edge hit zones exist in `lanes`/`lane_content`; timeline edge drag test leaves heights untouched |
+| 12 | DPI-aware rendering | All geometry is logical points resolved by egui's `pixels_per_point`; no physical-pixel constants in the timeline |
 
 ## Tests
 
-`cargo test -p arc-app` → **19 passed** (0 failed):
+`cargo test -p arc-app --profile dev` → **23 passed** (0 failed):
 
-- model: default lane/clip heights, dynamic typing (first clip, rejection, untyped after removal),
-  mock ordering (audio below the main video) and content height;
+- model: fixed lane/clip heights per content type, equal height for every track of a type,
+  dynamic typing (first clip, rejection, untyped after removal), mock ordering (audio below the
+  main video) and content height;
 - layout: ruler/canvas/control alignment, view start and zoom, max scroll for short viewports,
   empty timeline, playhead position, tick-step growth;
-- interaction: splitter drag, scrollbar drags (both axes).
+- interaction: splitter drag, scrollbar drags (both axes), lane-edge drag leaves heights and scroll
+  untouched, horizontal zoom leaves heights and content height untouched.
 
-The full workspace suite was not run in this environment: the build drive is full (the build artifacts
-live in `%TEMP%\arcline-target` with `CARGO_PROFILE_DEV_DEBUG=0`), so `cargo test --workspace` cannot
-link; CI will cover it. No engine or document code was touched by this change.
+The full workspace suite was not run in this pass (the build artifacts live in
+`%TEMP%\arcline-target` with `CARGO_PROFILE_DEV_DEBUG=0`); CI will cover it. No engine or document
+code was touched by this change.
 
 ## Boundaries kept
 

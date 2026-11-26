@@ -1,7 +1,8 @@
 //! Timeline module: toolbar, ruler, track-control column and the lane canvas, driven by mock data.
 //!
-//! Everything here is presentation and local state (zoom, scroll, selection, mock track heights);
+//! Everything here is presentation and local state (zoom, scroll, selection);
 //! no engine types are touched, so the mock model can be replaced by the real document feed later.
+//! Lane heights are fixed by content type and are not editable state.
 
 pub mod draw;
 pub mod model;
@@ -21,9 +22,6 @@ pub const SCROLLBAR_W: f32 = 9.0;
 /// Zoom limits, in points per second.
 pub const MIN_ZOOM: f32 = 12.0;
 pub const MAX_ZOOM: f32 = 480.0;
-/// Track height limits when dragging the lane edge.
-pub const MIN_TRACK_H: f32 = 20.0;
-pub const MAX_TRACK_H: f32 = 220.0;
 
 fn tb(ui: &mut Ui, x: &mut f32, y: f32, icon: ToolbarIcon, active: bool) -> egui::Response {
     let r = Rect::from_center_size(egui::pos2(*x + 12.0, y), Vec2::new(24.0, 24.0));
@@ -217,7 +215,8 @@ impl Timeline {
             .clicked()
         {
             zoom_delta = 1.0;
-        }        if zoom_delta != 0.0 {
+        }
+        if zoom_delta != 0.0 {
             self.zoom = (self.zoom * if zoom_delta > 0.0 { 1.25 } else { 0.8 })
                 .clamp(MIN_ZOOM, MAX_ZOOM);
         }
@@ -300,8 +299,9 @@ impl Timeline {
             return;
         }
 
-        // Lane rectangles in content space, shifted by the vertical scroll.
-        let heights: Vec<f32> = self.model.tracks.iter().map(|t| t.height).collect();
+        // Lane rectangles in content space, shifted by the vertical scroll. Heights are fixed per
+        // content type (model::Track::height); zoom only scales the horizontal axis.
+        let heights: Vec<f32> = self.model.tracks.iter().map(|t| t.height()).collect();
         let mut y = body.top() - self.scroll.y;
         let mut lanes = Vec::with_capacity(heights.len());
         for height in heights {
@@ -361,7 +361,7 @@ impl Timeline {
         let painter = ui.painter().with_clip_rect(body);
         let track = &self.model.tracks[index];
         let kind = track.kind();
-        let clip_h = kind.map(|k| k.clip_height()).unwrap_or(track.height - 4.0);
+        let clip_h = kind.map(|k| k.clip_height()).unwrap_or(track.height() - 4.0);
         let clip_y = lane.top() + (lane.height() - clip_h) * 0.5;
         for (clip_index, clip) in track.clips.iter().enumerate() {
             let x = body.left() + ((clip.start - view_start) as f32 * self.zoom);
@@ -378,24 +378,6 @@ impl Timeline {
             let response = ui.interact(visible, id, Sense::click());
             if response.clicked() {
                 self.selected = Some((index, clip_index));
-            }
-        }
-
-        // Resize grip on the lane's lower edge (both columns), drawn faintly.
-        let grip = Rect::from_min_max(
-            egui::pos2(body.left(), lane.bottom() - 2.0),
-            egui::pos2(body.right(), (lane.bottom() + 3.0).min(body.bottom())),
-        );
-        if grip.height() > 0.0 {
-            let id = ui.make_persistent_id(("tl-resize", index));
-            let response = ui.interact(grip, id, Sense::drag());
-            if response.hovered() || response.dragged() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
-            }
-            if response.dragged() {
-                let track = &mut self.model.tracks[index];
-                track.height = (track.height + response.drag_delta().y)
-                    .clamp(MIN_TRACK_H, MAX_TRACK_H);
             }
         }
     }
@@ -477,6 +459,17 @@ mod tests {
         Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 500.0))
     }
 
+    /// One frame of the timeline UI with the given input events.
+    fn frame(ctx: &egui::Context, t: &mut Timeline, screen: Rect, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(screen),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| t.ui(ui, screen));
+        out.textures_delta.clear();
+    }
+
     #[test]
     fn layout_aligns_ruler_and_canvas_over_the_control_column() {
         let l = layout(rect());
@@ -535,13 +528,6 @@ mod tests {
         let ctx = egui::Context::default();
         let mut t = Timeline::default();
         let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
-        fn frame(ctx: &egui::Context, t: &mut Timeline, screen: Rect, events: Vec<egui::Event>) {
-            let mut input = egui::RawInput::default();
-            input.screen_rect = Some(screen);
-            input.events = events;
-            let mut out = ctx.run_ui(input, |ui| t.ui(ui, screen));
-            out.textures_delta.clear();
-        }
         frame(&ctx, &mut t, screen, Vec::new());
         let l = layout(screen);
         let body = Rect::from_min_max(
@@ -589,6 +575,61 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         }]);
         assert!(t.scroll.x > 0.0, "horizontal scrollbar drag: scroll.x={}", t.scroll.x);
+    }
+
+    /// Lane heights are fixed by content type: a drag on a lane edge must neither resize the lane
+    /// nor scroll the canvas, and no lane-edge hit region exists at all.
+    #[test]
+    fn dragging_a_lane_edge_does_not_resize_it() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline::default();
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        frame(&ctx, &mut t, screen, Vec::new());
+
+        let l = layout(screen);
+        let body = Rect::from_min_max(
+            l.canvas.min,
+            egui::pos2(l.canvas.right() - SCROLLBAR_W, l.canvas.bottom() - SCROLLBAR_W),
+        );
+        let heights =
+            |t: &Timeline| -> Vec<f32> { t.model.tracks.iter().map(|tr| tr.height()).collect() };
+        let before = heights(&t);
+        let content_h = t.model.content_height();
+
+        // The lower edge of the first (text) lane, in the gap before the next lane.
+        let edge = egui::pos2(body.left() + 60.0, body.top() + t.model.tracks[0].height());
+        let moved = edge + egui::vec2(0.0, 40.0);
+        frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(edge)]);
+        frame(&ctx, &mut t, screen, vec![egui::Event::PointerButton {
+            pos: edge,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(moved)]);
+        frame(&ctx, &mut t, screen, vec![egui::Event::PointerButton {
+            pos: moved,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+
+        assert_eq!(heights(&t), before, "a lane edge drag must not resize tracks");
+        assert_eq!(t.model.content_height(), content_h);
+        assert_eq!(t.scroll.y, 0.0, "the drag must not scroll either");
+    }
+
+    #[test]
+    fn horizontal_zoom_does_not_change_track_heights() {
+        let mut t = Timeline::default();
+        let heights = |t: &Timeline| -> Vec<f32> { t.model.tracks.iter().map(|tr| tr.height()).collect() };
+        let before = heights(&t);
+        let content_h = t.model.content_height();
+        for zoom in [MIN_ZOOM, 40.0, 58.0, 200.0, MAX_ZOOM] {
+            t.zoom = zoom;
+            assert_eq!(heights(&t), before, "zoom {zoom} changed lane heights");
+            assert_eq!(t.model.content_height(), content_h);
+        }
     }
 
     #[test]

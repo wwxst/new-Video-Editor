@@ -38,6 +38,8 @@ pub struct Editor {
     media_root: PathBuf,
     project: Option<Project>,
     rate: Ratio,
+    /// Sequence resolution: the viewer keeps one fitted rect while half-quality frames arrive.
+    frame_size: egui::Vec2,
     total_frames: i64,
     transport: Option<PreviewTransport>,
     texture: Option<egui::TextureHandle>,
@@ -65,6 +67,7 @@ impl Editor {
             media_root: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
             project: None,
             rate: Ratio::ONE,
+            frame_size: egui::vec2(1920.0, 1080.0),
             total_frames: 1,
             transport: None,
             texture: None,
@@ -83,6 +86,10 @@ impl Editor {
                     return editor;
                 };
                 editor.rate = sequence.frame_rate().rate();
+                editor.frame_size = egui::vec2(
+                    sequence.resolution.w as f32,
+                    sequence.resolution.h as f32,
+                );
                 editor.total_frames = arc_render::plan::frame_count(&project).max(1);
                 editor.name = project.meta.name.clone();
                 editor.project = Some(project);
@@ -165,10 +172,11 @@ impl Editor {
         let bar_height = 34.0;
         let viewer_size = egui::vec2(available.x, (available.y - bar_height).max(40.0));
         let texture = self.texture.clone();
+        let frame_size = self.frame_size;
         ui.allocate_ui(viewer_size, |ui| {
             match &texture {
                 Some(texture) => {
-                    let size = fit_size(texture.size_vec2(), ui.available_size());
+                    let size = fit_size(frame_size, ui.available_size());
                     ui.centered_and_justified(|ui| {
                         ui.image(egui::load::SizedTexture::new(texture.id(), size));
                     });

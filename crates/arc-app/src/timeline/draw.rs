@@ -1,7 +1,7 @@
 //! Drawing primitives for the timeline: lanes, clips, ruler, playhead, track controls, toolbar
 //! icons and scrollbars. Everything is painted with vector strokes, so no icon font is needed.
 
-use super::model::{Clip, TrackKind};
+use super::model::TrackKind;
 use egui::{
     Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind,
     Ui,
@@ -56,10 +56,9 @@ pub fn draw_panel_edge(painter: &Painter, column: Rect, bounds: Rect) {
     }
 }
 
-/// Solid clip body plus a subtle top highlight, with the kind's colour.
-pub fn draw_clip(painter: &Painter, rect: Rect, clip: &Clip, selected: bool) {
-    let fill = clip.kind.clip_color();
-    painter.rect_filled(rect, CornerRadius::same(4), fill);
+/// Clip body: the kind's colour, a subtle top highlight and the selection outline.
+pub fn draw_clip_body(painter: &Painter, rect: Rect, kind: TrackKind, selected: bool) {
+    painter.rect_filled(rect, CornerRadius::same(4), kind.clip_color());
     if selected {
         painter.rect_stroke(
             rect,
@@ -68,121 +67,142 @@ pub fn draw_clip(painter: &Painter, rect: Rect, clip: &Clip, selected: bool) {
             StrokeKind::Inside,
         );
     }
+    let top = Rect::from_min_max(
+        rect.min,
+        egui::pos2(rect.right(), (rect.top() + 2.0).min(rect.bottom())),
+    );
+    painter.rect_filled(top, CornerRadius::same(2), Color32::from_white_alpha(10));
+}
 
-    // Video and image clips get mock thumbnails; audio clips a waveform.
-    match clip.kind {
-        TrackKind::Video => {
-            draw_thumbnails(painter, rect.shrink(2.0), &clip.name, 26.0, Some(0.72));
-            draw_waveform(painter, strip(rect, 0.74, 0.98), &clip.name, 0.35);
-        }
-        TrackKind::Image => draw_thumbnails(painter, rect.shrink(2.0), &clip.name, 26.0, None),
-        TrackKind::Audio => {
-            painter.rect_filled(rect, CornerRadius::same(4), fill);
-            draw_waveform(painter, rect.shrink2(egui::vec2(3.0, 4.0)), &clip.name, 0.85);
-        }
-        _ => {}
+/// Compact label in the clip's top-left corner, elided so it never leaves the clip.
+pub fn draw_clip_label(painter: &Painter, rect: Rect, text: &str) {
+    if rect.width() < 16.0 || rect.height() < 12.0 || text.is_empty() {
+        return;
     }
-
-    // Name (and file) on a dark pill so it stays readable over thumbnails and waveforms.
-    let label = match &clip.file {
-        Some(file) if clip.kind != TrackKind::Text => format!("{file}  {:.1}s", clip.duration),
-        _ => format!("{}  {:.1}s", clip.name, clip.duration),
-    };
-    let text_pos = rect.left_top() + egui::vec2(6.0, 4.0);
-    let galley = painter.layout_no_wrap(label.clone(), FontId::proportional(10.5), TEXT);
-    let bg = Rect::from_min_size(text_pos - egui::vec2(2.0, 1.0), galley.size() + egui::vec2(4.0, 2.0))
-        .intersect(rect.shrink(1.0));
-    if bg.width() > 6.0 {
-        painter.rect_filled(bg, CornerRadius::same(3), Color32::from_black_alpha(110));
+    let font = FontId::proportional(10.5);
+    let text = elide(painter, text, &font, (rect.width() - 10.0).max(6.0));
+    let pos = rect.left_top() + egui::vec2(5.0, 3.0);
+    let galley = painter.layout_no_wrap(text, font, Color32::from_rgb(0xf2, 0xf4, 0xf6));
+    let bg = Rect::from_min_size(pos - egui::vec2(2.0, 1.0), galley.size() + egui::vec2(4.0, 2.0))
+        .intersect(rect.shrink(0.5));
+    if bg.width() > 4.0 {
+        painter.rect_filled(bg, CornerRadius::same(3), Color32::from_black_alpha(120));
     }
-    painter.with_clip_rect(rect.shrink(2.0)).galley(
-        text_pos,
+    painter.with_clip_rect(rect.shrink(1.0)).galley(
+        pos,
         galley,
         Color32::from_rgb(0xf2, 0xf4, 0xf6),
     );
 }
 
-fn strip(rect: Rect, top: f32, bottom: f32) -> Rect {
-    Rect::from_min_max(
-        egui::pos2(rect.left(), rect.top() + rect.height() * top),
-        egui::pos2(rect.right(), rect.top() + rect.height() * bottom),
-    )
-}
-
-/// Mock thumbnails: a row of tinted cells derived from the clip name.
-fn draw_thumbnails(painter: &Painter, rect: Rect, seed: &str, cell: f32, height_frac: Option<f32>) {
-    let area = match height_frac {
-        Some(frac) => Rect::from_min_max(
-            rect.min,
-            egui::pos2(rect.right(), rect.top() + rect.height() * frac),
-        ),
-        None => rect,
-    };
-    if area.width() < 2.0 || area.height() < 2.0 {
-        return;
-    }
-    let base = mix(seed, 0x20, 0x80);
-    let mut x = area.left();
-    let mut i = 0u32;
-    let clipped = painter.with_clip_rect(area.intersect(rect));
-    while x < area.right() {
-        let w = cell.min(area.right() - x);
-        let tint = 0.55 + 0.1 * ((i as f32 * 0.9).sin() * 0.5 + 0.5);
-        clipped.rect_filled(
-            Rect::from_min_size(egui::pos2(x, area.top()), egui::vec2(w - 1.0, area.height())),
-            CornerRadius::same(2),
-            scale(base, tint),
+/// Clear fallback for missing or undecodable media: a hatched body and a warning label. Never a
+/// fake thumbnail or waveform, so a broken file cannot masquerade as real content.
+pub fn draw_missing(painter: &Painter, rect: Rect, message: &str) {
+    painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(0x2b, 0x1e, 0x1e));
+    let hatch = Color32::from_rgba_unmultiplied(0x8a, 0x4a, 0x44, 90);
+    let mut x = rect.left() - rect.height();
+    while x < rect.right() {
+        painter.line_segment(
+            [
+                egui::pos2(x, rect.bottom()),
+                egui::pos2(x + rect.height(), rect.top()),
+            ],
+            Stroke::new(1.0, hatch),
         );
-        x += cell;
-        i += 1;
+        x += 10.0;
     }
+    painter.text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        message,
+        FontId::proportional(9.5),
+        Color32::from_rgb(0xd8, 0x9a, 0x92),
+    );
 }
 
-fn scale(color: Color32, factor: f32) -> Color32 {
-    let f = factor.clamp(0.0, 1.0);
-    Color32::from_rgb(
-        (color.r() as f32 * f) as u8,
-        (color.g() as f32 * f) as u8,
-        (color.b() as f32 * f) as u8,
-    )
-}
-
-fn mix(seed: &str, min: u8, max: u8) -> Color32 {
-    let mut h = 0xcbf2_9ce4_8422_2325u64;
-    for b in seed.bytes() {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x100_0000_01b3);
-    }
-    let t = (h % 3) as f32 / 2.0;
-    let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t) as u8;
-    Color32::from_rgb(lerp(min, max), lerp(0x60, 0x9a), lerp(0x50, 0x7e))
-}
-
-/// Mock waveform: vertical bars whose heights are a deterministic function of the name.
-pub fn draw_waveform(painter: &Painter, rect: Rect, seed: &str, strength: f32) {
-    if rect.width() < 2.0 || rect.height() < 4.0 {
+/// Dense min/max waveform for the visible part of an audio clip. `clip_left` is the clip's content
+/// x and `zoom` the timeline scale, so every painted column maps to its real source time.
+pub fn draw_waveform(
+    painter: &Painter,
+    rect: Rect,
+    clip_left: f32,
+    zoom: f32,
+    wave: &super::media::Waveform,
+) {
+    if rect.width() < 2.0 || rect.height() < 6.0 || zoom <= 0.0 {
         return;
-    }
-    let mut h = 0u64;
-    for b in seed.bytes() {
-        h = h.wrapping_mul(31).wrapping_add(b as u64);
     }
     let mid = rect.center().y;
+    let amplitude = rect.height() * 0.5 - 2.0;
     let color = Color32::from_rgba_unmultiplied(0xcf, 0xe6, 0xff, 190);
-    let mut x = rect.left() + 1.0;
-    let mut i = 0u32;
+    let mut x = rect.left();
     while x < rect.right() {
-        let phase = (i as f32 * 0.55) + (h % 97) as f32 * 0.13;
-        let noise = ((h.wrapping_add(i as u64).wrapping_mul(2654435761) >> 8) as f32 % 100.0) / 100.0;
-        let amp = ((phase.sin() * 0.5 + 0.5) * 0.65 + noise * 0.35) * strength;
-        let half = (rect.height() * 0.5 - 1.0) * amp;
-        painter.line_segment(
-            [egui::pos2(x, mid - half), egui::pos2(x, mid + half)],
-            Stroke::new(1.0, color),
-        );
-        x += 2.0;
-        i += 1;
+        let t0 = ((x - clip_left) / zoom) as f64;
+        let t1 = t0 + 1.0 / zoom as f64;
+        if let Some(peak) = wave.envelope(t0, t1) {
+            let a = mid - peak.max.clamp(-1.0, 1.0) * amplitude;
+            let b = mid - peak.min.clamp(-1.0, 1.0) * amplitude;
+            let (top, bottom) = (a.min(b), a.max(b));
+            painter.line_segment(
+                [egui::pos2(x, top), egui::pos2(x, bottom.max(top + 0.5))],
+                Stroke::new(1.0, color),
+            );
+        }
+        x += 1.0;
     }
+    painter.line_segment(
+        [
+            egui::pos2(rect.left(), mid),
+            egui::pos2(rect.right(), mid),
+        ],
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(0xcf, 0xe6, 0xff, 40)),
+    );
+}
+
+/// UV rectangle that centre-crops an image of `aspect` (width / height) into `rect` without
+/// distorting it.
+pub fn uv_fill(aspect: f32, rect: Rect) -> Rect {
+    let src = aspect.max(0.01);
+    let dst = (rect.width() / rect.height().max(0.01)).max(0.01);
+    if dst > src {
+        let keep = (src / dst).clamp(0.0, 1.0);
+        let top = (1.0 - keep) * 0.5;
+        Rect::from_min_max(egui::pos2(0.0, top), egui::pos2(1.0, 1.0 - top))
+    } else {
+        let keep = (dst / src).clamp(0.0, 1.0);
+        let left = (1.0 - keep) * 0.5;
+        Rect::from_min_max(egui::pos2(left, 0.0), egui::pos2(1.0 - left, 1.0))
+    }
+}
+
+/// Truncate `text` to `max_width`, appending an ellipsis. Pure, so it can be unit tested.
+pub fn elide_text(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> String {
+    if text.is_empty() || measure(text) <= max_width {
+        return text.to_string();
+    }
+    let mut chars: Vec<char> = text.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let mut candidate: String = chars.iter().collect();
+        candidate.push('…');
+        if measure(&candidate) <= max_width {
+            return candidate;
+        }
+    }
+    "…".to_string()
+}
+
+fn elide(painter: &Painter, text: &str, font: &FontId, max_width: f32) -> String {
+    elide_text(text, max_width, |candidate| {
+        painter
+            .layout_no_wrap(
+                candidate.to_string(),
+                font.clone(),
+                Color32::WHITE,
+            )
+            .size()
+            .x
+    })
 }
 
 /// Ruler: adaptive major/minor ticks and timecodes, top-aligned to the canvas.
@@ -718,6 +738,42 @@ pub fn draw_scrollbar(painter: &Painter, rect: Rect, content: f32, scroll: f32, 
         thumb
     }
     .intersect(rect)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn measure(text: &str) -> f32 {
+        text.chars().count() as f32 * 6.0
+    }
+
+    #[test]
+    fn elide_keeps_short_text_and_truncates_long_text() {
+        assert_eq!(elide_text("Blur", 100.0, measure), "Blur");
+        let long = elide_text("Color correct  4.0s", 60.0, measure);
+        assert!(long.ends_with('…'), "{long}");
+        assert!(measure(&long) <= 60.0, "{long}");
+        assert!(long.chars().count() < "Color correct  4.0s".chars().count());
+        // A width below even the ellipsis still returns a single truncation marker.
+        assert_eq!(elide_text("Sharpen", 2.0, measure), "…");
+    }
+
+    #[test]
+    fn uv_fill_crops_without_distortion() {
+        // A square source in a wide tile keeps the full width and crops the top and bottom.
+        let wide = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(160.0, 72.0));
+        let uv = uv_fill(1.0, wide);
+        assert!((uv.width() - 1.0).abs() < 1e-6 && uv.height() < 0.999);
+        // A 16:9 source in a square tile keeps the full height and crops the sides.
+        let square = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(72.0, 72.0));
+        let uv = uv_fill(16.0 / 9.0, square);
+        assert!((uv.height() - 1.0).abs() < 1e-6 && uv.width() < 0.999);
+        // Matching aspects use the whole texture.
+        let wide_tile = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(160.0, 90.0));
+        let uv = uv_fill(16.0 / 9.0, wide_tile);
+        assert!((uv.width() - 1.0).abs() < 1e-6 && (uv.height() - 1.0).abs() < 1e-6);
+    }
 }
 
 

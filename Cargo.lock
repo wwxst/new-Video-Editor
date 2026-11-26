@@ -147,6 +147,7 @@ version = "0.1.0"
 dependencies = [
  "arc-cli",
  "arc-core",
+ "arc-media",
  "arc-render",
  "egui",
  "egui-wgpu",

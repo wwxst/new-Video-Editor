@@ -79,13 +79,15 @@ impl TrackKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Clip {
     pub kind: TrackKind,
+    /// The clip's actual content: the text body of a title, the effect name, the sticker name, or
+    /// the media file name for video/image/audio clips.
     pub name: String,
     /// Start on the timeline, in seconds.
     pub start: f64,
     /// Duration, in seconds.
     pub duration: f64,
-    /// Mock media file name for video/image/audio clips.
-    pub file: Option<String>,
+    /// Real source file for video, image and audio clips (the mock project uses `assets/demo`).
+    pub source: Option<std::path::PathBuf>,
 }
 
 impl Clip {
@@ -95,19 +97,36 @@ impl Clip {
             name: name.to_string(),
             start,
             duration,
-            file: None,
+            source: None,
         }
     }
 
-    pub fn with_file(mut self, file: &str) -> Clip {
-        self.file = Some(file.to_string());
+    /// Attach the real media file this clip visualises.
+    pub fn with_source(mut self, path: impl Into<std::path::PathBuf>) -> Clip {
+        self.source = Some(path.into());
         self
+    }
+
+    /// File name of the source, for clip labels.
+    pub fn source_name(&self) -> Option<String> {
+        self.source
+            .as_deref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn end(&self) -> f64 {
         self.start + self.duration
     }
+}
+
+/// Directory of the demo media checked into the repository, used by the mock timeline. This is
+/// presentation data for the Phase 1 visualisation; imported projects will resolve real asset paths.
+pub fn demo_media(name: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/demo")
+        .join(name)
 }
 
 /// Lane height, in points, of a track that holds no clips yet. The first clip gives the track its
@@ -198,6 +217,8 @@ impl TimelineModel {
 
         let mut effect = Track::new("Effect");
         effect.add_clip(Clip::new(TrackKind::Effect, "Color correct", 1.0, 4.0));
+        effect.add_clip(Clip::new(TrackKind::Effect, "Blur", 6.0, 2.0));
+        effect.add_clip(Clip::new(TrackKind::Effect, "Sharpen", 9.0, 1.5));
         tracks.push(effect);
 
         let mut sticker = Track::new("Sticker");
@@ -205,27 +226,38 @@ impl TimelineModel {
         tracks.push(sticker);
 
         let mut image = Track::new("Image");
-        image.add_clip(Clip::new(TrackKind::Image, "logo.png", 6.0, 3.0).with_file("logo.png"));
+        image.add_clip(
+            Clip::new(TrackKind::Image, "poster.png", 6.0, 3.0)
+                .with_source(demo_media("poster.png")),
+        );
         tracks.push(image);
 
         let mut supporting = Track::new("Video (b-roll)");
         supporting.add_clip(
-            Clip::new(TrackKind::Video, "b-roll.mp4", 0.5, 5.5).with_file("b-roll.mp4"),
+            Clip::new(TrackKind::Video, "broll.mp4", 0.5, 5.5)
+                .with_source(demo_media("broll.mp4")),
         );
         tracks.push(supporting);
 
         let mut main = Track::new("Main video");
         main.add_clip(
-            Clip::new(TrackKind::Video, "interview.mp4", 0.0, 9.5).with_file("interview.mp4"),
+            Clip::new(TrackKind::Video, "main.mp4", 0.0, 9.5)
+                .with_source(demo_media("main.mp4")),
         );
         tracks.push(main);
 
         let mut music = Track::new("Music");
-        music.add_clip(Clip::new(TrackKind::Audio, "music.wav", 0.0, 12.0).with_file("music.wav"));
+        music.add_clip(
+            Clip::new(TrackKind::Audio, "voice.wav", 0.0, 6.0)
+                .with_source(demo_media("voice.wav")),
+        );
         tracks.push(music);
 
         let mut voice = Track::new("Voice");
-        voice.add_clip(Clip::new(TrackKind::Audio, "voice.wav", 3.0, 6.0).with_file("voice.wav"));
+        voice.add_clip(
+            Clip::new(TrackKind::Audio, "narration.wav", 3.0, 8.0)
+                .with_source(demo_media("narration.wav")),
+        );
         tracks.push(voice);
 
         TimelineModel {
@@ -328,6 +360,48 @@ mod tests {
         track.remove_clip(0);
         assert_eq!(track.kind(), None, "removing every clip makes it untyped");
         assert!(track.can_accept(TrackKind::Audio));
+    }
+
+    #[test]
+    fn mock_clips_carry_real_content_and_sources() {
+        let model = TimelineModel::mock();
+        let clips: Vec<&Clip> = model.tracks.iter().flat_map(|t| t.clips.iter()).collect();
+
+        let text: Vec<&str> = clips
+            .iter()
+            .filter(|c| c.kind == TrackKind::Text)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(text, ["Opening title", "Lower third"]);
+
+        let effects: Vec<&str> = clips
+            .iter()
+            .filter(|c| c.kind == TrackKind::Effect)
+            .map(|c| c.name.as_str())
+            .collect();
+        assert_eq!(effects, ["Color correct", "Blur", "Sharpen"]);
+
+        let demo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/demo");
+        for clip in &clips {
+            match clip.kind {
+                TrackKind::Video | TrackKind::Image | TrackKind::Audio => {
+                    let source = clip.source.as_ref().expect("media clips have a real source");
+                    assert!(
+                        source.starts_with(&demo),
+                        "{} is not demo media",
+                        source.display()
+                    );
+                    assert_eq!(
+                        clip.source_name().as_deref(),
+                        source.file_name().and_then(|n| n.to_str())
+                    );
+                }
+                _ => assert!(
+                    clip.source.is_none(),
+                    "text, effect and sticker clips carry no media source"
+                ),
+            }
+        }
     }
 
     #[test]

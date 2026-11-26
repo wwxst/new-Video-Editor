@@ -5,11 +5,14 @@
 //! Lane heights are fixed by content type and are not editable state.
 
 pub mod draw;
+pub mod media;
 pub mod model;
 
 use draw::{CANVAS_BG, CONTROLS_BG, DIM, TOOLBAR_BG, ToolbarIcon};
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, Ui, Vec2};
+use media::MediaHub;
 use model::TimelineModel;
+use std::path::Path;
 
 /// Width of the left track-control column, in points.
 pub const CONTROL_W: f32 = 112.0;
@@ -96,7 +99,6 @@ fn x_to_time(origin: f32, view_start: f64, zoom: f32, x: f32) -> f64 {
 }
 
 /// Timeline UI state. All values are in points, so DPI scaling is automatic.
-#[derive(Debug, Clone)]
 pub struct Timeline {
     pub model: TimelineModel,
     /// Horizontal scale: points per second.
@@ -107,6 +109,37 @@ pub struct Timeline {
     pub select_mode: bool,
     pub snap: bool,
     pub link: bool,
+    /// Decoder workers and texture caches; created on the first painted frame so an unpainted
+    /// timeline (tests, headless use) never starts threads.
+    media: Option<MediaHub>,
+}
+
+impl std::fmt::Debug for Timeline {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Timeline")
+            .field("model", &self.model)
+            .field("zoom", &self.zoom)
+            .field("scroll", &self.scroll)
+            .field("selected", &self.selected)
+            .field("media", &self.media)
+            .finish()
+    }
+}
+
+impl Clone for Timeline {
+    fn clone(&self) -> Timeline {
+        Timeline {
+            model: self.model.clone(),
+            zoom: self.zoom,
+            scroll: self.scroll,
+            selected: self.selected,
+            select_mode: self.select_mode,
+            snap: self.snap,
+            link: self.link,
+            // The clone starts its own decode workers on its first painted frame.
+            media: None,
+        }
+    }
 }
 
 impl Default for Timeline {
@@ -119,6 +152,7 @@ impl Default for Timeline {
             select_mode: true,
             snap: true,
             link: false,
+            media: None,
         }
     }
 }
@@ -157,6 +191,14 @@ impl Timeline {
         let l = layout(rect);
         if l.toolbar.width() < 40.0 || l.canvas.height() < 20.0 {
             return;
+        }
+        // Media workers are created on the first painted frame, so a timeline that is never drawn
+        // (tests, headless tools) does not start decode threads.
+        if self.media.is_none() {
+            self.media = Some(MediaHub::new());
+        }
+        if let Some(media) = self.media.as_mut() {
+            media.poll(ui.ctx());
         }
         ui.painter()
             .rect_filled(l.toolbar, CornerRadius::ZERO, TOOLBAR_BG);
@@ -425,20 +467,29 @@ impl Timeline {
         view_start: f64,
     ) {
         let painter = ui.painter().with_clip_rect(body);
-        let track = &self.model.tracks[index];
+        let Timeline {
+            model,
+            media,
+            selected,
+            zoom,
+            ..
+        } = self;
+        let track = &model.tracks[index];
         let kind = track.kind();
         let clip_h = kind.map(|k| k.clip_height()).unwrap_or(track.height() - 4.0);
         let clip_y = lane.top() + (lane.height() - clip_h) * 0.5;
         for (clip_index, clip) in track.clips.iter().enumerate() {
-            let x = origin + ((clip.start - view_start) as f32 * self.zoom);
-            let w = (clip.duration as f32 * self.zoom).max(3.0);
+            let x = origin + ((clip.start - view_start) as f32 * *zoom);
+            let w = (clip.duration as f32 * *zoom).max(3.0);
             let rect = Rect::from_min_size(egui::pos2(x, clip_y), Vec2::new(w, clip_h));
             let visible = rect.intersect(body);
             if visible.width() < 2.0 || visible.height() < 2.0 {
                 continue;
             }
-            let selected = self.selected == Some((index, clip_index));
-            draw::draw_clip(&painter, visible, clip, selected);
+            let is_selected = *selected == Some((index, clip_index));
+            draw::draw_clip_body(&painter, visible, clip.kind, is_selected);
+            paint_clip_content(media.as_mut(), &painter, body, rect, clip, *zoom);
+            draw::draw_clip_label(&painter, visible, &clip_label(clip));
 
             let hit = visible.intersect(content);
             if hit.width() < 2.0 || hit.height() < 2.0 {
@@ -447,7 +498,7 @@ impl Timeline {
             let id = ui.make_persistent_id(("tl-clip", index, clip_index));
             let response = ui.interact(hit, id, Sense::click());
             if response.clicked() {
-                self.selected = Some((index, clip_index));
+                *selected = Some((index, clip_index));
             }
         }
     }
@@ -534,6 +585,148 @@ impl Timeline {
     }
 }
 
+
+/// Paint the label text of one clip: the actual text/effect/sticker name, or file name and duration
+/// for media clips.
+fn clip_label(clip: &model::Clip) -> String {
+    match clip.kind {
+        model::TrackKind::Text | model::TrackKind::Sticker => clip.name.clone(),
+        model::TrackKind::Effect => format!("{}  {:.1}s", clip.name, clip.duration),
+        _ => {
+            let name = clip.source_name().unwrap_or_else(|| clip.name.clone());
+            format!("{name}  {:.1}s", clip.duration)
+        }
+    }
+}
+
+/// Paint the decoded media of one clip into `clip_rect` (the clip's full rectangle, unclipped; the
+/// painter is already clipped to the canvas body). Missing or undecodable sources get the explicit
+/// fallback, never a fake thumbnail or waveform.
+fn paint_clip_content(
+    media: Option<&mut MediaHub>,
+    painter: &egui::Painter,
+    body: Rect,
+    clip_rect: Rect,
+    clip: &model::Clip,
+    zoom: f32,
+) {
+    if !matches!(
+        clip.kind,
+        model::TrackKind::Video | model::TrackKind::Image | model::TrackKind::Audio
+    ) {
+        return;
+    }
+    let visible = clip_rect.intersect(body);
+    if visible.width() < 2.0 || visible.height() < 4.0 {
+        return;
+    }
+    let Some(media) = media else {
+        draw::draw_missing(painter, visible, "media unavailable");
+        return;
+    };
+    let Some(source) = clip.source.as_deref() else {
+        draw::draw_missing(painter, visible, "media unavailable");
+        return;
+    };
+    if media.failure(source).is_some() {
+        draw::draw_missing(painter, visible, "media unavailable");
+        return;
+    }
+    match clip.kind {
+        model::TrackKind::Video => paint_video(media, painter, body, clip_rect, source, zoom),
+        model::TrackKind::Image => paint_image(media, painter, clip_rect, source),
+        model::TrackKind::Audio => paint_audio(media, painter, body, clip_rect, source, zoom),
+        _ => {}
+    }
+}
+
+/// Real decoded frames, tiled across the clip. Each tile is one source timestamp; the tile width is
+/// a ladder-quantised source-time step, so thumbnails stay cached while the timeline scrolls.
+fn paint_video(
+    media: &mut MediaHub,
+    painter: &egui::Painter,
+    body: Rect,
+    clip_rect: Rect,
+    source: &Path,
+    zoom: f32,
+) {
+    let zoom = zoom.max(1.0);
+    let inner = clip_rect.shrink2(Vec2::new(1.0, 1.0));
+    let tile_w = (inner.height() * 16.0 / 9.0).max(24.0);
+    let step = media::thumb_step(zoom, tile_w);
+    let view_start = ((body.left() - clip_rect.left()) / zoom) as f64;
+    let view_end = ((body.right() - clip_rect.left()) / zoom) as f64;
+    let clip_dur = (clip_rect.width() / zoom) as f64;
+    let tiles = media::visible_tiles(0.0, clip_dur, step, view_start, view_end);
+    let tile_px = (step as f32 * zoom).max(1.0);
+    for index in tiles {
+        let rect = Rect::from_min_size(
+            egui::pos2(
+                clip_rect.left() + 1.0 + index as f32 * tile_px,
+                inner.top(),
+            ),
+            Vec2::new(tile_px, inner.height()),
+        );
+        if !rect.intersects(body) {
+            continue;
+        }
+        let time = index as f64 * step + step * 0.5;
+        if let Some(visual) = media.video_frame(source, time) {
+            let uv = draw::uv_fill(visual.aspect, rect);
+            painter.image(visual.texture.id(), rect, uv, Color32::WHITE);
+        }
+    }
+}
+
+/// The decoded still image, fitted into the clip by aspect ratio and centred.
+fn paint_image(media: &mut MediaHub, painter: &egui::Painter, clip_rect: Rect, source: &Path) {
+    let Some(still) = media.still(source) else {
+        return;
+    };
+    let inner = clip_rect.shrink2(Vec2::new(2.0, 2.0));
+    if inner.width() < 2.0 || inner.height() < 2.0 {
+        return;
+    }
+    let mut height = inner.height();
+    let mut width = height * still.aspect.max(0.05);
+    if width > inner.width() {
+        width = inner.width();
+        height = width / still.aspect.max(0.05);
+    }
+    let rect = Rect::from_center_size(inner.center(), Vec2::new(width, height));
+    painter.image(
+        still.texture.id(),
+        rect,
+        Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+        Color32::WHITE,
+    );
+}
+
+/// The decoded waveform envelope, one min/max bar per painted column.
+fn paint_audio(
+    media: &mut MediaHub,
+    painter: &egui::Painter,
+    body: Rect,
+    clip_rect: Rect,
+    source: &Path,
+    zoom: f32,
+) {
+    let Some(wave) = media.waveform(source) else {
+        return;
+    };
+    let visible = clip_rect.intersect(body);
+    if visible.width() < 3.0 || visible.height() < 8.0 {
+        return;
+    }
+    let rect = Rect::from_min_max(
+        egui::pos2(visible.left() + 2.0, visible.top() + 3.0),
+        egui::pos2(
+            (visible.right() - 2.0).max(visible.left() + 3.0),
+            (visible.bottom() - 3.0).max(visible.top() + 4.0),
+        ),
+    );
+    draw::draw_waveform(painter, rect, clip_rect.left(), zoom.max(1.0), &wave);
+}
 
 #[cfg(test)]
 mod tests {

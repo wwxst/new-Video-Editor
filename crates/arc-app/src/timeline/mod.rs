@@ -884,10 +884,13 @@ fn paint_video(
     }
     let painter = painter.with_clip_rect(visible);
     let tile_w = (thumb_rect.height() * 16.0 / 9.0).max(24.0);
-    let source_rate = media.video_rate(source, frame_rate);
-    let source_fps = source_rate.rate().to_f64_lossy();
-    let step_frames = media::thumb_step_frames(zoom, tile_w, source_fps);
-    let step = media::thumb_step_seconds(step_frames, source_fps);
+    let (source_rate, vfr) = media.video_sampling(source, frame_rate);
+    // Tiles step by PROJECT frames, not source frames. A 24 fps source in a 30 fps project shows
+    // the same source frame on the project frames where no new source frame exists; the media cache
+    // keys CFR frames by source index, so repeats share one texture and no fake frame is decoded.
+    let project_fps = frame_rate.rate().to_f64_lossy();
+    let step_frames = media::thumbnail_step_frames(zoom, tile_w, project_fps);
+    let step = media::thumbnail_step_seconds(step_frames, project_fps);
     let view_start = ((body.left() - clip_rect.left()) / zoom) as f64;
     let view_end = ((body.right() - clip_rect.left()) / zoom) as f64;
     let clip_dur = (clip_rect.width() / zoom) as f64;
@@ -904,14 +907,10 @@ fn paint_video(
         if !rect.intersects(visible) {
             continue;
         }
-        // Aim at the centre of the source frame range using a frame index, never by accumulating
-        // floating-point seconds; `frame_at` resolves the actual PTS.
-        let frame_index = index as u64 * step_frames;
-        let time = source_rate
-            .time_of_frame(frame_index as i64)
-            .to_f64_lossy()
-            + (step_frames as f64 / 2.0) / source_fps;
-        if let Some(visual) = media.video_frame(source, time) {
+        // Centre of the project-frame span represented by this tile.
+        let project_frame = index as u64 * step_frames;
+        let time = (project_frame as f64 + step_frames as f64 / 2.0) / project_fps;
+        if let Some(visual) = media.video_frame(source, time, source_rate, vfr) {
             let uv = draw::uv_fill(visual.aspect, rect);
             painter.image(visual.texture.id(), rect, uv, Color32::WHITE);
         }

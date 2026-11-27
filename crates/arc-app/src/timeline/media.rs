@@ -222,11 +222,23 @@ pub struct MediaStats {
     pub pending: usize,
 }
 
+/// Cache identity of one source frame.
+///
+/// CFR streams use the source frame index, so several project frames that map to the same source
+/// frame share one texture (a 24 fps source in a 30 fps project legitimately repeats frames). VFR
+/// streams fall back to the requested source time in microseconds; the decoder still returns the
+/// actual PTS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum FrameKey {
+    Index(u64),
+    TimeUs(u64),
+}
+
 /// Cache key of a decoded asset.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Key {
-    /// One video frame, at a microsecond-quantized source time.
-    Frame { path: PathBuf, us: u64 },
+    /// One video frame, at a source frame index (CFR) or microsecond time (VFR).
+    Frame { path: PathBuf, frame: FrameKey },
     /// One still image.
     Still { path: PathBuf },
     /// The waveform envelope of one audio file.
@@ -399,11 +411,31 @@ impl MediaHub {
         }
     }
 
-    /// Decoded frame for `path` at `time` (seconds, source time), or `None` while it is decoded.
-    pub fn video_frame(&mut self, path: &Path, time: f64) -> Option<ThumbVisual> {
+    /// Decoded frame for `path` at project time `time`, or `None` while it is decoded.
+    ///
+    /// CFR sources are keyed by the source frame displayed at `time`; repeated project frames in a
+    /// faster sequence therefore share one texture instead of being decoded as fake new frames.
+    /// VFR sources use the requested time and the decoder's actual PTS.
+    pub fn video_frame(
+        &mut self,
+        path: &Path,
+        time: f64,
+        source_rate: FrameRate,
+        vfr: bool,
+    ) -> Option<ThumbVisual> {
+        let (key, request_time) = if vfr {
+            (
+                FrameKey::TimeUs((time.max(0.0) * 1_000_000.0).round() as u64),
+                time,
+            )
+        } else {
+            let fps = source_rate.rate().to_f64_lossy().max(1.0);
+            let index = (time.max(0.0) * fps).floor() as u64;
+            (FrameKey::Index(index), index as f64 / fps)
+        };
         let key = Key::Frame {
             path: path.to_path_buf(),
-            us: (time.max(0.0) * 1_000_000.0).round() as u64,
+            frame: key,
         };
         if let Some(visual) = self.thumbs.get(&key) {
             self.stats.cache_hits += 1;
@@ -413,7 +445,7 @@ impl MediaHub {
             let request = Request::Frame {
                 key: key.clone(),
                 path: path.to_path_buf(),
-                time,
+                time: request_time,
             };
             if self.video_tx.send(request).is_ok() {
                 self.commit(key);
@@ -446,11 +478,13 @@ impl MediaHub {
         meta
     }
 
-    /// Sampling rate for one video: the source stream rate when known, otherwise the project rate.
-    pub fn video_rate(&mut self, path: &Path, project_rate: FrameRate) -> FrameRate {
-        self.video_meta(path)
-            .and_then(|meta| meta.rate)
-            .unwrap_or(project_rate)
+    /// Source rate plus VFR flag, read from the cached header.
+    pub fn video_sampling(&mut self, path: &Path, project_rate: FrameRate) -> (FrameRate, bool) {
+        let meta = self.video_meta(path);
+        (
+            meta.and_then(|meta| meta.rate).unwrap_or(project_rate),
+            meta.is_some_and(|meta| meta.vfr),
+        )
     }
 
     /// Bounded cache usage for the performance report.
@@ -607,19 +641,19 @@ impl MediaHub {
     }
 }
 
-/// Source-frame step between thumbnails.
+/// Project-frame step between thumbnails.
 ///
-/// The step is always a whole number of source frames: at normal zoom one tile spans many frames
-/// (cheap, recognisable overview), while at extreme zoom the step reaches 1 and every tile is a
-/// distinct decoded source frame. `tile_px` is the desired thumbnail tile width.
-pub fn thumb_step_frames(zoom: f32, tile_px: f32, source_fps: f64) -> u64 {
-    let frame_px = zoom.max(1.0) as f64 / source_fps.max(1.0);
+/// The step is always a whole number of project frames. At extreme zoom it reaches 1, so a tile is
+/// one project frame; a lower-rate source repeats the previous source frame where no new frame
+/// exists (the cache keys CFR frames by source index, so repeats reuse one texture).
+pub fn thumbnail_step_frames(zoom: f32, tile_px: f32, project_fps: f64) -> u64 {
+    let frame_px = zoom.max(1.0) as f64 / project_fps.max(1.0);
     (tile_px as f64 / frame_px).ceil().max(1.0) as u64
 }
 
-/// Seconds covered by `step_frames` source frames.
-pub fn thumb_step_seconds(step_frames: u64, source_fps: f64) -> f64 {
-    step_frames.max(1) as f64 / source_fps.max(1.0)
+/// Seconds covered by `step_frames` project frames.
+pub fn thumbnail_step_seconds(step_frames: u64, project_fps: f64) -> f64 {
+    step_frames.max(1) as f64 / project_fps.max(1.0)
 }
 
 /// Tile indices of a clip `[clip_start, clip_start + clip_dur)` visible in `[view_start, view_end)`.
@@ -759,7 +793,9 @@ fn decode_frame(
     let t = time.clamp(0.0, (duration - 0.001).max(0.0));
     let micros = (t * 1_000_000.0).round() as i64;
     let time = Time::new(micros, 1_000_000).map_err(|error| error.to_string())?;
-    let frame = decoder.frame_at(time).map_err(|error| error.to_string())?;
+    let frame = decoder
+        .frame_displayed_at(time)
+        .map_err(|error| error.to_string())?;
     let pts_us = (frame.time.to_f64_lossy() * 1_000_000.0).round().max(0.0) as u64;
     let (w, h, rgba) = downscale(frame.rgba, frame.width, frame.height, THUMB_W, THUMB_H);
     Ok((w, h, rgba, pts_us))
@@ -884,24 +920,23 @@ mod tests {
     }
 
     #[test]
-    fn thumbnail_tiles_step_by_whole_source_frames() {
-        // 24 fps: 1 tile at 4800 px/s is exactly one source frame (200 px). At normal zoom a tile
-        // spans many frames; at low zoom it spans more still.
-        assert_eq!(thumb_step_frames(4_800.0, 128.0, 24.0), 1);
-        let normal = thumb_step_frames(58.0, 128.0, 24.0);
-        let wide = thumb_step_frames(12.0, 128.0, 24.0);
+    fn thumbnail_tiles_step_by_whole_project_frames() {
+        // 24 fps project: at 4800 px/s the step reaches 1 (200 px), regardless of source rate.
+        assert_eq!(thumbnail_step_frames(4_800.0, 128.0, 24.0), 1);
+        let normal = thumbnail_step_frames(58.0, 128.0, 24.0);
+        let wide = thumbnail_step_frames(12.0, 128.0, 24.0);
         assert!(normal > 1 && wide > normal);
         for zoom in [12.0f32, 58.0, 480.0, 4_800.0] {
-            let step = thumb_step_frames(zoom, 128.0, 24.0);
+            let step = thumbnail_step_frames(zoom, 128.0, 24.0);
             let tile = step as f64 / 24.0 * zoom as f64;
             assert!(tile >= 128.0 - 0.01, "zoom {zoom}: tile {tile}");
             if zoom < 4_800.0 {
                 assert!(tile <= 128.0 + zoom as f64 / 24.0, "zoom {zoom}: tile {tile}");
             }
         }
-        // A 30 fps source reaches per-frame tiles at 6000 px/s.
-        assert_eq!(thumb_step_frames(6_000.0, 128.0, 30.0), 1);
-        assert!(thumb_step_frames(600.0, 128.0, 30.0) > 1);
+        // A 30 fps project reaches per-frame tiles at 6000 px/s.
+        assert_eq!(thumbnail_step_frames(6_000.0, 128.0, 30.0), 1);
+        assert!(thumbnail_step_frames(600.0, 128.0, 30.0) > 1);
     }
 
     #[test]
@@ -947,7 +982,7 @@ mod tests {
     fn waveform_envelope_separates_quiet_and_loud_sections() {
         let mut peaks = Vec::new();
         for i in 0..200 {
-            // 0–0.5 s quiet, 0.5–1 s loud.
+            // 0-.5 s quiet, 0.5- s loud.
             let amp = if i < 100 { 0.05 } else { 0.9 };
             peaks.push(Peak { min: -amp, max: amp });
         }
@@ -965,7 +1000,9 @@ mod tests {
         let ctx = egui::Context::default();
         let mut hub = MediaHub::new();
         let path = std::path::Path::new("assets/demo/definitely-missing.mp4");
-        assert!(hub.video_frame(path, 1.0).is_none(), "nothing to paint yet");
+        assert!(hub
+            .video_frame(path, 1.0, FrameRate::Fps24, false)
+            .is_none(), "nothing to paint yet");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while hub.failure(path).is_none() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -976,7 +1013,9 @@ mod tests {
         // A failed path is not requested again, however often the frame is repainted.
         let requests = hub.stats().requested;
         for time in [2.0, 3.0, 4.0] {
-            assert!(hub.video_frame(path, time).is_none());
+            assert!(hub
+                .video_frame(path, time, FrameRate::Fps24, false)
+                .is_none());
         }
         assert_eq!(hub.stats().requested, requests);
     }
@@ -985,8 +1024,12 @@ mod tests {
     fn pending_requests_are_deduplicated() {
         let mut hub = MediaHub::new();
         let path = std::path::Path::new("assets/demo/city_street.mp4");
-        assert!(hub.video_frame(path, 1.0).is_none());
-        assert!(hub.video_frame(path, 1.0).is_none());
+        assert!(hub
+            .video_frame(path, 1.0, FrameRate::Fps24, false)
+            .is_none());
+        assert!(hub
+            .video_frame(path, 1.0, FrameRate::Fps24, false)
+            .is_none());
         // One request for the same quantised timestamp, even when painted twice in one frame.
         assert_eq!(hub.stats().requested, 1);
     }
@@ -1025,17 +1068,17 @@ mod tests {
     fn frame_keys_quantize_the_source_time() {
         let a = Key::Frame {
             path: PathBuf::from("a.mp4"),
-            us: 1_000_000,
+            frame: FrameKey::Index(24),
         };
         let b = Key::Frame {
             path: PathBuf::from("a.mp4"),
-            us: 1_000_000,
+            frame: FrameKey::Index(24),
         };
         let c = Key::Frame {
             path: PathBuf::from("a.mp4"),
-            us: 1_000_042,
+            frame: FrameKey::Index(25),
         };
-        assert_eq!(a, b, "the same microsecond reuses one cache entry");
+        assert_eq!(a, b, "the same source frame reuses one cache entry");
         assert_ne!(a, c, "adjacent source frames have distinct keys");
     }
 
@@ -1054,7 +1097,10 @@ mod tests {
         loop {
             let mut missing = 0;
             for &time in &times {
-                if hub.video_frame(&path, time).is_none() {
+                if hub
+                    .video_frame(&path, time, FrameRate::Fps24, false)
+                    .is_none()
+                {
                     missing += 1;
                 }
             }
@@ -1071,7 +1117,9 @@ mod tests {
         let requested = hub.stats().requested;
         assert_eq!(requested, times.len() as u64, "one request per source frame");
         for &time in &times {
-            assert!(hub.video_frame(&path, time).is_some());
+            assert!(hub
+                .video_frame(&path, time, FrameRate::Fps24, false)
+                .is_some());
         }
         assert_eq!(
             hub.stats().requested,
@@ -1081,6 +1129,131 @@ mod tests {
         let usage = hub.cache_usage();
         assert!(usage.thumb_textures >= times.len());
         assert!(usage.thumb_bytes <= THUMB_CAPACITY * (THUMB_W * THUMB_H * 4) as usize);
+    }
+
+    #[test]
+    #[ignore = "needs the pinned FFmpeg DLLs and assets/demo (run with --ignored)"]
+    fn project_frame_sampling_maps_repeats_to_source_pts() {
+        use arc_core::time::Ratio;
+        use arc_media::fixtures::{read_counter, write_counter_video};
+
+        let make = |frames: u32, fps: i64, tag: &str| {
+            let path = std::env::temp_dir().join(format!(
+                "arcline-counter-{tag}-{}-{fps}.mkv",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            write_counter_video(&path, frames, Ratio::new(fps, 1).unwrap(), 320, 180, false)
+                .expect("counter video");
+            path
+        };
+
+        // A true 30 fps source: every project frame maps to its own source frame.
+        let path_30 = make(30, 30, "30fps");
+        let mut decoder = VideoDecoder::open(&path_30).expect("open 30");
+        for project_frame in 0..30 {
+            let t = (project_frame as f64 + 0.5) / 30.0;
+            let time = Time::new((t * 1e6).round() as i64, 1_000_000).unwrap();
+            let frame = decoder.frame_displayed_at(time).expect("frame");
+            let counter = read_counter(frame.rgba, frame.width, frame.height).expect("counter");
+            assert_eq!(counter, project_frame, "30 fps source frame index");
+            assert!(
+                (frame.time.to_f64_lossy() - project_frame as f64 / 30.0).abs() < 0.0011,
+                "30 fps PTS {} for project frame {project_frame}",
+                frame.time.to_f64_lossy()
+            );
+        }
+        drop(decoder);
+        let _ = std::fs::remove_file(&path_30);
+
+        // A 24 fps source inside a 30 fps project: six project frames per second must repeat the
+        // previous source frame; they must not be decoded as fabricated new frames.
+        let path_24 = make(24, 24, "24fps");
+        let mut decoder = VideoDecoder::open(&path_24).expect("open 24");
+        let mut counters = Vec::new();
+        for project_frame in 0..30 {
+            let t = (project_frame as f64 + 0.5) / 30.0;
+            let time = Time::new((t * 1e6).round() as i64, 1_000_000).unwrap();
+            let frame = decoder.frame_displayed_at(time).expect("frame");
+            let counter = read_counter(frame.rgba, frame.width, frame.height).expect("counter");
+            counters.push(counter);
+            let expected = ((t * 24.0).floor() as u32).min(23);
+            assert_eq!(
+                counter, expected,
+                "24 fps source in 30 fps project at project frame {project_frame}"
+            );
+        }
+        assert_eq!(
+            counters.iter().copied().collect::<std::collections::HashSet<_>>().len(),
+            24,
+            "a 24 fps source contributes exactly 24 distinct source frames per second"
+        );
+        assert!(
+            counters.windows(2).any(|pair| pair[0] == pair[1]),
+            "a 24 fps source in a 30 fps project must repeat at least one source frame"
+        );
+        drop(decoder);
+        let _ = std::fs::remove_file(&path_24);
+    }
+
+    #[test]
+    #[ignore = "needs the pinned FFmpeg DLLs and assets/demo (run with --ignored)"]
+    fn lower_rate_source_repeats_without_extra_decode() {
+        use arc_core::time::Ratio;
+        use arc_media::fixtures::write_counter_video;
+
+        let path = std::env::temp_dir().join(format!(
+            "arcline-counter-repeat-{}.mkv",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        write_counter_video(
+            &path,
+            24,
+            Ratio::new(24, 1).unwrap(),
+            320,
+            180,
+            false,
+        )
+        .expect("counter video");
+
+        let ctx = egui::Context::default();
+        let mut hub = MediaHub::new();
+        // One project frame per tile at a 30 fps project; 30 tiles map to 24 source frames.
+        let times: Vec<f64> = (0..30)
+            .map(|frame| (frame as f64 + 0.5) / 30.0)
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let mut missing = 0;
+            for &time in &times {
+                if hub
+                    .video_frame(&path, time, FrameRate::Fps24, false)
+                    .is_none()
+                {
+                    missing += 1;
+                }
+            }
+            hub.poll(&ctx);
+            if missing == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "repeat-frame cache did not settle"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            hub.stats().requested, 24,
+            "30 project frames at a 24 fps source request 24 source frames, not 30"
+        );
+        assert_eq!(
+            hub.cache_usage().thumb_textures,
+            24,
+            "repeated project frames share one source texture"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

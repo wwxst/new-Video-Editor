@@ -415,14 +415,38 @@ impl VideoDecoder {
     /// frame (`t` + half a frame at the stream's nominal rate) and returns the last frame whose
     /// timestamp is ≤ that point. For VFR or rate-less streams no bias is applied.
     pub fn frame_at(&mut self, t: Time) -> Result<FrameRef<'_>, MediaError> {
+        let bias = match self.info.frame_rate.filter(|_| !self.info.vfr) {
+            Some(fr) => Some(
+                Time::new(fr.den() as i64, 2 * fr.num())
+                    .map_err(|e| MediaError::Decode(e.to_string()))?,
+            ),
+            None => None,
+        };
+        self.frame_at_impl(t, bias)
+    }
+
+    /// The frame whose presentation interval contains source time `t`, with no half-frame
+    /// rounding. One container timestamp tick is added so rounded PTS (e.g. MKV 1 ms) still
+    /// resolve to the frame that starts at `t`. This is the mapping thumbnail sampling uses for
+    /// project-frame times; it deliberately repeats the previous source frame when the source
+    /// rate is lower than the project rate.
+    pub fn frame_displayed_at(&mut self, t: Time) -> Result<FrameRef<'_>, MediaError> {
         let tb = self.info.time_base;
-        let aim = match self.info.frame_rate.filter(|_| !self.info.vfr) {
-            Some(fr) => {
-                let half = Time::new(fr.den() as i64, 2 * fr.num())
-                    .map_err(|e| MediaError::Decode(e.to_string()))?;
-                t.checked_add(half)
-                    .map_err(|e| MediaError::Decode(e.to_string()))?
-            }
+        let tick = Time::new(tb.num(), tb.den() as i64)
+            .map_err(|e| MediaError::Decode(e.to_string()))?;
+        self.frame_at_impl(t, Some(tick))
+    }
+
+    fn frame_at_impl(
+        &mut self,
+        t: Time,
+        bias: Option<Time>,
+    ) -> Result<FrameRef<'_>, MediaError> {
+        let tb = self.info.time_base;
+        let aim = match bias {
+            Some(bias) => t
+                .checked_add(bias)
+                .map_err(|e| MediaError::Decode(e.to_string()))?,
             None => t,
         };
         let ticks_t = aim

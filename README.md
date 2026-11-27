@@ -5,10 +5,11 @@
 >
 > Built by a single developer with AI assistance. Windows-first, portable by design.
 
-**Status:** Architecture v2 (post-review). Implementation in progress: Phases A and P are done, Phase B is
-functionally complete, FFmpeg 9.1 is the pinned media build, and the audit follow-up fixed the P0 defects
-plus F-06/F-07/F-08 (accuracy) and eleven further findings, all merged into `main` (2026-11-25). Phase F has
-started. See [HANDOVER.md](HANDOVER.md) for the current state, the
+**Status:** Architecture v2 (post-review) with the **final UI/technology stack fixed on 2026-11-27**
+([ADR-0015](docs/adr/0015-final-ui-stack-and-design-system.md)). Implementation in progress: Phases A and P
+are done, Phase B is functionally complete, FFmpeg 9.1 is the pinned media build, and the audit follow-up
+fixed the P0 defects plus F-06/F-07/F-08 (accuracy) and eleven further findings, all merged into `main`
+(2026-11-25). Phase F has started. See [HANDOVER.md](HANDOVER.md) for the current state, the
 [implementation audit](reports/audit-2026-11-25-88e0707.md) and its
 [follow-up status table](reports/audit-follow-up-2026-11-25.md) for every remaining item.
 **Base:** [architecture review](reports/architecture-review.md), 2026-11-24.
@@ -36,6 +37,23 @@ simplified agent surface, cross-editor project export, two product modes (Standa
 Embedded with live attach, human takeover, and full-editor embedding in agent clients), and a sequential
 ~53-week solo roadmap to v1.0 on Windows.
 
+## Final technology stack (2026-11-27)
+
+| Layer | Final choice |
+|---|---|
+| Language | Rust 2024 |
+| Desktop UI | **`egui` — the only desktop UI framework**, with the Arcline design system in [14](docs/14-ui-design-system.md) |
+| Window management | `winit` via the `egui-winit` host loop |
+| GPU | `wgpu` (UI, compositor, effects, preview presentation) |
+| Media | FFmpeg 9.1 LGPL |
+| Audio | `cpal` + `arc-audio` mixer |
+| Agent access | MCP / JSON-RPC / SDK / Events over the command model |
+| **Not adopted** | **Slint, MLT, any second UI toolkit**; no further UI-toolkit research |
+
+The six-crate architecture is unchanged. The shared UI component library lives in `arc-app/src/ui/`, not a
+seventh crate. The Slint POC and its report remain archived on branch `poc/slint-ui`; its code is not merged
+and no Slint dependency enters the product.
+
 ---
 
 ## Document map
@@ -56,6 +74,7 @@ Embedded with live attach, human takeover, and full-editor embedding in agent cl
 | 11 | [Risks & Legal](docs/11-risks-and-legal.md) | Risk register, codec/FFmpeg licensing, platform compliance |
 | 12 | [Cross-Editor Project Export](docs/12-project-interchange.md) | FCPXML / FCP7 XML / OTIO export, target matrix, packaging, compatibility reports |
 | 13 | [Product Modes & Live Sessions](docs/13-product-modes-and-live-sessions.md) | Standalone/Embedded modes, integration levels L1–L3, native embedding and embed channel, local IPC, live attach, takeover, state sync, Agent panel |
+| 14 | [UI Design System](docs/14-ui-design-system.md) | Normative tokens, themes, components, states, motion, component governance |
 | ADR | [Decision Records](docs/adr/README.md) | Decisions with alternatives; revised after review |
 | Spec | [FFmpeg 9.1 Upgrade](docs/specs/ffmpeg-9.1-upgrade.md) | Boundaries, build, FFI compatibility, LGPL, security, tests, acceptance criteria |
 | — | [Architecture Review](reports/architecture-review.md) | Independent review that motivates v2 |
@@ -69,7 +88,7 @@ Embedded with live attach, human takeover, and full-editor embedding in agent cl
 |------|----------|-----|
 | Language | Rust 2024, single workspace, no GC, no FFI boundary in the hot path | [0001](docs/adr/0001-rust-for-core-and-ui.md) |
 | GPU | `wgpu` (Vulkan / Metal / D3D12) via `egui-wgpu`; one device, CPU uploads for video | [0002](docs/adr/0002-wgpu-gpu-abstraction.md) |
-| UI | `egui` + `egui_dock` shell; timeline and viewer are custom-painted canvases | [0007](docs/adr/0007-native-wgpu-ui.md) |
+| UI | **`egui` only** — `egui-winit` + `egui-wgpu`; shared `arc-app/src/ui` design system; timeline/viewer custom-painted canvases; Slint/MLT excluded | [0015](docs/adr/0015-final-ui-stack-and-design-system.md) |
 | Codecs | FFmpeg `libav*` (LGPL build): preview decode in-process; import check, proxies, and exports in child processes | [0003](docs/adr/0003-ffmpeg-for-media-io.md) |
 | Document | Immutable snapshots + single-writer command engine; all mutation via typed commands | [0005](docs/adr/0005-command-driven-document.md) |
 | Time | Exact rational time; frame boundaries derived per project timebase | [0004](docs/adr/0004-rational-time-model.md) |
@@ -114,7 +133,7 @@ Arcline/
 │   ├── arc-media/          # probe, decode, encode, mux, proxy jobs (FFmpeg)
 │   ├── arc-render/         # wgpu compositor, effects, text, frame cache
 │   ├── arc-audio/          # cpal output, mixer, offline render
-│   ├── arc-app/            # egui shell, timeline/viewer canvases, app binary
+│   ├── arc-app/            # egui shell, ui/ design system + components, timeline/viewer canvases, app binary
 │   └── arc-cli/            # headless render, JSON-RPC/MCP server, utilities
 ├── docs/                   # this proposal; docs/specs/ holds implementation specs
 ├── reports/                # architecture review, implementation audits

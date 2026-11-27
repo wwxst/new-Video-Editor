@@ -1,5 +1,9 @@
 # Independent Architecture Review — Arcline (`wwxst/new-Video-Editor`)
 
+> **Historical review (2026-11-24).** Its "future toolkit swap (Slint/Qt)" suggestions are superseded by
+> [ADR-0015](../docs/adr/0015-final-ui-stack-and-design-system.md): **egui is the only desktop UI framework**;
+> Slint/MLT are not adopted. The rest of the review remains the rationale for the v2 architecture.
+
 **Reviewed:** initial commit `043e841` — 28 documents, no source code.
 **Lens:** the stated goal is a professional, agent-native editor built by **one developer with AI doing most
 of the engineering**. The proposal was written as if for a 9–10 person team; that mismatch is the root of

@@ -11,7 +11,8 @@ back only when a second consumer proves the need.
 
 `wgpu` provides Vulkan/Metal/D3D12 behind one API. The app uses the `wgpu::Device`/`Queue` created by
 `egui-wgpu`, so the UI and the viewer share one device, one queue, and one adapter — no interop copies
-between UI and renderer.
+between UI and renderer. **Preview presentation is zero-copy**: the compositor's `Rgba8UnormSrgb` output is
+handed to `egui-wgpu` as a user texture or a custom paint callback, never copied to the CPU and re-uploaded.
 
 `arc-render::Device` is a thin wrapper that owns:
 
@@ -181,5 +182,6 @@ expected images live with the render crate.
 - Decoded frames arrive as planar YUV (NV12/P010); the renderer uploads the smallest planes and performs
   color conversion on the GPU.
 - A staging ring of 3–4 frames per decoder hides upload latency; uploads overlap graph execution.
-- Zero-copy platform interop (D3D12 shared textures, IOSurface) is a later optimization. v1 uses the
-  uniform shared-memory-free path: decode → upload → convert.
+- Zero-copy **platform decode** interop (D3D12 shared textures, IOSurface) is a later optimization. v1
+  uses the uniform shared-memory-free path: decode → upload → convert. This is separate from the
+  **UI presentation** path above, which is already zero-copy and is not deferred.

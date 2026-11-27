@@ -19,6 +19,8 @@ v2 scales both to a single developer: fewer gates, one reference machine, and te
 | Open 1,000-clip project | ≤ 2.0 s | shallow probe + cached metadata |
 | Apply command batch (1,000 clips) | ≤ 200 µs | persistent structures, no full copy |
 | UI frame | ≤ 16 ms | 60 fps shell; present on demand |
+| Idle UI CPU | ≤ 1 % of one core | 0 % when fully idle; no polling or continuous repaint |
+| Preview presentation | no CPU readback | compositor texture imported into `egui-wgpu`; zero-copy UI path |
 | Timeline scroll/drag paint | ≤ 8 ms | 8 tracks, 2,000 visible clip-seconds |
 | Seek, cached frame | ≤ 150 ms from cache | p95 |
 | Seek, uncached (proxy) | ≤ 300 ms | p95, 4K source |
@@ -252,6 +254,8 @@ crash: the user loses no acknowledged edits and reopens into the recovered state
 | Hot spot | Answer |
 |---|---|
 | Timeline paint with thousands of clips | virtualized painting + LOD; measure `egui` before adding a custom pass |
+| Preview presentation copying pixels | **forbidden in the UI path**: share the compositor texture with `egui-wgpu` (user texture or custom paint callback); CPU readback is only for export/tests |
+| Idle CPU from continuous repaint | request repaint only on input/state/job events; `winit` wait policy when idle; no polling |
 | Command apply on large documents | persistent structures, O(log n) edits, cached canonical hash |
 | Decoder seek latency | proxies, GOP cache, hardware decode |
 | GPU upload stalls | YUV upload + GPU color conversion + staging ring |

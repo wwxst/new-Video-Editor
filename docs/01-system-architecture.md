@@ -16,7 +16,9 @@ and no machinery that does not serve a v1 user.
    Readers never lock. One engine thread writes.
 4. **Reproducible on the machine that made it.** Same project + commands + renderer version ⇒ same output
    on the same hardware. Cross-device bit-exactness is not promised ([03 §9](03-render-engine.md)).
-5. **Native, no web runtime.** `wgpu` for rendering, `egui` for the shell. No Chromium, no WebView, no JS.
+5. **Native, no web runtime.** `wgpu` for rendering and **`egui` as the only desktop UI framework**
+   ([ADR-0015](adr/0015-final-ui-stack-and-design-system.md)). No Chromium, no WebView, no JS, no second
+   UI toolkit.
 6. **Simplicity before robustness theater.** In-process decode, single-process export, one fallback quality
    level. Process isolation and parallel export are documented upgrade paths, not v1 work.
 7. **Budgets, not vibes.** Every subsystem has numbers with CI gates ([08](08-performance-reliability.md)).
@@ -115,7 +117,7 @@ Six crates, with enforced dependency rules (checked in CI from `cargo metadata`)
 | `arc-media` | probe, decode, encode, mux, proxy/thumbnail/waveform jobs | core, FFmpeg | render, UI |
 | `arc-render` | `wgpu` device, compositor, effects, text, frame cache | core, `wgpu` | FFmpeg, UI |
 | `arc-audio` | device output, mixer, offline render | core, `cpal` | render, UI |
-| `arc-app` | `egui` shell, timeline canvas, viewer, Agent panel, IPC listener, consent prompts, app binary | all of the above, including the `arc-cli` library | — |
+| `arc-app` | `egui` shell, shared `ui/` design system and components, timeline canvas, viewer, Agent panel, IPC listener, consent prompts, app binary | all of the above, including the `arc-cli` library | — |
 | `arc-cli` | library: session server, JSON-RPC/MCP, tool registry, MCP Apps resource, attach bridge, jobs; binary: headless render, interchange export, utilities | core, media, render, audio | `egui`, `arc-app` |
 
 Why this shape:
@@ -127,6 +129,9 @@ Why this shape:
   diverge.
 - Six crates is the smallest split that preserves these properties. Fewer boundaries mean less Cargo
   plumbing and fewer cross-file contexts for AI-assisted edits.
+- The shared UI library is a module inside `arc-app` (`arc-app/src/ui/`), not a seventh crate. UI types and
+  `egui` never leak into `arc-core`, `arc-media`, `arc-render`, `arc-audio`, or `arc-cli`. See
+  [14 — UI Design System](14-ui-design-system.md) and [ADR-0015](adr/0015-final-ui-stack-and-design-system.md).
 
 Dependency rule enforcement: a CI script parses `cargo metadata` and fails on forbidden edges. Module-level
 boundaries inside `arc-core` (e.g. `model` vs `command`) carry the discipline that separate crates used to.

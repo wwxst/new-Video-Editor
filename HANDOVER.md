@@ -1,4 +1,4 @@
-# HANDOVER 鈥?foundation checkpoint (Phases A, P done; B functionally complete; P0 fixed; FFmpeg 9.1)
+# HANDOVER 鈥?foundation checkpoint (Phases A, P done; B functionally complete; P0 fixed; FFmpeg 9.1; final UI stack 2026-11-27)
 
 Checkpoint date: 2026-11-25. Supersedes the earlier WIP handover of `720a99a`.
 
@@ -19,6 +19,27 @@ source of truth; this file records implementation status, deviations, and how to
 > F-04, F-05, F-09) is fixed with regression tests; the FFmpeg 9.1 upgrade (F-19, F-20, F-21, plus
 > the shim/tools parts of F-09) is recorded in [third_party/ffmpeg](third_party/ffmpeg); F-06, F-07
 > and F-08 (accuracy) and F-11鈥-14, F-24, F-26, F-28, F-29, F-31 were fixed in the follow-up.
+
+## 0. Final UI / technology decision (2026-11-27)
+
+**The stack is fixed.** Rust 2024, **`egui` as the only desktop UI framework**, `wgpu`, `winit`, FFmpeg,
+`cpal`, and MCP/JSON-RPC/SDK/Events. Slint and MLT are **not adopted**; no further UI-toolkit selection is
+planned. See [ADR-0015](docs/adr/0015-final-ui-stack-and-design-system.md) and the normative
+[UI Design System](docs/14-ui-design-system.md).
+
+- Six-crate architecture unchanged. The shared component library lives in `arc-app/src/ui/`; do not add a
+  seventh UI crate.
+- Both product modes (standalone editor and native child-window embedding in the Agent client) use the same
+  `egui` components/tokens; no second toolkit and no forked embedded UI.
+- The 2026-11-27 Slint validation (four panels, timeline, zero-copy texture, native child window, Chinese
+  IME, 150 % DPI, licence) is archived on branch `poc/slint-ui` with
+  `reports/slint-feasibility-2026-11-27.md`. It is evidence, not a migration branch; no Slint dependency or
+  generated code enters this workspace.
+- Adopted from the validation: **GPU-shared zero-copy preview presentation** and **on-demand repaint**
+  (no idle polling). Both are now part of the performance requirements in
+  [docs/08](docs/08-performance-reliability.md).
+- Existing timeline/UI work (layout, zoom, thumbnails, waveforms, playhead) is retained; no rewrite is
+  planned.
 
 ---
 
@@ -79,7 +100,7 @@ crates/
   arc-render  builtin effect manifests, pure frame planning, wgpu direct compositor + WGSL
   arc-audio   sample-accurate mixer (block-size independent), WAV writer
   arc-cli     inspect (describe, text timeline), export job, JSON-RPC session, `arcline-cli` binary
-  arc-app     egui-winit + egui-wgpu host loop (top-level / embedded child / pop-out), embed channel, PoC workload
+  arc-app     egui-winit + egui-wgpu host loop (top-level / embedded child / pop-out), ui/ design system + shared components, embed channel, PoC workload
               examples/embed_host.rs 鈥?Win32 reference host + PoC measurement
 docs/poc/embedding-poc-2026-11-25.md 鈥?PoC result (GO)
 third_party/ffmpeg/  pinned FFmpeg 9.1 build recipe, configure profile, manifest, SBOM, licences, package lock

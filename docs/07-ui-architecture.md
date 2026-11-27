@@ -1,6 +1,10 @@
 # 07 — UI Architecture
 
-v2 decision: **`egui` for the application shell, custom `wgpu` canvases for the timeline and viewer.**
+**Final decision (2026-11-27):** **`egui` is the only desktop UI framework**, with custom `wgpu` canvases
+for the timeline and viewer. The stack is fixed by [ADR-0015](adr/0015-final-ui-stack-and-design-system.md);
+Slint and MLT are not adopted and are not open options. The shared component library and visual rules are
+defined by [14 — UI Design System](14-ui-design-system.md).
+
 The custom widget toolkit from v1 is removed ([ADR-0007](adr/0007-native-wgpu-ui.md)). The reason is
 schedule, not taste: a polished widget layer is months of work that produces no video-editing capability,
 and `egui` already provides docking, dialogs, tables, menus, text editing, and a `wgpu` integration.
@@ -11,11 +15,15 @@ and `egui` already provides docking, dialogs, tables, menus, text editing, and a
 arc-app
 ├── host loop: egui-winit + egui-wgpu   # top-level window, or child window when embedded (13 §2.1)
 ├── egui + egui_dock + egui_extras      # shell, panels, tables, dialogs
+├── ui/                                 # tokens, theme, shared components, patterns (14)
 ├── custom timeline canvas              # egui::Painter first; dedicated pass if needed
 ├── custom viewer                       # egui_wgpu user texture
 ├── cosmic-text / glyphon               # canvas text, titles
 └── rfd                                 # native file dialogs
 ```
+
+The component library is inside `arc-app`, not a seventh crate; the six-crate rule and the dependency
+direction in [01 §4](01-system-architecture.md) are unchanged.
 
 One `wgpu::Device`/`Queue` for everything:
 
@@ -26,9 +34,9 @@ One `wgpu::Device`/`Queue` for everything:
 - Text on canvas (titles, subtitles, clip labels) uses `glyphon` against the same device.
 
 **Accepted trade-offs:** `egui` does not look native, text input is less polished than Qt, and multi-window
-is limited. A theming layer (fonts, spacing, colors, icon set) narrows the gap for v1. The application shell
-is kept behind a thin boundary so a future toolkit swap remains possible, but no abstraction is built
-speculatively.
+is limited. The Arcline design system ([14](14-ui-design-system.md)) carries the product look. The
+application shell is kept behind the existing `arc-app` UI module for testability and embedding; **no
+alternate toolkit abstraction is built, and no toolkit swap is planned** ([ADR-0015](adr/0015-final-ui-stack-and-design-system.md)).
 
 ## 2. Application shell
 
@@ -98,7 +106,9 @@ Budget: 60 fps scroll and drag with 8 tracks and 2,000 visible clip-seconds; 8 m
 
 ## 5. Viewer
 
-- Presents the compositor texture; zoom (fit / 50% / 100%), 1:1 pixel mode, pan, safe-area guides.
+- Presents the compositor texture through the shared `egui-wgpu` device as a user texture/custom paint
+  callback — **no CPU readback in the UI path**. Zoom (fit / 50% / 100%), 1:1 pixel mode, pan, safe-area
+  guides.
 - Overlays: timecode bar, quality badge when the governor degrades, optional histogram/waveform scope.
 - Click-to-export-frame: a full-resolution grab lands in the media bin (the same command agents use).
 
@@ -117,7 +127,8 @@ Budget: 60 fps scroll and drag with 8 tracks and 2,000 visible clip-seconds; 8 m
 - **Accessibility**: keyboard completeness for every command (Phase C gate); `egui`'s accesskit integration
   provides an OS accessibility tree as a best-effort. Screen-reader certification is post-1.0.
 - **Theming**: token-based (color roles, spacing scale, type ramp); light, dark, high-contrast. No
-  hard-coded colors in widgets.
+  hard-coded colors in widgets. The complete token set, component inventory, and state rules are in
+  [14 — UI Design System](14-ui-design-system.md).
 - **i18n**: `fluent` bundles, no concatenated strings, plural rules respected. English at v1.
 
 ## 8. Failure UX
@@ -139,3 +150,16 @@ Budget: 60 fps scroll and drag with 8 tracks and 2,000 visible clip-seconds; 8 m
 - **Missing media**: placeholders with asset names; relink is one click; the timeline stays fully editable.
 - **Long operations**: jobs show progress in the status bar with cancel; nothing modal except file dialogs
   and destructive confirmations.
+
+## 9. Decision history (research only)
+
+- **v1 custom widget toolkit** — rejected in the 2026-11-24 architecture review; it would have cost months
+  before the first video-editing capability.
+- **Slint 1.19.1 + wgpu 30** — validated end to end on 2026-11-27: four panels, timeline, zero-copy
+  preview, native child window, Chinese IME, 150 % DPI, and the royalty-free licence all worked. It was
+  rejected for the editor because the retained-mode timeline was 10–13× slower than `egui` at 1,000 clips
+  (5–7 % late frames), Skia could not be built with the current windows-gnu toolchain, and migration cost
+  was high. The POC and measurements are archived on branch `poc/slint-ui`; they are not merged and no
+  Slint dependency enters the product.
+- The final decision and the long-term rules are in [ADR-0015](adr/0015-final-ui-stack-and-design-system.md).
+  This section exists so the research is not lost; it is not a menu of alternatives.

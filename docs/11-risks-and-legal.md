@@ -37,6 +37,10 @@ Scoring: likelihood (L) and impact (I) on 1–5; exposure = L×I.
 
 The top exposures (R1, R22, R24, R2/R3) are revisited at every phase gate.
 
+**UI toolkit selection is closed** ([ADR-0015](adr/0015-final-ui-stack-and-design-system.md)): `egui` is
+the only desktop UI framework; Slint/MLT are not adopted. R5 is a polish/performance risk with a custom-pass
+mitigation, not a trigger to re-open toolkit selection.
+
 ## 2. FFmpeg and codec licensing
 
 **Stated plainly: this section requires counsel. It records engineering constraints and intended posture,

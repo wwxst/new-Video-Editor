@@ -7,6 +7,10 @@ slices: each one ends with something runnable.
 This roadmap delivers **v1.0 on Windows**. **v1.1** is the macOS port (no new features); **Linux** is
 post-1.0 with no date. The release plan and CI tiers are defined in [ADR-0011](adr/0011-windows-first.md).
 
+**UI stack is fixed:** `egui` is the only desktop UI framework ([ADR-0015](adr/0015-final-ui-stack-and-design-system.md)).
+All UI phases use the shared component/design system in [14](14-ui-design-system.md); no toolkit bake-off is
+on the critical path, and Slint/MLT are not adopted.
+
 ## 1. Phase overview
 
 **Calendar = sum of effort.** One developer works on one phase at a time; AI assistance shortens phases but

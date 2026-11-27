@@ -1,6 +1,8 @@
 # ADR-0007 — `egui` shell with custom GPU canvases
 
-**Status:** Accepted, 2026-11-24 — replaces the original "custom retained-mode widget toolkit" decision.
+**Status:** Accepted, 2026-11-24. **Confirmed final by [ADR-0015](0015-final-ui-stack-and-design-system.md)
+on 2026-11-27.** The "future toolkit swap / Slint fallback" wording below is historical; it is not an open
+option.
 **Revised after:** [architecture review](../../reports/architecture-review.md).
 **Amended 2026-11-24 by [ADR-0014](0014-integration-levels-and-native-embedding.md):** the app loop uses
 `egui-winit` + `egui-wgpu` directly instead of `eframe`, so the editor can run as a child window inside a host.
@@ -33,8 +35,8 @@ The custom widget toolkit (`arc-ui`) is removed from the architecture.
 - One `wgpu` device/queue shared by UI, viewer, and compositor.
 - Accepted trade-offs: `egui` does not look native, text input is less polished than Qt, multi-window is
   limited. Mitigated with token theming, custom canvases, and a keyboard-first workflow.
-- The shell is kept behind a thin app-level boundary so a future toolkit swap remains possible — but no
-  speculative abstraction is built.
+- The shell is kept behind the existing `arc-app` UI boundary for testability and embedding. The earlier
+  "future toolkit swap" rationale is closed by ADR-0015: no alternate-toolkit abstraction is built.
 - Performance risk is bounded and measurable: if timeline painting misses budget, add a dedicated pass
   behind the existing canvas interface (days, not months).
 
@@ -44,6 +46,7 @@ The custom widget toolkit (`arc-ui`) is removed from the architecture.
   undifferentiated work and a long polish tail; rejected for a solo project.
 - **Qt**: best chrome, best docking, but heavy integration with a `wgpu` viewport, LGPL/commercial
   licensing complexity, and C++ interop cost.
-- **`slint` / `iced` / `gpui`**: viable, better looking than `egui`, but younger ecosystems and weaker
-  custom-canvas ergonomics for a timeline editor. Retained as fallback if `egui` proves limiting.
+- **`slint` / `iced` / `gpui`**: historical alternatives considered. Slint was fully validated in 2026
+  (branch `poc/slint-ui`) but is not adopted; it is not a standing fallback. See ADR-0015 for the measured
+  reasons and the final decision.
 - **Electron / Tauri / WebView**: violates the native requirement and complicates GPU video surfaces.

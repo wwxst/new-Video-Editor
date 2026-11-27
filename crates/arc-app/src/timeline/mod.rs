@@ -25,12 +25,71 @@ pub const SCROLLBAR_W: f32 = 9.0;
 /// Zoom limits, in points per second.
 pub const MIN_ZOOM: f32 = 12.0;
 pub const MAX_ZOOM: f32 = 480.0;
+/// Right-aligned zoom controls: two 24 pt buttons around a 110 pt horizontal slider.
+const ZOOM_BUTTON: f32 = 24.0;
+const ZOOM_SLIDER_W: f32 = 110.0;
+const ZOOM_GAP: f32 = 2.0;
+const TOOLBAR_MARGIN: f32 = 10.0;
+/// Right edge of the left-hand tool group, including the gap after the last tool.
+const TOOLBAR_TOOLS_W: f32 = 212.0;
 
 fn tb(ui: &mut Ui, x: &mut f32, y: f32, icon: ToolbarIcon, active: bool) -> egui::Response {
     let r = Rect::from_center_size(egui::pos2(*x + 12.0, y), Vec2::new(24.0, 24.0));
     *x += 26.0;
+    tb_at(ui, r, icon, active)
+}
+
+fn tb_at(ui: &mut Ui, rect: Rect, icon: ToolbarIcon, active: bool) -> egui::Response {
     let id = ui.make_persistent_id(("tl-toolbar", icon));
-    draw::icon_button(ui, r, id, icon, active)
+    draw::icon_button(ui, rect, id, icon, active)
+}
+
+/// Right-hand zoom controls of the toolbar. `None` when the toolbar is too narrow to host them
+/// without colliding with the editing tools.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ZoomControls {
+    out: Rect,
+    slider: Rect,
+    input: Rect,
+}
+
+fn zoom_controls(toolbar: Rect) -> Option<ZoomControls> {
+    let total = ZOOM_BUTTON + ZOOM_GAP + ZOOM_SLIDER_W + ZOOM_GAP + ZOOM_BUTTON;
+    let left = toolbar.right() - TOOLBAR_MARGIN - total;
+    if left < toolbar.left() + TOOLBAR_TOOLS_W {
+        return None;
+    }
+    let y = toolbar.center().y;
+    let button = |x: f32| {
+        Rect::from_min_size(
+            egui::pos2(x, y - ZOOM_BUTTON * 0.5),
+            Vec2::new(ZOOM_BUTTON, ZOOM_BUTTON),
+        )
+    };
+    let out = button(left);
+    let slider = Rect::from_min_size(
+        egui::pos2(out.right() + ZOOM_GAP, y - 10.0),
+        Vec2::new(ZOOM_SLIDER_W, 20.0),
+    );
+    let input = button(slider.right() + ZOOM_GAP);
+    Some(ZoomControls {
+        out,
+        slider,
+        input,
+    })
+}
+
+/// Slider position of a zoom level, 0 at [`MIN_ZOOM`] and 1 at [`MAX_ZOOM`].
+///
+/// The mapping is logarithmic because zoom itself is multiplicative: equal drags feel like equal
+/// relative changes, and the whole 12–480 px/s range is reachable.
+fn zoom_slider_fraction(zoom: f32) -> f32 {
+    let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    (zoom / MIN_ZOOM).ln() / (MAX_ZOOM / MIN_ZOOM).ln()
+}
+
+fn zoom_from_fraction(fraction: f32) -> f32 {
+    MIN_ZOOM * (MAX_ZOOM / MIN_ZOOM).powf(fraction.clamp(0.0, 1.0))
 }
 
 /// Rectangles of the timeline chrome inside the timeline card.
@@ -205,7 +264,7 @@ impl Timeline {
         ui.painter()
             .rect_filled(l.underlay, CornerRadius::ZERO, CANVAS_BG);
 
-        self.toolbar(ui, l.toolbar);
+        self.toolbar(ui, l.toolbar, l.canvas);
         self.wheel(ui, &l);
 
         // Clamp scroll against the current content, then resolve the view.
@@ -234,7 +293,7 @@ impl Timeline {
     }
 
     /// Update the playhead from a click or drag on the ruler. Runs before painting so the handle and
-    /// the line move in the same frame as the pointer.
+    /// the line move in the same frame as the pointer. The time snaps to the nearest project frame.
     fn drag_playhead(&mut self, ui: &mut Ui, ruler: Rect, view_start: f64, origin: f32) {
         let id = ui.make_persistent_id("tl-playhead");
         let response = ui.interact(ruler, id, Sense::click_and_drag());
@@ -242,7 +301,8 @@ impl Timeline {
             && let Some(pos) = response.interact_pointer_pos()
         {
             let t = x_to_time(origin, view_start, self.zoom, pos.x);
-            self.model.playhead = t.clamp(0.0, self.model.duration.max(0.0));
+            let snapped = model::snap_to_frame(t, model::PROJECT_FPS);
+            self.model.playhead = snapped.clamp(0.0, self.model.duration.max(0.0));
         }
         if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
@@ -257,10 +317,9 @@ impl Timeline {
         )
     }
 
-    fn toolbar(&mut self, ui: &mut Ui, rect: Rect) {
+    fn toolbar(&mut self, ui: &mut Ui, rect: Rect, canvas: Rect) {
         let y = rect.center().y;
         let mut x = rect.left() + 8.0;
-        let mut zoom_delta = 0.0f32;
         if tb(ui, &mut x, y, ToolbarIcon::Select, self.select_mode)
             .on_hover_text("Selection tool")
             .clicked()
@@ -297,31 +356,48 @@ impl Timeline {
         {
             self.snap = !self.snap;
         }
-        x += 6.0;
-        if tb(ui, &mut x, y, ToolbarIcon::ZoomOut, false)
-            .on_hover_text("Zoom out")
-            .clicked()
-        {
-            zoom_delta = -1.0;
+
+        // Zoom cluster, right-aligned: [-] [horizontal slider] [+]. The technical px/s readout is
+        // gone; the slider is the one continuous zoom control.
+        let mut requested = self.zoom;
+        if let Some(z) = zoom_controls(rect) {
+            if tb_at(ui, z.out, ToolbarIcon::ZoomOut, false)
+                .on_hover_text("Zoom out")
+                .clicked()
+            {
+                requested *= 0.8;
+            }
+            if tb_at(ui, z.input, ToolbarIcon::ZoomIn, false)
+                .on_hover_text("Zoom in")
+                .clicked()
+            {
+                requested *= 1.25;
+            }
+            let id = ui.make_persistent_id("tl-zoom-slider");
+            let response = ui.interact(z.slider, id, Sense::click_and_drag());
+            let track = Rect::from_center_size(
+                z.slider.center(),
+                Vec2::new((z.slider.width() - 10.0).max(1.0), 3.0),
+            );
+            let mut fraction = zoom_slider_fraction(requested);
+            if (response.clicked() || response.dragged())
+                && let Some(pos) = response.interact_pointer_pos()
+            {
+                fraction = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
+                requested = zoom_from_fraction(fraction);
+            }
+            if response.hovered() || response.dragged() {
+                ui.ctx().set_cursor_icon(if response.dragged() {
+                    egui::CursorIcon::Grabbing
+                } else {
+                    egui::CursorIcon::Grab
+                });
+            }
+            self.paint_zoom_slider(ui, track, fraction, response.dragged() || response.hovered());
+            response.on_hover_text("Timeline zoom");
         }
-        let label_rect = Rect::from_center_size(egui::pos2(x + 30.0, y), Vec2::new(60.0, 20.0));
-        x += 62.0;
-        ui.painter().text(
-            label_rect.center(),
-            Align2::CENTER_CENTER,
-            format!("{:.0} px/s", self.zoom),
-            FontId::proportional(10.0),
-            DIM,
-        );
-        if tb(ui, &mut x, y, ToolbarIcon::ZoomIn, false)
-            .on_hover_text("Zoom in")
-            .clicked()
-        {
-            zoom_delta = 1.0;
-        }
-        if zoom_delta != 0.0 {
-            self.zoom = (self.zoom * if zoom_delta > 0.0 { 1.25 } else { 0.8 })
-                .clamp(MIN_ZOOM, MAX_ZOOM);
+        if (requested - self.zoom).abs() > 0.001 {
+            self.set_zoom(requested, canvas);
         }
 
         ui.painter().line_segment(
@@ -331,6 +407,48 @@ impl Timeline {
             ],
             Stroke::new(1.0, Color32::from_rgb(0x23, 0x26, 0x2c)),
         );
+    }
+
+    /// Paint the slider track, the filled part and the knob. `fraction` is already the value the
+    /// frame should show, so a click moves the knob in the same frame that the zoom changes.
+    fn paint_zoom_slider(&self, ui: &Ui, track: Rect, fraction: f32, active: bool) {
+        let painter = ui.painter();
+        painter.rect_filled(track, CornerRadius::same(2), Color32::from_rgb(0x33, 0x37, 0x3f));
+        let knob_x = track.left() + fraction.clamp(0.0, 1.0) * track.width();
+        if knob_x > track.left() + 0.5 {
+            painter.rect_filled(
+                Rect::from_min_max(track.min, egui::pos2(knob_x, track.max.y)),
+                CornerRadius::same(2),
+                draw::ACCENT,
+            );
+        }
+        let knob = egui::pos2(knob_x, track.center().y);
+        let radius = if active { 5.5 } else { 4.5 };
+        painter.circle_filled(knob, radius, Color32::from_rgb(0xe6, 0xe8, 0xec));
+        painter.circle_stroke(
+            knob,
+            radius,
+            Stroke::new(1.0, Color32::from_rgb(0x12, 0x13, 0x16)),
+        );
+    }
+
+    /// Change the horizontal scale. The playhead stays under its current pixel when it is visible;
+    /// otherwise the canvas centre is the anchor, so a toolbar zoom never jumps.
+    fn set_zoom(&mut self, zoom: f32, canvas: Rect) {
+        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        if (zoom - self.zoom).abs() < 0.001 {
+            return;
+        }
+        let origin = canvas.left();
+        let playhead_x = time_to_x(origin, self.view_start(), self.zoom, self.model.playhead);
+        let anchor = if playhead_x >= canvas.left() && playhead_x <= canvas.right() {
+            playhead_x
+        } else {
+            canvas.center().x
+        };
+        let time = x_to_time(origin, self.view_start(), self.zoom, anchor);
+        self.zoom = zoom;
+        self.scroll.x = (time as f32 * self.zoom - (anchor - origin)).max(0.0);
     }
 
     fn wheel(&mut self, ui: &Ui, l: &Layout) {
@@ -377,6 +495,7 @@ impl Timeline {
             rect,
             view_start,
             self.zoom,
+            model::PROJECT_FPS,
             visible.then_some(playhead_x),
         );
     }
@@ -1367,19 +1486,162 @@ mod tests {
             dragged.handle_x,
             dragged.line_x
         );
-        assert!((dragged.line_x - end.x).abs() < 0.01, "the line is under the pointer");
-        assert!(
-            (dragged.handle_x - end.x).abs() < 0.01,
-            "the handle centre is under the pointer"
+        let expected_time = model::snap_to_frame(
+            x_to_time(origin, t.view_start(), t.zoom, end.x),
+            model::PROJECT_FPS,
         );
-        let expected_time = x_to_time(origin, t.view_start(), t.zoom, end.x);
-        assert!((t.model.playhead - expected_time).abs() < 0.001);
+        let expected_x = time_to_x(origin, t.view_start(), t.zoom, expected_time);
+        assert!(
+            (dragged.line_x - expected_x).abs() < 0.01,
+            "the line is on the snapped frame"
+        );
+        assert!(
+            (dragged.line_x - end.x).abs() <= t.zoom / model::PROJECT_FPS as f32 / 2.0 + 0.01,
+            "the snapped line stays within half a frame of the pointer"
+        );
+        assert!(
+            (dragged.handle_x - dragged.line_x).abs() < 0.01,
+            "the handle centre is on the snapped frame"
+        );
+        assert!((t.model.playhead - expected_time).abs() < 1e-9);
+    }
+
+    /// Clicking the ruler and dragging both snap to the nearest project frame.
+    #[test]
+    fn ruler_interaction_snaps_the_playhead_to_a_frame() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline {
+            zoom: 120.0,
+            ..Timeline::default()
+        };
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 500.0));
+        frame(&ctx, &mut t, screen, Vec::new());
+        let l = layout(screen);
+
+        let target = 2.03;
+        let x = time_to_x(l.canvas.left(), t.view_start(), t.zoom, target);
+        click(&ctx, &mut t, screen, egui::pos2(x, l.ruler.center().y));
+        let expected = model::snap_to_frame(target, model::PROJECT_FPS);
+        assert_eq!(t.model.playhead, expected);
+        assert!((expected - 2.041_666_666_666_666_5).abs() < 1e-9);
+    }
+
+    /// Toolbar zoom anchors on the playhead's pixel when the playhead is visible.
+    #[test]
+    fn toolbar_zoom_keeps_the_playhead_pixel() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline {
+            zoom: 58.0,
+            ..Timeline::default()
+        };
+        t.model.playhead = 5.0;
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 500.0));
+        frame(&ctx, &mut t, screen, Vec::new());
+        let l = layout(screen);
+        let before = time_to_x(l.canvas.left(), t.view_start(), t.zoom, t.model.playhead);
+        let z = zoom_controls(l.toolbar).expect("room for the zoom cluster");
+
+        click(&ctx, &mut t, screen, z.input.center());
+        let after = time_to_x(l.canvas.left(), t.view_start(), t.zoom, t.model.playhead);
+        assert!(t.zoom > 58.0, "zoom did not change: {}", t.zoom);
+        assert!(
+            (after - before).abs() < 0.01,
+            "playhead moved from x {before} to {after} during toolbar zoom"
+        );
+    }
+
+    /// A window resize re-resolves the canvas and keeps the handle/line on the same time.
+    #[test]
+    fn resizing_keeps_the_playhead_mapped_to_its_time() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline {
+            zoom: 120.0,
+            scroll: egui::vec2(180.0, 0.0),
+            ..Timeline::default()
+        };
+        for size in [
+            egui::vec2(800.0, 420.0),
+            egui::vec2(1600.0, 900.0),
+            egui::vec2(1000.0, 500.0),
+        ] {
+            let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), size);
+            let p = painted_playhead(&ctx, &mut t, screen, Vec::new());
+            let l = layout(screen);
+            let expected = time_to_x(l.canvas.left(), t.view_start(), t.zoom, t.model.playhead);
+            assert!(
+                (p.line_x - expected).abs() < 0.01,
+                "size {size:?}: line x {} vs {expected}",
+                p.line_x
+            );
+            assert!((p.handle_x - p.line_x).abs() < 0.01);
+            let body = t.body_rect(l.underlay);
+            assert!((p.line_top - body.top()).abs() < 0.01);
+            assert!((p.line_bottom - body.bottom()).abs() < 0.01);
+        }
     }
 
     #[test]
     fn tick_steps_grow_when_zoomed_out() {
         assert!(draw::tick_step(400.0) <= draw::tick_step(40.0));
         assert!(draw::tick_step(40.0) <= draw::tick_step(4.0));
-        assert_eq!(draw::tick_step(4000.0), 0.5);
+        assert_eq!(draw::tick_step(4000.0), 1.0);
+        assert_eq!(draw::tick_step(58.0), 2.0);
+    }
+
+    #[test]
+    fn zoom_controls_are_right_aligned_and_compact() {
+        let toolbar = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, TOOLBAR_H));
+        let z = zoom_controls(toolbar).expect("a 1200 pt toolbar has room");
+        assert!((z.input.right() - (toolbar.right() - TOOLBAR_MARGIN)).abs() < 0.01);
+        assert!(z.out.left() > toolbar.left() + TOOLBAR_TOOLS_W);
+        assert!(z.out.right() < z.slider.left());
+        assert!(z.slider.right() < z.input.left());
+        assert!((z.slider.width() - ZOOM_SLIDER_W).abs() < 0.01);
+        assert_eq!(z.out.width(), ZOOM_BUTTON);
+        assert_eq!(z.input.width(), ZOOM_BUTTON);
+
+        // A narrow timeline keeps the editing tools and simply drops the zoom cluster.
+        let narrow = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(360.0, TOOLBAR_H));
+        assert!(zoom_controls(narrow).is_none());
+    }
+
+    #[test]
+    fn the_zoom_slider_covers_the_whole_scale() {
+        assert!((zoom_from_fraction(0.0) - MIN_ZOOM).abs() < 0.01);
+        assert!((zoom_from_fraction(1.0) - MAX_ZOOM).abs() < 0.01);
+        let default = Timeline::default().zoom;
+        let fraction = zoom_slider_fraction(default);
+        assert!((zoom_from_fraction(fraction) - default).abs() < 0.01);
+        // Logarithmic: the midpoint is the geometric mean, not the arithmetic one.
+        assert!((zoom_from_fraction(0.5) - (MIN_ZOOM * MAX_ZOOM).sqrt()).abs() < 0.01);
+    }
+
+    /// Clicking the right-hand zoom-in/out buttons and dragging the slider all change the scale.
+    #[test]
+    fn toolbar_zoom_controls_change_the_zoom() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline::default();
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 500.0));
+        frame(&ctx, &mut t, screen, Vec::new());
+        let toolbar = layout(screen).toolbar;
+        let z = zoom_controls(toolbar).expect("room for the zoom cluster");
+
+        let before = t.zoom;
+        click(&ctx, &mut t, screen, z.input.center());
+        assert!(t.zoom > before, "zoom in: {} -> {}", before, t.zoom);
+        let after_in = t.zoom;
+        click(&ctx, &mut t, screen, z.out.center());
+        assert!(t.zoom < after_in, "zoom out: {} -> {}", after_in, t.zoom);
+
+        // Clicking at the right end of the slider reaches the maximum.
+        let track = Rect::from_center_size(
+            z.slider.center(),
+            egui::vec2(z.slider.width() - 10.0, 3.0),
+        );
+        click(&ctx, &mut t, screen, egui::pos2(track.right(), track.center().y));
+        assert!((t.zoom - MAX_ZOOM).abs() < 0.5, "slider right edge: {}", t.zoom);
+        // And the left end reaches the minimum.
+        click(&ctx, &mut t, screen, egui::pos2(track.left(), track.center().y));
+        assert!((t.zoom - MIN_ZOOM).abs() < 0.5, "slider left edge: {}", t.zoom);
     }
 }

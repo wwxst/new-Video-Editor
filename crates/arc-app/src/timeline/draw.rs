@@ -225,47 +225,143 @@ fn elide(painter: &Painter, text: &str, font: &FontId, max_width: f32) -> String
     })
 }
 
-/// Ruler: adaptive major/minor ticks and timecodes, top-aligned to the canvas.
+/// Minimum distance between two ruler labels, in points.
+const LABEL_GAP: f32 = 78.0;
+/// Rule heights for the three tick levels.
+const TICK_SECOND_H: f32 = 9.0;
+const TICK_FRAME_LABEL_H: f32 = 6.0;
+const TICK_MINOR_H: f32 = 4.0;
+const TICK_FRAME_H: f32 = 3.0;
+
+/// A frame grid: the real rate plus the nominal integer rate used by the `mm:ss`/frame labels.
+///
+/// `fps` places frames on the ruler (`frame / fps` seconds); `nominal` is `fps.round()` and is the
+/// number of frame labels inside one timecode second. For 29.97/59.94 the nominal rates are 30/60,
+/// so frame ticks land on real frame boundaries and `00:01` is frame 30/60, not a rounded decimal
+/// second.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FrameGrid {
+    pub fps: f64,
+    pub nominal: u32,
+}
+
+impl FrameGrid {
+    pub fn new(fps: f64) -> FrameGrid {
+        let fps = fps.max(1.0);
+        FrameGrid {
+            fps,
+            nominal: fps.round() as u32,
+        }
+    }
+
+    /// Real seconds at the start of `frame`.
+    pub fn frame_time(&self, frame: u64) -> f64 {
+        frame as f64 / self.fps
+    }
+}
+
+/// How the ruler is labelled at the current scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TickMode {
+    /// Whole-second labels such as `00:02`; `major_frames` is the same step in frames, so labels
+    /// land on frame boundaries even for 29.97/59.94.
+    Seconds {
+        grid: FrameGrid,
+        seconds: u64,
+        major_frames: u64,
+    },
+    /// Frame-level labels. `step` is a divisor of the nominal rate: e.g. 4 frames at 24 fps
+    /// (`04f`, `08f`, …), 10 frames at 29.97/30 fps (`10f`, `20f`, …).
+    Frames { grid: FrameGrid, step: u32 },
+}
+
+/// Pick the ruler scale for a zoom level.
+///
+/// Seconds are preferred while the whole-second labels still fit. Once a second is wide enough to
+/// split into frame ticks, the ruler switches to the densest whole-frame subdivision of the
+/// project rate that keeps labels [`LABEL_GAP`] apart. The step always divides the nominal rate,
+/// so `mm:ss` labels stay on frame-aligned second boundaries.
+pub fn ruler_mode(px_per_sec: f32, fps: f64) -> TickMode {
+    let grid = FrameGrid::new(fps);
+    let nominal = grid.nominal;
+    let px_per_frame = px_per_sec / grid.fps as f32;
+    let mut step = None;
+    for n in 2..=nominal {
+        if !nominal.is_multiple_of(n) {
+            continue;
+        }
+        let candidate = nominal / n;
+        if candidate as f32 * px_per_frame >= LABEL_GAP {
+            step = Some(candidate);
+        }
+    }
+    if let Some(step) = step.filter(|step| *step < nominal) {
+        TickMode::Frames { grid, step }
+    } else {
+        let seconds = tick_step(px_per_sec) as u64;
+        TickMode::Seconds {
+            grid,
+            seconds,
+            major_frames: seconds * nominal as u64,
+        }
+    }
+}
+
+/// `mm:ss`, or `hh:mm:ss` past an hour, from a whole number of timecode seconds.
+pub fn ruler_timecode_seconds(total: u64) -> String {
+    let s = total % 60;
+    let m = (total / 60) % 60;
+    let h = total / 3600;
+    if h > 0 {
+        format!("{h:02}:{m:02}:{s:02}")
+    } else {
+        format!("{m:02}:{s:02}")
+    }
+}
+
+/// Label of a frame-grid tick: whole seconds read `mm:ss`, intermediate frame ticks read `NNf`
+/// where `NN` is the frame position inside the nominal second.
+pub fn frame_tick_label(frame: u64, grid: FrameGrid) -> String {
+    let within = frame % grid.nominal as u64;
+    if within == 0 {
+        ruler_timecode_seconds(frame / grid.nominal as u64)
+    } else {
+        format!("{within:02}f")
+    }
+}
+
+/// Ruler: adaptive ticks and labels, top-aligned to the canvas.
 pub fn draw_ruler(
     painter: &Painter,
     rect: Rect,
     view_start: f64,
     px_per_sec: f32,
+    fps: f64,
     playhead_x: Option<f32>,
 ) {
     painter.rect_filled(rect, CornerRadius::ZERO, RULER_BG);
     if rect.width() < 8.0 {
         return;
     }
-    let step = tick_step(px_per_sec);
-    let minor = step / 5.0;
-    let first = (view_start / minor).floor() * minor;
-    let mut t = first;
-    while t <= view_start + (rect.width() / px_per_sec) as f64 + step {
-        let x = rect.left() + ((t - view_start) as f32 * px_per_sec);
-        if x >= rect.left() - 1.0 && x <= rect.right() + 1.0 {
-            let major = (t / step).round() * step - t;
-            let is_major = major.abs() < minor * 0.01;
-            let h = if is_major { 8.0 } else { 4.0 };
-            let col = if is_major { TICK } else { FAINT };
-            painter.line_segment(
-                [
-                    egui::pos2(x, rect.bottom() - h),
-                    egui::pos2(x, rect.bottom()),
-                ],
-                Stroke::new(1.0, col),
-            );
-            if is_major {
-                painter.text(
-                    egui::pos2(x + 3.0, rect.top() + 2.0),
-                    Align2::LEFT_TOP,
-                    timecode(t.max(0.0)),
-                    FontId::proportional(10.0),
-                    DIM,
-                );
-            }
+    let view_end = view_start + (rect.width() / px_per_sec.max(1.0)) as f64;
+    let mode = ruler_mode(px_per_sec, fps);
+    match mode {
+        TickMode::Seconds {
+            grid,
+            major_frames,
+            ..
+        } => draw_second_ticks(
+            painter,
+            rect,
+            view_start,
+            view_end,
+            px_per_sec,
+            grid,
+            major_frames,
+        ),
+        TickMode::Frames { grid, step } => {
+            draw_frame_ticks(painter, rect, view_start, px_per_sec, grid, step)
         }
-        t += minor;
     }
     // Bottom hairline separating the ruler from the lanes.
     painter.line_segment(
@@ -280,11 +376,116 @@ pub fn draw_ruler(
     }
 }
 
+fn draw_second_ticks(
+    painter: &Painter,
+    rect: Rect,
+    view_start: f64,
+    view_end: f64,
+    px_per_sec: f32,
+    grid: FrameGrid,
+    major_frames: u64,
+) {
+    // Major labels sit on frame-aligned second boundaries. The five minor ticks between them are
+    // evenly spaced in real time and stay unlabelled, as before.
+    let first = ((view_start * grid.fps) / major_frames as f64).floor().max(0.0) as u64
+        * major_frames;
+    let mut frame = first;
+    loop {
+        let t = grid.frame_time(frame);
+        if t > view_end + grid.frame_time(major_frames) {
+            break;
+        }
+        let x = rect.left() + ((t - view_start) as f32 * px_per_sec);
+        if x >= rect.left() - 1.0 && x <= rect.right() + 1.0 {
+            draw_tick(painter, rect, x, TICK_SECOND_H, TICK);
+            draw_tick_label(
+                painter,
+                rect,
+                x,
+                &ruler_timecode_seconds(frame / grid.nominal as u64),
+            );
+        }
+        let next = grid.frame_time(frame + major_frames);
+        for k in 1..5 {
+            let mt = t + (next - t) * (k as f64 / 5.0);
+            let mx = rect.left() + ((mt - view_start) as f32 * px_per_sec);
+            if mx >= rect.left() - 1.0 && mx <= rect.right() + 1.0 {
+                draw_tick(painter, rect, mx, TICK_MINOR_H, FAINT);
+            }
+        }
+        frame += major_frames;
+    }
+}
+
+fn draw_frame_ticks(
+    painter: &Painter,
+    rect: Rect,
+    view_start: f64,
+    px_per_sec: f32,
+    grid: FrameGrid,
+    step: u32,
+) {
+    let px_per_frame = px_per_sec / grid.fps as f32;
+    let step_time = grid.frame_time(step as u64);
+    let view_end = view_start + (rect.width() / px_per_sec.max(1.0)) as f64;
+    let first = ((view_start * grid.fps) / step as f64).floor().max(0.0) as u64 * step as u64;
+    let mut frame = first;
+    while grid.frame_time(frame) <= view_end + step_time {
+        let t = grid.frame_time(frame);
+        let x = rect.left() + ((t - view_start) as f32 * px_per_sec);
+        if x >= rect.left() - 1.0 && x <= rect.right() + 1.0 {
+            let label = frame_tick_label(frame, grid);
+            let height = if frame.is_multiple_of(grid.nominal as u64) {
+                TICK_SECOND_H
+            } else {
+                TICK_FRAME_LABEL_H
+            };
+            draw_tick(painter, rect, x, height, TICK);
+            draw_tick_label(painter, rect, x, &label);
+            // Individual frame ticks between two labelled ticks; skipped when they would be
+            // closer than ~3 pt and read as a solid line.
+            if px_per_frame >= 3.0 {
+                for k in 1..step {
+                    let mx = x + k as f32 * px_per_frame;
+                    if mx > rect.right() {
+                        break;
+                    }
+                    draw_tick(painter, rect, mx, TICK_FRAME_H, FAINT);
+                }
+            }
+        }
+        frame += step as u64;
+    }
+}
+
+fn draw_tick(painter: &Painter, rect: Rect, x: f32, height: f32, color: Color32) {
+    painter.line_segment(
+        [
+            egui::pos2(x, rect.bottom() - height),
+            egui::pos2(x, rect.bottom()),
+        ],
+        Stroke::new(1.0, color),
+    );
+}
+
+fn draw_tick_label(painter: &Painter, rect: Rect, x: f32, label: &str) {
+    painter.with_clip_rect(rect).text(
+        egui::pos2(x + 3.0, rect.top() + 2.0),
+        Align2::LEFT_TOP,
+        label,
+        FontId::proportional(10.0),
+        DIM,
+    );
+}
+
 fn draw_playhead_handle(painter: &Painter, x: f32, ruler: Rect) {
+    // Keep the handle in the lower part of the ruler so it can never cover a tick label; the
+    // playhead line still starts at the ruler's bottom edge.
     let y = ruler.bottom() - 1.0;
+    let top = (ruler.bottom() - 8.0).max(ruler.top() + 1.0);
     let pts = vec![
-        egui::pos2(x - 5.0, ruler.top() + 1.0),
-        egui::pos2(x + 5.0, ruler.top() + 1.0),
+        egui::pos2(x - 5.0, top),
+        egui::pos2(x + 5.0, top),
         egui::pos2(x + 5.0, y - 2.0),
         egui::pos2(x, y),
         egui::pos2(x - 5.0, y - 2.0),
@@ -512,26 +713,17 @@ pub fn draw_track_icon(painter: &Painter, kind: TrackKind, center: Pos2, color: 
     }
 }
 
-/// Ruler tick spacing: the smallest step from a fixed ladder that keeps labels apart.
+/// Seconds between labelled ruler ticks: the smallest step from a fixed ladder that keeps labels
+/// apart. Sub-second steps are handled by [`ruler_mode`]'s frame scale instead, so every label here
+/// falls on a whole second.
 pub fn tick_step(px_per_sec: f32) -> f64 {
-    const LADDER: [f64; 10] = [0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0];
+    const LADDER: [f64; 9] = [1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0];
     for step in LADDER {
-        if step as f32 * px_per_sec >= 78.0 {
+        if step as f32 * px_per_sec >= LABEL_GAP {
             return step;
         }
     }
     *LADDER.last().expect("ladder")
-}
-
-pub fn timecode(seconds: f64) -> String {
-    let s = seconds.max(0.0);
-    let minutes = (s / 60.0).floor() as i64;
-    let rest = s - minutes as f64 * 60.0;
-    if minutes > 0 {
-        format!("{minutes}:{:05.2}", rest)
-    } else {
-        format!("{rest:05.2}")
-    }
 }
 
 /// Project-frame-aware clip timecode: `HH:MM:SS:FF`, never a decimal duration.
@@ -805,6 +997,107 @@ mod tests {
         let wide_tile = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(160.0, 90.0));
         let uv = uv_fill(16.0 / 9.0, wide_tile);
         assert!((uv.width() - 1.0).abs() < 1e-6 && (uv.height() - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn ruler_labels_are_mmss_and_never_decimal_seconds() {
+        assert_eq!(ruler_timecode_seconds(0), "00:00");
+        assert_eq!(ruler_timecode_seconds(2), "00:02");
+        assert_eq!(ruler_timecode_seconds(4), "00:04");
+        assert_eq!(ruler_timecode_seconds(59), "00:59");
+        assert_eq!(ruler_timecode_seconds(60), "01:00");
+        assert_eq!(ruler_timecode_seconds(3661), "01:01:01");
+        assert!(!ruler_timecode_seconds(2).contains('.'));
+    }
+
+    #[test]
+    fn normal_zoom_uses_second_ticks_and_high_zoom_uses_frames() {
+        match ruler_mode(58.0, 24.0) {
+            TickMode::Seconds {
+                grid,
+                seconds,
+                major_frames,
+            } => {
+                assert_eq!(seconds, 2);
+                assert_eq!(major_frames, 48);
+                assert_eq!(grid, FrameGrid::new(24.0));
+            }
+            other => panic!("expected second ticks, got {other:?}"),
+        }
+        match ruler_mode(120.0, 24.0) {
+            TickMode::Seconds { seconds, .. } => assert_eq!(seconds, 1),
+            other => panic!("expected second ticks, got {other:?}"),
+        }
+        match ruler_mode(240.0, 24.0) {
+            TickMode::Frames { grid, step } => {
+                assert_eq!(step, 8);
+                assert_eq!(grid.nominal, 24);
+            }
+            other => panic!("expected 8-frame ticks, got {other:?}"),
+        }
+        match ruler_mode(480.0, 24.0) {
+            TickMode::Frames { step, .. } => assert_eq!(step, 4),
+            other => panic!("expected 4-frame ticks, got {other:?}"),
+        }
+        // 29.97/59.94 use their nominal rates for the labels and the real rate for positions.
+        match ruler_mode(240.0, 29.97) {
+            TickMode::Frames { grid, step } => {
+                assert_eq!(step, 10);
+                assert_eq!(grid.nominal, 30);
+                assert_eq!(grid.fps, 29.97);
+            }
+            other => panic!("expected 10-frame ticks at 29.97, got {other:?}"),
+        }
+        match ruler_mode(480.0, 29.97) {
+            TickMode::Frames { step, .. } => assert_eq!(step, 5),
+            other => panic!("expected 5-frame ticks at 29.97, got {other:?}"),
+        }
+        match ruler_mode(480.0, 59.94) {
+            TickMode::Frames { grid, step } => {
+                assert_eq!(step, 10);
+                assert_eq!(grid.nominal, 60);
+                assert_eq!(grid.fps, 59.94);
+            }
+            other => panic!("expected 10-frame ticks at 59.94, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn frame_tick_labels_follow_the_project_frame_rate() {
+        let at_24 = FrameGrid::new(24.0);
+        assert_eq!(frame_tick_label(0, at_24), "00:00");
+        assert_eq!(frame_tick_label(8, at_24), "08f");
+        assert_eq!(frame_tick_label(16, at_24), "16f");
+        assert_eq!(frame_tick_label(24, at_24), "00:01");
+
+        let at_30 = FrameGrid::new(29.97);
+        assert_eq!(frame_tick_label(10, at_30), "10f");
+        assert_eq!(frame_tick_label(20, at_30), "20f");
+        assert_eq!(frame_tick_label(30, at_30), "00:01");
+
+        let at_60 = FrameGrid::new(59.94);
+        assert_eq!(frame_tick_label(10, at_60), "10f");
+        assert_eq!(frame_tick_label(50, at_60), "50f");
+        assert_eq!(frame_tick_label(60, at_60), "00:01");
+    }
+
+    #[test]
+    fn non_integer_rates_place_frames_on_real_boundaries() {
+        let at_29_97 = FrameGrid::new(29.97);
+        assert!((at_29_97.frame_time(30) - 30.0 / 29.97).abs() < 1e-12);
+        assert!((at_29_97.frame_time(30) - 1.001_001_001).abs() < 1e-6);
+        assert_eq!(
+            (at_29_97.frame_time(1234) * at_29_97.fps).round() as u64,
+            1234
+        );
+
+        let at_59_94 = FrameGrid::new(59.94);
+        assert!((at_59_94.frame_time(60) - 60.0 / 59.94).abs() < 1e-12);
+        assert!((at_59_94.frame_time(60) - 1.001_001_001).abs() < 1e-6);
+        assert_eq!(
+            (at_59_94.frame_time(987) * at_59_94.fps).round() as u64,
+            987
+        );
     }
 
     #[test]

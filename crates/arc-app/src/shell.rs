@@ -1,9 +1,10 @@
 //! Four-panel editor shell (media / preview / inspector / timeline).
 //!
-//! Layout only: the panels are empty containers with titles; content is designed later. The
-//! arrangement follows the approved reference: a left media column, a wide preview in the middle, an
-//! inspector on the right and a full-width timeline at the bottom, all as separated cards with
-//! draggable splitters.
+//! Layout only: the media, preview and inspector panels are containers with placeholder titles.
+//! The timeline is a working surface and deliberately has no card title, so its toolbar is the
+//! first row of the module. The arrangement follows the approved reference: a left media column, a
+//! wide preview in the middle, an inspector on the right and a full-width timeline at the bottom,
+//! all as separated cards with draggable splitters.
 
 use egui::{Color32, CornerRadius, CursorIcon, Rect, Sense, Stroke, Ui, Vec2};
 
@@ -135,7 +136,9 @@ impl Shell {
         card(ui, "MEDIA", panels.left);
         card(ui, "PREVIEW", panels.center);
         card(ui, "INSPECTOR", panels.right);
-        card_content(ui, "TIMELINE", panels.bottom, |ui, content| {
+        // The timeline is a working surface, not a titled placeholder: no card title, so the
+        // timeline toolbar is the first row of the module.
+        card_body(ui, panels.bottom, |ui, content| {
             self.timeline.ui(ui, content)
         });
 
@@ -182,12 +185,7 @@ impl Shell {
         }
     }
 }
-fn card_content(
-    ui: &mut Ui,
-    title: &str,
-    rect: Rect,
-    add: impl FnOnce(&mut Ui, Rect),
-) {
+fn card_body(ui: &mut Ui, rect: Rect, add: impl FnOnce(&mut Ui, Rect)) {
     ui.painter().rect(
         rect,
         CornerRadius::same(10),
@@ -195,17 +193,18 @@ fn card_content(
         Stroke::new(1.0, BORDER),
         egui::StrokeKind::Inside,
     );
-    let inner = rect.shrink2(egui::vec2(10.0, 8.0));
+    // No title row: the timeline toolbar starts directly under the top border, with only the
+    // 10 pt side padding and 8 pt bottom padding of the card.
+    let inner = Rect::from_min_max(
+        egui::pos2(rect.left() + 10.0, rect.top() + 1.0),
+        egui::pos2(rect.right() - 10.0, rect.bottom() - 8.0),
+    );
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(inner)
             .layout(egui::Layout::top_down(egui::Align::Min)),
     );
-    child.label(egui::RichText::new(title).size(13.0).strong().color(TEXT));
-    child.add_space(4.0);
-    let top = child.min_rect().bottom();
-    let content = Rect::from_min_max(egui::pos2(inner.left(), top), inner.max);
-    add(&mut child, content);
+    add(&mut child, inner);
 }
 fn card(ui: &mut Ui, title: &str, rect: Rect) {
     // The card fills its rect; the inner Ui only lays out the title block.

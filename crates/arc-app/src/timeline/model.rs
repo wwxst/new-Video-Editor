@@ -327,10 +327,19 @@ impl TimelineModel {
 /// Vertical gap between adjacent lanes.
 pub const LANE_GAP: f32 = 4.0;
 
-/// Frame rate of the sample project, used to format clip durations as `HH:MM:SS:FF`.
+/// Frame rate of the sample project, used to format clip durations as `HH:MM:SS:FF` and to place
+/// the frame-level ruler ticks.
 ///
 /// The sample video files are 24 fps, so a 4.5 s clip reads `00:00:04:12`, never `4.5s`.
 pub const PROJECT_FPS: f64 = 24.0;
+
+/// Snap a time to the nearest project frame boundary.
+///
+/// Uses the real rate, not a rounded one, so 29.97/59.94 stay frame-accurate.
+pub fn snap_to_frame(seconds: f64, fps: f64) -> f64 {
+    let fps = fps.max(1.0);
+    (seconds.max(0.0) * fps).round() / fps
+}
 
 #[cfg(test)]
 mod tests {
@@ -518,5 +527,14 @@ mod tests {
             .all(|t| t.kind() == Some(TrackKind::Audio)));
         // 24 + 24 + 24 + 76 + 76 + 76 + 50 + 50 = 400, plus 7 gaps of 4.
         assert_eq!(model.content_height(), 428.0);
+    }
+
+    #[test]
+    fn playhead_snapping_uses_the_real_project_rate() {
+        assert_eq!(snap_to_frame(1.0, 24.0), 1.0);
+        assert!((snap_to_frame(2.03, 24.0) - 49.0 / 24.0).abs() < 1e-12);
+        // 29.97 is not rounded to 30: frame 30 is at 30 / 29.97 s.
+        assert!((snap_to_frame(1.0, 29.97) - 30.0 / 29.97).abs() < 1e-12);
+        assert!((snap_to_frame(1.0, 59.94) - 60.0 / 59.94).abs() < 1e-12);
     }
 }

@@ -5,12 +5,14 @@
 //! Lane heights are fixed by content type and are not editable state.
 
 pub mod draw;
+pub mod interaction;
 pub mod media;
 pub mod model;
 
 use arc_core::time::FrameRate;
 use draw::{CANVAS_BG, CONTROLS_BG, DIM, TOOLBAR_BG, ToolbarIcon};
-use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, Ui, Vec2};
+use egui::{Align2, Color32, CornerRadius, FontId, Key, Rect, Sense, Stroke, Ui, Vec2};
+use interaction::{ClipGeometry, ClipHit, ClipRef, HitZone, Marquee, Selection};
 use media::MediaHub;
 use model::TimelineModel;
 use std::path::Path;
@@ -164,7 +166,12 @@ pub struct Timeline {
     pub zoom: f32,
     /// Scroll offsets in points.
     pub scroll: Vec2,
-    pub selected: Option<(usize, usize)>,
+    /// Multi-selection with a primary item. Phase 3A state only; no project mutation.
+    pub selection: Selection,
+    /// Pointer hover for this frame. Recomputed from geometry, never cached by screen position.
+    hover: Option<ClipHit>,
+    /// Active marquee, if the user is dragging on empty lane space.
+    marquee: Option<Marquee>,
     pub select_mode: bool,
     pub snap: bool,
     pub link: bool,
@@ -179,7 +186,8 @@ impl std::fmt::Debug for Timeline {
             .field("model", &self.model)
             .field("zoom", &self.zoom)
             .field("scroll", &self.scroll)
-            .field("selected", &self.selected)
+            .field("selection", &self.selection)
+            .field("hover", &self.hover)
             .field("media", &self.media)
             .finish()
     }
@@ -191,7 +199,9 @@ impl Clone for Timeline {
             model: self.model.clone(),
             zoom: self.zoom,
             scroll: self.scroll,
-            selected: self.selected,
+            selection: self.selection.clone(),
+            hover: self.hover,
+            marquee: self.marquee.clone(),
             select_mode: self.select_mode,
             snap: self.snap,
             link: self.link,
@@ -207,7 +217,9 @@ impl Default for Timeline {
             model: TimelineModel::mock(),
             zoom: 58.0,
             scroll: Vec2::ZERO,
-            selected: None,
+            selection: Selection::default(),
+            hover: None,
+            marquee: None,
             select_mode: true,
             snap: true,
             link: false,
@@ -298,9 +310,19 @@ impl Timeline {
         self.drag_playhead(ui, l.ruler, view_start, origin);
         let playhead_x = self.playhead_x(origin, view_start);
 
+        self.prune_selection();
+        self.clip_input(ui, &l, body, origin, view_start);
         self.ruler(ui, l.ruler, view_start, playhead_x);
         let rows = self.lanes(ui, &l, body, origin, view_start, playhead_x);
+        if let Some(m) = &self.marquee {
+            let content =
+                Rect::from_min_max(egui::pos2(l.controls.right(), body.top()), body.max);
+            draw::draw_marquee(&ui.painter().with_clip_rect(content), m.rect(content));
+        }
         self.control_panel(ui, &l, body, &rows);
+        // A lock/visibility toggle happens in the foreground layer. Drop any newly invalid
+        // selection immediately; the canvas redraws the white border next frame.
+        self.prune_selection();
         self.scrollbars(ui, l.canvas, body);
     }
 
@@ -521,6 +543,267 @@ impl Timeline {
         );
     }
 
+    /// Remove locked, hidden or disabled clips from the current selection. Runs before painting so
+    /// a track state toggle cannot leave a stale white border.
+    pub fn prune_selection(&mut self) {
+        let model = &self.model;
+        self.selection.retain(|r| {
+            model
+                .tracks
+                .get(r.track)
+                .and_then(|track| {
+                    track
+                        .clips
+                        .get(r.clip)
+                        .filter(|clip| clip.enabled && track.visible && !track.locked)
+                })
+                .is_some()
+        });
+    }
+
+    /// One clip geometry at its current screen position. `has_audio` is precomputed for video.
+    fn geometry_at(
+        &self,
+        lane: Rect,
+        track_index: usize,
+        clip_index: usize,
+        origin: f32,
+        view_start: f64,
+        has_audio: bool,
+    ) -> Option<ClipGeometry> {
+        let track = self.model.tracks.get(track_index)?;
+        let clip = track.clips.get(clip_index)?;
+        let kind = track.kind()?;
+        let clip_h = kind.clip_height();
+        let clip_y = lane.top() + (lane.height() - clip_h) * 0.5;
+        let x = origin + ((clip.start - view_start) as f32 * self.zoom);
+        let w = (clip.duration as f32 * self.zoom).max(3.0);
+        Some(interaction::clip_geometry(
+            kind,
+            Rect::from_min_size(egui::pos2(x, clip_y), Vec2::new(w, clip_h)),
+            has_audio,
+        ))
+    }
+
+    fn clip_has_audio(&mut self, track_index: usize, clip_index: usize) -> bool {
+        let Some(track) = self.model.tracks.get(track_index) else {
+            return false;
+        };
+        let Some(clip) = track.clips.get(clip_index) else {
+            return false;
+        };
+        if clip.kind != model::TrackKind::Video {
+            return false;
+        }
+        let Some(source) = clip.source.as_deref() else {
+            return false;
+        };
+        self.media
+            .as_mut()
+            .is_some_and(|media| media.has_audio(source))
+    }
+
+    fn clip_hit_at(
+        &mut self,
+        body: Rect,
+        content: Rect,
+        origin: f32,
+        view_start: f64,
+        pointer: egui::Pos2,
+    ) -> Option<ClipHit> {
+        let rows = self.lane_rows(body);
+        for (track_index, lane) in rows.iter().enumerate() {
+            let Some(track) = self.model.tracks.get(track_index) else {
+                continue;
+            };
+            let (visible, locked, clip_count) = (track.visible, track.locked, track.clips.len());
+            if !visible {
+                continue;
+            }
+            for clip_index in 0..clip_count {
+                if !self.model.tracks[track_index].clips[clip_index].enabled {
+                    continue;
+                }
+                let has_audio = self.clip_has_audio(track_index, clip_index);
+                let Some(g) = self.geometry_at(
+                    *lane,
+                    track_index,
+                    clip_index,
+                    origin,
+                    view_start,
+                    has_audio,
+                ) else {
+                    continue;
+                };
+                let r = ClipRef {
+                    track: track_index,
+                    clip: clip_index,
+                };
+                if let Some(hit) =
+                    interaction::hit_test_clip(r, &g, content, pointer, locked)
+                {
+                    return Some(hit);
+                }
+            }
+        }
+        None
+    }
+
+    fn marquee_hits(
+        &mut self,
+        body: Rect,
+        content: Rect,
+        origin: f32,
+        view_start: f64,
+        rect: Rect,
+    ) -> Vec<ClipRef> {
+        let rows = self.lane_rows(body);
+        let mut hits = Vec::new();
+        for (track_index, lane) in rows.iter().enumerate() {
+            let Some(track) = self.model.tracks.get(track_index) else {
+                continue;
+            };
+            let (visible, locked, clip_count) = (track.visible, track.locked, track.clips.len());
+            if !visible || locked {
+                continue;
+            }
+            for clip_index in 0..clip_count {
+                if !self.model.tracks[track_index].clips[clip_index].enabled {
+                    continue;
+                }
+                let has_audio = self.clip_has_audio(track_index, clip_index);
+                let Some(g) = self.geometry_at(
+                    *lane,
+                    track_index,
+                    clip_index,
+                    origin,
+                    view_start,
+                    has_audio,
+                ) else {
+                    continue;
+                };
+                if g.rect.intersect(content).intersects(rect) {
+                    hits.push(ClipRef {
+                        track: track_index,
+                        clip: clip_index,
+                    });
+                }
+            }
+        }
+        hits
+    }
+
+    /// Phase 3A pointer state: hover, click selection, Ctrl/Cmd multi-select and marquee. No drag,
+    /// trim, split, snap or project mutation is performed here.
+    fn clip_input(
+        &mut self,
+        ui: &mut Ui,
+        l: &Layout,
+        body: Rect,
+        origin: f32,
+        view_start: f64,
+    ) {
+        let content = Rect::from_min_max(egui::pos2(l.controls.right(), body.top()), body.max);
+        let response = ui.interact(
+            content,
+            ui.make_persistent_id("tl-clip-canvas"),
+            Sense::click_and_drag(),
+        );
+        let pointer = ui.ctx().pointer_hover_pos();
+        let modifiers = ui.input(|i| i.modifiers);
+        let additive = modifiers.shift || modifiers.ctrl || modifiers.command;
+
+        // Escape cancels a marquee and restores the pre-drag selection, or clears selection.
+        if ui.input(|i| i.key_pressed(Key::Escape)) {
+            if let Some(m) = self.marquee.take() {
+                self.selection = m.before;
+            } else {
+                self.selection.clear();
+            }
+            ui.ctx().request_repaint();
+        }
+
+        let hit = pointer.filter(|p| content.contains(*p)).and_then(|p| {
+            self.clip_hit_at(body, content, origin, view_start, p)
+        });
+        self.hover = if self.marquee.is_some() { None } else { hit };
+
+        if response.drag_started() {
+            let start = ui
+                .input(|i| i.pointer.press_origin())
+                .or_else(|| response.interact_pointer_pos());
+            if let Some(start) = start
+                && content.contains(start)
+                && self
+                    .clip_hit_at(body, content, origin, view_start, start)
+                    .is_none()
+            {
+                self.marquee = Some(Marquee::new(start, additive, self.selection.clone()));
+                ui.ctx().request_repaint();
+            }
+        }
+
+        if let Some(mut m) = self.marquee.take() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                m.current = pos;
+            }
+            let rect = m.rect(content);
+            let before = m.before.clone();
+            let marquee_additive = m.additive;
+            let hits = self.marquee_hits(body, content, origin, view_start, rect);
+            let mut next = before;
+            if !marquee_additive {
+                next.clear();
+            }
+            for hit in hits {
+                next.add(hit);
+            }
+            self.selection = next;
+            self.marquee = Some(m);
+        }
+
+        if response.drag_stopped() && self.marquee.is_some() {
+            self.marquee = None;
+            self.hover = pointer.filter(|p| content.contains(*p)).and_then(|p| {
+                self.clip_hit_at(body, content, origin, view_start, p)
+            });
+            ui.ctx().request_repaint();
+        }
+
+        if self.marquee.is_none()
+            && response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            match self.clip_hit_at(body, content, origin, view_start, pos) {
+                Some(hit) if !hit.locked => {
+                    if modifiers.ctrl || modifiers.command {
+                        self.selection.toggle(hit.r);
+                    } else if self.selection.contains(hit.r) && self.selection.len() > 1 {
+                        self.selection.select_only(hit.r);
+                    } else {
+                        self.selection.select_only(hit.r);
+                    }
+                }
+                Some(_) => {}
+                None => self.selection.clear(),
+            }
+            ui.ctx().request_repaint();
+        }
+
+        if let Some(hit) = self.hover {
+            if hit.locked {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
+            } else if matches!(hit.zone, HitZone::TrimLeft | HitZone::TrimRight) {
+                ui.ctx()
+                    .set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            } else {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+            }
+        } else if pointer.is_some_and(|p| content.contains(p)) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+        }
+    }
+
     /// Lane rows in screen space for the current vertical scroll. The canvas and the fixed column
     /// share this one list, so the rows on both sides cannot drift apart.
     fn lane_rows(&self, body: Rect) -> Vec<Rect> {
@@ -610,11 +893,15 @@ impl Timeline {
         let Timeline {
             model,
             media,
-            selected,
+            selection,
+            hover,
             zoom,
             ..
         } = self;
         let track = &model.tracks[index];
+        if !track.visible {
+            return;
+        }
         let kind = track.kind();
         let clip_h = kind.map(|k| k.clip_height()).unwrap_or(track.height() - 4.0);
         let clip_y = lane.top() + (lane.height() - clip_h) * 0.5;
@@ -626,7 +913,21 @@ impl Timeline {
             if visible.width() < 2.0 || visible.height() < 2.0 {
                 continue;
             }
-            let is_selected = *selected == Some((index, clip_index));
+            let r = ClipRef {
+                track: index,
+                clip: clip_index,
+            };
+            let has_audio = if clip.kind == model::TrackKind::Video {
+                clip.source
+                    .as_deref()
+                    .is_some_and(|source| media.as_mut().is_some_and(|m| m.has_audio(source)))
+            } else {
+                false
+            };
+            let g = interaction::clip_geometry(clip.kind, rect, has_audio);
+            let is_selected = selection.contains(r);
+            let hovered = hover.filter(|h| h.r == r);
+
             draw::draw_clip_body(&painter, visible, clip.kind);
             paint_clip_content(
                 media.as_mut(),
@@ -637,18 +938,110 @@ impl Timeline {
                 *zoom,
                 model.frame_rate,
             );
-            draw::draw_clip_outline(&painter, visible, is_selected);
+            if let Some(h) = hovered
+                && !h.locked
+                && clip.enabled
+            {
+                painter.rect_filled(
+                    visible,
+                    CornerRadius::same(4),
+                    Color32::from_white_alpha(4),
+                );
+            }
+
+            // Selection is white for every selected clip. Only the primary gets trim handles.
+            if is_selected {
+                draw::draw_clip_outline(&painter, rect, Color32::WHITE, 1.5);
+            } else if let Some(h) = hovered
+                && !h.locked
+                && clip.enabled
+            {
+                draw::draw_clip_outline(
+                    &painter,
+                    rect,
+                    Color32::from_rgba_unmultiplied(76, 141, 255, 210),
+                    1.5,
+                );
+            }
+
             let label_rect = clip_label_rect(clip.kind, rect, content);
             draw::draw_clip_label(&painter, label_rect, &clip_label(clip, model.frame_rate));
 
-            let hit = visible.intersect(content);
-            if hit.width() < 2.0 || hit.height() < 2.0 {
-                continue;
+            if clip.enabled {
+                if let Some(h) = hovered
+                    && matches!(h.zone, HitZone::TrimLeft | HitZone::TrimRight)
+                    && !h.locked
+                    && !selection.is_primary(r)
+                {
+                    let edge = if h.zone == HitZone::TrimLeft {
+                        Rect::from_min_max(
+                            egui::pos2(rect.left(), rect.top() + 4.0),
+                            egui::pos2(rect.left() + 2.0, rect.bottom() - 4.0),
+                        )
+                    } else {
+                        Rect::from_min_max(
+                            egui::pos2(rect.right() - 2.0, rect.top() + 4.0),
+                            egui::pos2(rect.right(), rect.bottom() - 4.0),
+                        )
+                    };
+                    draw::draw_trim_handle(&painter, edge.intersect(content));
+                }
+                if selection.is_primary(r) {
+                    if let Some(left) = interaction::primary_handle_rect(&g, content, true) {
+                        draw::draw_trim_handle(&painter, left);
+                    }
+                    if let Some(right) = interaction::primary_handle_rect(&g, content, false) {
+                        draw::draw_trim_handle(&painter, right);
+                    }
+                }
+                if let Some(h) = hovered
+                    && h.zone == HitZone::Audio
+                    && let Some(audio) = g.audio
+                {
+                    let audio = audio.intersect(content);
+                    if audio.width() > 1.0 && audio.height() > 1.0 {
+                        painter.rect_filled(
+                            audio,
+                            CornerRadius::ZERO,
+                            Color32::from_white_alpha(9),
+                        );
+                    }
+                }
             }
-            let id = ui.make_persistent_id(("tl-clip", index, clip_index));
-            let response = ui.interact(hit, id, Sense::click());
-            if response.clicked() {
-                *selected = Some((index, clip_index));
+
+            if !clip.enabled {
+                painter.rect_filled(
+                    visible,
+                    CornerRadius::same(4),
+                    Color32::from_black_alpha(150),
+                );
+            } else if track.locked {
+                painter.rect_filled(
+                    visible,
+                    CornerRadius::same(4),
+                    Color32::from_black_alpha(30),
+                );
+                draw::draw_lock_badge(
+                    &painter,
+                    egui::pos2(g.header.right() - 9.0, g.header.center().y),
+                    Color32::from_rgb(0xc9, 0xcd, 0xd3),
+                );
+            } else if track.muted
+                && let Some(audio) = g.audio.or(g.wave)
+            {
+                let audio = audio.intersect(content);
+                if audio.width() > 1.0 && audio.height() > 1.0 {
+                    painter.rect_filled(
+                        audio,
+                        CornerRadius::ZERO,
+                        Color32::from_black_alpha(115),
+                    );
+                    draw::draw_mute_badge(
+                        &painter,
+                        egui::pos2(audio.right() - 9.0, audio.center().y),
+                        Color32::from_rgb(0xb8, 0xbe, 0xc6),
+                    );
+                }
             }
         }
     }
@@ -1030,6 +1423,17 @@ mod tests {
 
     /// One frame of the timeline UI with the given input events.
     fn frame(ctx: &egui::Context, t: &mut Timeline, screen: Rect, events: Vec<egui::Event>) {
+        frame_mod(ctx, t, screen, events, egui::Modifiers::NONE);
+    }
+
+    fn frame_mod(
+        ctx: &egui::Context,
+        t: &mut Timeline,
+        screen: Rect,
+        mut events: Vec<egui::Event>,
+        modifiers: egui::Modifiers,
+    ) {
+        events.insert(0, egui::Event::ModifiersChanged(modifiers));
         let input = egui::RawInput {
             screen_rect: Some(screen),
             events,
@@ -1332,8 +1736,24 @@ mod tests {
 
     /// One click at `pos` (press and release in separate frames, like a real pointer).
     fn click(ctx: &egui::Context, t: &mut Timeline, screen: Rect, pos: egui::Pos2) {
-        frame(ctx, t, screen, vec![egui::Event::PointerMoved(pos)]);
-        frame(
+        click_mod(ctx, t, screen, pos, egui::Modifiers::NONE);
+    }
+
+    fn click_mod(
+        ctx: &egui::Context,
+        t: &mut Timeline,
+        screen: Rect,
+        pos: egui::Pos2,
+        modifiers: egui::Modifiers,
+    ) {
+        frame_mod(
+            ctx,
+            t,
+            screen,
+            vec![egui::Event::PointerMoved(pos)],
+            modifiers,
+        );
+        frame_mod(
             ctx,
             t,
             screen,
@@ -1341,10 +1761,11 @@ mod tests {
                 pos,
                 button: egui::PointerButton::Primary,
                 pressed: true,
-                modifiers: egui::Modifiers::NONE,
+                modifiers,
             }],
+            modifiers,
         );
-        frame(
+        frame_mod(
             ctx,
             t,
             screen,
@@ -1352,9 +1773,69 @@ mod tests {
                 pos,
                 button: egui::PointerButton::Primary,
                 pressed: false,
-                modifiers: egui::Modifiers::NONE,
+                modifiers,
             }],
+            modifiers,
         );
+    }
+
+    fn drag(
+        ctx: &egui::Context,
+        t: &mut Timeline,
+        screen: Rect,
+        from: egui::Pos2,
+        to: egui::Pos2,
+        modifiers: egui::Modifiers,
+    ) {
+        frame_mod(
+            ctx,
+            t,
+            screen,
+            vec![egui::Event::PointerMoved(from)],
+            modifiers,
+        );
+        frame_mod(
+            ctx,
+            t,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: from,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers,
+            }],
+            modifiers,
+        );
+        frame_mod(
+            ctx,
+            t,
+            screen,
+            vec![egui::Event::PointerMoved(to)],
+            modifiers,
+        );
+        frame_mod(
+            ctx,
+            t,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: to,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers,
+            }],
+            modifiers,
+        );
+    }
+
+    fn clip_pos(t: &Timeline, screen: Rect, track: usize, clip: usize, dx: f32) -> egui::Pos2 {
+        let l = layout(screen);
+        let body = t.body_rect(l.underlay);
+        let lane = t.lane_rows(body)[track];
+        let c = &t.model.tracks[track].clips[clip];
+        egui::pos2(
+            l.canvas.left() + ((c.start - t.view_start()) as f32 * t.zoom) + dx,
+            lane.center().y,
+        )
     }
 
     /// The fixed column is a foreground layer: a clip scrolled underneath it is not clickable there,
@@ -1376,14 +1857,197 @@ mod tests {
         let row_y = body.top() + 10.0;
         // A click over the column (x = 100) lands on the clip that is scrolled underneath.
         click(&ctx, &mut t, screen, egui::pos2(100.0, row_y));
-        assert_eq!(
-            t.selected, None,
+        assert!(
+            t.selection.is_empty(),
             "a click on the fixed column must not select a clip beneath it"
         );
 
         // Right of the boundary the visible part of the same clip is reachable.
         click(&ctx, &mut t, screen, egui::pos2(l.canvas.left() + 20.0, row_y));
-        assert_eq!(t.selected, Some((0, 0)));
+        assert_eq!(t.selection.primary(), Some(ClipRef { track: 0, clip: 0 }));
+    }
+
+    #[test]
+    fn ctrl_click_adds_and_plain_click_collapses_the_selection() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline::default();
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        frame(&ctx, &mut t, screen, Vec::new());
+
+        let a = clip_pos(&t, screen, 0, 0, 20.0);
+        let b = clip_pos(&t, screen, 0, 1, 20.0);
+        click(&ctx, &mut t, screen, a);
+        assert_eq!(t.selection.primary(), Some(ClipRef { track: 0, clip: 0 }));
+
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        click_mod(&ctx, &mut t, screen, b, ctrl);
+        assert_eq!(t.selection.len(), 2);
+        assert_eq!(t.selection.primary(), Some(ClipRef { track: 0, clip: 1 }));
+
+        // A plain click on an already-selected clip collapses the multi-selection.
+        click(&ctx, &mut t, screen, a);
+        assert_eq!(t.selection.len(), 1);
+        assert_eq!(t.selection.primary(), Some(ClipRef { track: 0, clip: 0 }));
+
+        // Ctrl-click removes the primary and falls back to the remaining item.
+        click_mod(&ctx, &mut t, screen, a, ctrl);
+        assert!(t.selection.is_empty());
+    }
+
+    #[test]
+    fn locked_hidden_and_disabled_clips_are_not_selectable() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline::default();
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        frame(&ctx, &mut t, screen, Vec::new());
+        let p = clip_pos(&t, screen, 0, 0, 20.0);
+
+        // Locked track: the clip is visible but cannot be selected.
+        t.model.tracks[0].locked = true;
+        click(&ctx, &mut t, screen, p);
+        assert!(t.selection.is_empty());
+        let hover = {
+            frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(p)]);
+            t.hover
+        };
+        assert!(hover.is_some_and(|h| h.locked), "locked hover must be explicit");
+        t.model.tracks[0].locked = false;
+
+        // Hidden track: no selection and no hover.
+        t.model.tracks[0].visible = false;
+        click(&ctx, &mut t, screen, p);
+        assert!(t.selection.is_empty());
+        frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(p)]);
+        assert!(t.hover.is_none(), "hidden clips must not be hit");
+        t.model.tracks[0].visible = true;
+
+        // Disabled clip: still painted, but not selectable or hoverable.
+        t.model.tracks[0].clips[0] =
+            t.model.tracks[0].clips[0].clone().with_enabled(false);
+        click(&ctx, &mut t, screen, p);
+        assert!(t.selection.is_empty());
+        frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(p)]);
+        assert!(t.hover.is_none(), "disabled clips must not be hit");
+    }
+
+    #[test]
+    fn marquee_selects_a_region_and_escape_clears() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline::default();
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        t.zoom = 12.0;
+        t.scroll.x = 0.0;
+        frame(&ctx, &mut t, screen, Vec::new());
+
+        let l = layout(screen);
+        let body = t.body_rect(l.underlay);
+        let row_y = body.top() + 8.0;
+        // Start after the text track's last clip (20 s * 12 px/s = 240 px), drag left across it.
+        let from = egui::pos2(l.canvas.left() + 380.0, row_y);
+        let to = egui::pos2(l.canvas.left() + 10.0, row_y + 8.0);
+        drag(&ctx, &mut t, screen, from, to, egui::Modifiers::NONE);
+        assert_eq!(t.selection.len(), 6, "marquee must select all text clips");
+        assert_eq!(t.selection.primary(), Some(ClipRef { track: 0, clip: 5 }));
+
+        frame(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(t.selection.is_empty(), "Escape clears the selection");
+    }
+
+    #[test]
+    fn additive_marquee_keeps_the_existing_selection() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline::default();
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        t.zoom = 12.0;
+        t.scroll.x = 0.0;
+        t.selection.select_only(ClipRef { track: 1, clip: 0 });
+        frame(&ctx, &mut t, screen, Vec::new());
+
+        let l = layout(screen);
+        let body = t.body_rect(l.underlay);
+        let row_y = body.top() + 8.0;
+        let additive = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        drag(
+            &ctx,
+            &mut t,
+            screen,
+            egui::pos2(l.canvas.left() + 380.0, row_y),
+            egui::pos2(l.canvas.left() + 10.0, row_y + 8.0),
+            additive,
+        );
+        assert!(
+            t.selection.contains(ClipRef { track: 1, clip: 0 }),
+            "Ctrl marquee must keep the prior selection"
+        );
+        assert_eq!(t.selection.len(), 7, "one effect clip plus six text clips");
+    }
+
+    #[test]
+    fn hover_distinguishes_body_and_real_edges_but_not_viewport_edges() {
+        let ctx = egui::Context::default();
+        let mut t = Timeline::default();
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        frame(&ctx, &mut t, screen, Vec::new());
+        let l = layout(screen);
+        let body = t.body_rect(l.underlay);
+        let row = t.lane_rows(body)[0];
+        let left = clip_pos(&t, screen, 0, 0, 1.0);
+
+        frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(left)]);
+        assert_eq!(t.hover.map(|h| h.zone), Some(HitZone::TrimLeft));
+
+        let body_pos = egui::pos2(left.x + 20.0, row.center().y);
+        frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(body_pos)]);
+        assert_eq!(t.hover.map(|h| h.zone), Some(HitZone::Body));
+
+        // Scroll so the clip's real left edge is off-screen: the viewport edge is body, not trim.
+        t.scroll.x = 120.0;
+        frame(&ctx, &mut t, screen, Vec::new());
+        let viewport_left = egui::pos2(l.canvas.left() + 1.0, row.center().y);
+        frame(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerMoved(viewport_left)],
+        );
+        assert_eq!(t.hover.map(|h| h.zone), Some(HitZone::Body));
+    }
+
+    #[test]
+    fn selection_is_pruned_when_a_track_becomes_locked_or_hidden() {
+        let mut t = Timeline::default();
+        t.selection.select_only(ClipRef { track: 0, clip: 0 });
+        t.model.tracks[0].locked = true;
+        t.prune_selection();
+        assert!(t.selection.is_empty());
+
+        t.selection.select_only(ClipRef { track: 1, clip: 0 });
+        t.model.tracks[1].visible = false;
+        t.prune_selection();
+        assert!(t.selection.is_empty());
+
+        // Muting only changes the audio rendering; it must not remove the clip from selection.
+        t.selection.select_only(ClipRef { track: 4, clip: 0 });
+        t.model.tracks[4].muted = true;
+        t.prune_selection();
+        assert!(t.selection.contains(ClipRef { track: 4, clip: 0 }));
     }
 
     /// The playhead as painted in one frame: the handle centre and the vertical line, with their

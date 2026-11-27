@@ -89,6 +89,9 @@ pub struct Clip {
     pub duration: f64,
     /// Real source file for video, image and audio clips (the mock project uses `assets/demo`).
     pub source: Option<std::path::PathBuf>,
+    /// Clip-level disabled state, distinct from a hidden track. A disabled clip stays visible but
+    /// is dimmed and cannot be selected or edited.
+    pub enabled: bool,
 }
 
 impl Clip {
@@ -99,12 +102,21 @@ impl Clip {
             start,
             duration,
             source: None,
+            enabled: true,
         }
     }
 
     /// Attach the real media file this clip visualises.
     pub fn with_source(mut self, path: impl Into<std::path::PathBuf>) -> Clip {
         self.source = Some(path.into());
+        self
+    }
+
+    /// Disable this clip without hiding its track. Used by the 3A visual tests and by the future
+    /// inspector toggle; it never changes the clip's timing.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_enabled(mut self, enabled: bool) -> Clip {
+        self.enabled = enabled;
         self
     }
 

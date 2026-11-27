@@ -86,15 +86,85 @@ pub fn draw_clip_body(painter: &Painter, rect: Rect, kind: TrackKind) {
 }
 
 /// Selection outline, painted after clip content so thumbnails and images cannot cover it.
-pub fn draw_clip_outline(painter: &Painter, rect: Rect, selected: bool) {
-    if selected {
-        painter.rect_stroke(
-            rect,
-            CornerRadius::same(4),
-            Stroke::new(1.5, ACCENT),
-            StrokeKind::Inside,
-        );
+pub fn draw_clip_outline(painter: &Painter, rect: Rect, color: Color32, width: f32) {
+    if width <= 0.0 || rect.width() < 1.0 || rect.height() < 1.0 {
+        return;
     }
+    painter.rect_stroke(
+        rect,
+        CornerRadius::same(4),
+        Stroke::new(width, color),
+        StrokeKind::Inside,
+    );
+}
+
+/// Phase 3A primary-selection trim handle: a thin vertical white bar at the real clip edge.
+pub fn draw_trim_handle(painter: &Painter, rect: Rect) {
+    if rect.width() > 0.0 && rect.height() > 0.0 {
+        painter.rect_filled(rect, CornerRadius::same(1), Color32::WHITE);
+    }
+}
+
+/// Small lock badge for a locked clip. Vector, so it scales with DPI.
+pub fn draw_lock_badge(painter: &Painter, center: Pos2, color: Color32) {
+    let body = Rect::from_center_size(center + egui::vec2(0.0, 1.5), egui::vec2(7.0, 5.0));
+    painter.rect_stroke(
+        body,
+        CornerRadius::same(1),
+        Stroke::new(1.0, color),
+        StrokeKind::Inside,
+    );
+    painter.add(egui::Shape::line(
+        vec![
+            egui::pos2(center.x - 2.5, center.y + 0.5),
+            egui::pos2(center.x - 2.5, center.y - 2.5),
+            egui::pos2(center.x, center.y - 4.0),
+            egui::pos2(center.x + 2.5, center.y - 2.5),
+            egui::pos2(center.x + 2.5, center.y + 0.5),
+        ],
+        Stroke::new(1.0, color),
+    ));
+}
+
+/// Small mute badge for the audio region of a muted clip.
+pub fn draw_mute_badge(painter: &Painter, center: Pos2, color: Color32) {
+    painter.add(egui::Shape::line(
+        vec![
+            egui::pos2(center.x - 4.0, center.y - 1.5),
+            egui::pos2(center.x - 1.5, center.y - 1.5),
+            egui::pos2(center.x + 1.0, center.y - 3.5),
+            egui::pos2(center.x + 1.0, center.y + 3.5),
+            egui::pos2(center.x - 1.5, center.y + 1.5),
+            egui::pos2(center.x - 4.0, center.y + 1.5),
+            egui::pos2(center.x - 4.0, center.y - 1.5),
+        ],
+        Stroke::new(1.0, color),
+    ));
+    painter.line_segment(
+        [
+            egui::pos2(center.x + 2.0, center.y - 2.0),
+            egui::pos2(center.x + 5.0, center.y + 2.0),
+        ],
+        Stroke::new(1.0, color),
+    );
+}
+
+/// Marquee overlay, already clipped by the caller to the content area.
+pub fn draw_marquee(painter: &Painter, rect: Rect) {
+    if rect.width() < 1.0 || rect.height() < 1.0 {
+        return;
+    }
+    painter.rect_filled(
+        rect,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(255, 255, 255, 18),
+    );
+    painter.rect_stroke(
+        rect,
+        CornerRadius::ZERO,
+        Stroke::new(1.0, Color32::WHITE),
+        StrokeKind::Inside,
+    );
 }
 
 /// Plain clip label: no background box, left-aligned, vertically centred and elided to fit.

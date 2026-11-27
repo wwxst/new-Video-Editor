@@ -21,3 +21,7 @@ exports/
 
 # Local targeted-test logs (full output kept on the developer machine)
 reports/vfr-*.log
+
+# Local Phase 3A build/test logs
+reports/p3a-*.log
+reports/p3a-*.txt

@@ -1,6 +1,7 @@
 //! Timeline mock model: track types, clips and the rules that derive a track's type from its
 //! content. No engine types are involved; real integration replaces this module's data source.
 
+use arc_core::time::{FrameRate, Round, Time};
 use egui::Color32;
 
 /// The six content types a track can hold.
@@ -200,6 +201,8 @@ pub struct TimelineModel {
     pub tracks: Vec<Track>,
     pub playhead: f64,
     pub duration: f64,
+    /// Exact sequence rate from the project configuration.
+    pub frame_rate: FrameRate,
 }
 
 impl TimelineModel {
@@ -297,6 +300,7 @@ impl TimelineModel {
             tracks,
             playhead: 2.0,
             duration: 20.0,
+            frame_rate: FrameRate::Fps24,
         }
     }
 
@@ -306,7 +310,16 @@ impl TimelineModel {
             tracks: Vec::new(),
             playhead: 0.0,
             duration: 0.0,
+            frame_rate: FrameRate::Fps24,
         }
+    }
+
+    /// Apply the real sequence rate from a loaded project. Clip times stay in seconds; every
+    /// frame-index decision (ruler, playhead snapping, max zoom) reads this field.
+    pub fn with_frame_rate(mut self, frame_rate: FrameRate) -> TimelineModel {
+        self.frame_rate = frame_rate;
+        self.playhead = snap_to_frame(self.playhead, frame_rate);
+        self
     }
 
     pub fn is_empty(&self) -> bool {
@@ -327,18 +340,20 @@ impl TimelineModel {
 /// Vertical gap between adjacent lanes.
 pub const LANE_GAP: f32 = 4.0;
 
-/// Frame rate of the sample project, used to format clip durations as `HH:MM:SS:FF` and to place
-/// the frame-level ruler ticks.
-///
-/// The sample video files are 24 fps, so a 4.5 s clip reads `00:00:04:12`, never `4.5s`.
-pub const PROJECT_FPS: f64 = 24.0;
+/// Highest horizontal zoom: pixels per project frame. The zoom ceiling is
+/// `frame_rate * MAX_FRAME_PX`, so 24 fps reaches 4800 px/s, 30 fps 6000 px/s and 59.94 fps
+/// 11988 px/s instead of a fixed magic number.
+pub const MAX_FRAME_PX: f32 = 200.0;
 
-/// Snap a time to the nearest project frame boundary.
+/// Snap a time to the nearest project frame boundary using the exact rational rate.
 ///
-/// Uses the real rate, not a rounded one, so 29.97/59.94 stay frame-accurate.
-pub fn snap_to_frame(seconds: f64, fps: f64) -> f64 {
-    let fps = fps.max(1.0);
-    (seconds.max(0.0) * fps).round() / fps
+/// The frame index is computed first, then converted back through [`FrameRate::time_of_frame`];
+/// 29.97/59.94 are never rounded to 30/60.
+pub fn snap_to_frame(seconds: f64, frame_rate: FrameRate) -> f64 {
+    let micros = (seconds.max(0.0) * 1_000_000.0).round() as i64;
+    let time = Time::new(micros, 1_000_000).unwrap_or(Time::ZERO);
+    let frame = frame_rate.frame_at(time, Round::Nearest).unwrap_or(0);
+    frame_rate.time_of_frame(frame).to_f64_lossy()
 }
 
 #[cfg(test)]
@@ -531,10 +546,18 @@ mod tests {
 
     #[test]
     fn playhead_snapping_uses_the_real_project_rate() {
-        assert_eq!(snap_to_frame(1.0, 24.0), 1.0);
-        assert!((snap_to_frame(2.03, 24.0) - 49.0 / 24.0).abs() < 1e-12);
-        // 29.97 is not rounded to 30: frame 30 is at 30 / 29.97 s.
-        assert!((snap_to_frame(1.0, 29.97) - 30.0 / 29.97).abs() < 1e-12);
-        assert!((snap_to_frame(1.0, 59.94) - 60.0 / 59.94).abs() < 1e-12);
+        assert_eq!(snap_to_frame(1.0, FrameRate::Fps24), 1.0);
+        assert!((snap_to_frame(2.03, FrameRate::Fps24) - 49.0 / 24.0).abs() < 1e-9);
+        // 29.97 is not rounded to 30: frame 30 is exactly at 30 / (30000/1001) s.
+        assert!(
+            (snap_to_frame(1.0, FrameRate::Fps29_97) - 30.0 * 1001.0 / 30_000.0).abs() < 1e-9
+        );
+        assert!(
+            (snap_to_frame(1.0, FrameRate::Fps59_94) - 60.0 * 1001.0 / 60_000.0).abs() < 1e-9
+        );
+        assert_eq!(
+            snap_to_frame(0.5, FrameRate::Fps30),
+            FrameRate::Fps30.time_of_frame(15).to_f64_lossy()
+        );
     }
 }

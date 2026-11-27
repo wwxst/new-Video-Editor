@@ -5,7 +5,7 @@
 //! blocks on a file. This module owns the requests, the bounded LRU caches and the texture uploads:
 //! the painting code only ever asks "is this frame decoded yet?" and draws what is in the cache.
 
-use arc_core::time::Time;
+use arc_core::time::{FrameRate, Time};
 use arc_media::{AudioDecoder, VideoDecoder};
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -19,8 +19,8 @@ const THUMB_W: u32 = 320;
 const THUMB_H: u32 = 180;
 /// Longest side of a decoded still image.
 const STILL_MAX: u32 = 640;
-/// Waveform base resolution: envelope samples per source second.
-const PEAKS_PER_SECOND: f64 = 200.0;
+/// Waveform resolutions, from fine to coarse, in envelope samples per source second.
+const WAVE_LEVELS: [f64; 3] = [4_000.0, 1_000.0, 200.0];
 /// Never decode more than this much of one audio file (seconds).
 const MAX_AUDIO_SECONDS: f64 = 120.0;
 /// Decoders kept open between thumbnail requests.
@@ -28,9 +28,11 @@ const DECODER_CAPACITY: usize = 3;
 /// Textures kept for video thumbnails (bounded GPU memory).
 const THUMB_CAPACITY: usize = 128;
 const STILL_CAPACITY: usize = 8;
-const WAVE_CAPACITY: usize = 12;
+const WAVE_CAPACITY: usize = 6;
 /// New decode requests accepted per UI frame, so a zoom-out burst cannot flood the worker.
 const MAX_REQUESTS_PER_FRAME: u32 = 6;
+/// Total in-flight requests; keeps the worker queue bounded when decoding cannot keep up.
+const MAX_PENDING: usize = 24;
 
 /// One min/max envelope sample of decoded audio.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,45 +41,22 @@ pub struct Peak {
     pub max: f32,
 }
 
-/// Waveform envelope of one audio file, at a fixed base resolution.
-///
-/// The timeline aggregates these samples into one min/max pair per painted column, so the drawn
-/// density follows the zoom without decoding anything again.
+/// One resolution of a waveform envelope.
 #[derive(Debug, Clone)]
-pub struct Waveform {
-    /// Duration covered by the envelope, in seconds.
-    pub duration: f64,
+pub struct WaveLevel {
     /// Envelope samples per second.
     pub peaks_per_second: f64,
     peaks: Vec<Peak>,
 }
 
-impl Waveform {
-    pub fn new(duration: f64, peaks_per_second: f64, peaks: Vec<Peak>) -> Waveform {
-        Waveform {
-            duration,
-            peaks_per_second,
-            peaks,
-        }
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn peaks(&self) -> &[Peak] {
-        &self.peaks
-    }
-
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn is_empty(&self) -> bool {
-        self.peaks.is_empty()
-    }
-
-    /// Min/max of the source-time range `[t0, t1)`, clamped to the file; `None` outside it.
-    pub fn envelope(&self, t0: f64, t1: f64) -> Option<Peak> {
+impl WaveLevel {
+    /// Min/max of the source-time range `[t0, t1)`, clamped to the level; `None` outside it.
+    fn envelope(&self, t0: f64, t1: f64, duration: f64) -> Option<Peak> {
         if self.peaks.is_empty() {
             return None;
         }
         let pps = self.peaks_per_second.max(1.0);
-        if t1 <= 0.0 || t0 >= self.duration {
+        if t1 <= 0.0 || t0 >= duration {
             return None;
         }
         let first = (t0.max(0.0) * pps).floor() as usize;
@@ -95,6 +74,97 @@ impl Waveform {
         }
         Some(Peak { min, max })
     }
+
+    fn bytes(&self) -> usize {
+        self.peaks.len() * std::mem::size_of::<Peak>()
+    }
+}
+
+/// Multi-resolution waveform envelope of one audio file.
+///
+/// Audio is decoded once at 8 kHz and reduced to 4000 / 1000 / 200 peaks per second in the same
+/// pass. The painter picks the finest level whose resolution is at least the current pixel density,
+/// so zooming in reveals real detail without re-decoding the file or inventing samples.
+#[derive(Debug, Clone)]
+pub struct Waveform {
+    /// Duration covered by the envelope, in seconds.
+    pub duration: f64,
+    /// Fine-to-coarse levels.
+    levels: Vec<WaveLevel>,
+}
+
+impl Waveform {
+    /// Single-level waveform (tests and synthetic sources).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn new(duration: f64, peaks_per_second: f64, peaks: Vec<Peak>) -> Waveform {
+        Waveform {
+            duration,
+            levels: vec![WaveLevel {
+                peaks_per_second,
+                peaks,
+            }],
+        }
+    }
+
+    pub fn from_levels(duration: f64, levels: Vec<WaveLevel>) -> Waveform {
+        Waveform { duration, levels }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn peaks(&self) -> &[Peak] {
+        self.levels
+            .last()
+            .map(|level| level.peaks.as_slice())
+            .unwrap_or(&[])
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_empty(&self) -> bool {
+        self.levels.iter().all(|level| level.peaks.is_empty())
+    }
+
+    /// Levels, fine to coarse.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn levels(&self) -> &[WaveLevel] {
+        &self.levels
+    }
+
+    /// Min/max of the source-time range at the finest available resolution.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn envelope(&self, t0: f64, t1: f64) -> Option<Peak> {
+        self.levels
+            .first()
+            .and_then(|level| level.envelope(t0, t1, self.duration))
+    }
+
+    /// Min/max of the source-time range using the finest level that is at least as dense as the
+    /// painter's pixel density. Falls back to the finest level at extreme zoom.
+    pub fn envelope_at(&self, t0: f64, t1: f64, px_per_sec: f64) -> Option<Peak> {
+        let level = self
+            .levels
+            .iter()
+            .rev()
+            .find(|level| level.peaks_per_second >= px_per_sec)
+            .unwrap_or_else(|| self.levels.first().expect("at least one level"));
+        level.envelope(t0, t1, self.duration)
+    }
+
+    /// Resolution selected for a pixel density, for tests and diagnostics.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn level_for_px(&self, px_per_sec: f64) -> f64 {
+        self.levels
+            .iter()
+            .rev()
+            .find(|level| level.peaks_per_second >= px_per_sec)
+            .or_else(|| self.levels.first())
+            .map(|level| level.peaks_per_second)
+            .unwrap_or(0.0)
+    }
+
+    /// Bytes held by the peak buffers (all levels).
+    pub fn bytes(&self) -> usize {
+        self.levels.iter().map(WaveLevel::bytes).sum()
+    }
 }
 
 /// Decoded still image plus its aspect ratio, ready to paint.
@@ -105,12 +175,36 @@ pub struct StillVisual {
     pub aspect: f32,
 }
 
-/// Decoded video thumbnail plus its aspect ratio, ready to paint.
+/// Decoded video thumbnail plus its aspect ratio and actual presentation time, ready to paint.
 #[derive(Clone)]
 pub struct ThumbVisual {
     pub texture: TextureHandle,
     /// Width / height of the decoded frame.
     pub aspect: f32,
+    /// Presentation timestamp of the delivered frame, in microseconds from the stream start.
+    #[allow(dead_code)]
+    pub pts_us: u64,
+}
+
+/// Metadata needed to sample a video without decoding frames on the UI thread.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VideoMeta {
+    /// Source stream rate (average rate for VFR); `None` when the container omits it.
+    pub rate: Option<FrameRate>,
+    pub vfr: bool,
+    pub duration: f64,
+}
+
+/// Bounded cache usage, reported for tests and performance records.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheUsage {
+    pub thumb_textures: usize,
+    pub still_textures: usize,
+    pub thumb_bytes: usize,
+    pub still_bytes: usize,
+    pub wave_files: usize,
+    pub wave_bytes: usize,
 }
 
 /// Counters used by the tests and the timeline report.
@@ -131,8 +225,8 @@ pub struct MediaStats {
 /// Cache key of a decoded asset.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Key {
-    /// One video frame, at a millisecond-quantized source time.
-    Frame { path: PathBuf, ms: u64 },
+    /// One video frame, at a microsecond-quantized source time.
+    Frame { path: PathBuf, us: u64 },
     /// One still image.
     Still { path: PathBuf },
     /// The waveform envelope of one audio file.
@@ -151,6 +245,7 @@ enum Event {
         width: u32,
         height: u32,
         rgba: Vec<u8>,
+        pts_us: u64,
     },
     Peaks {
         key: Key,
@@ -182,6 +277,11 @@ impl<K: Eq + Hash + Clone, V> Lru<K, V> {
 
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.map.iter()
     }
 
     pub fn get(&mut self, key: &K) -> Option<&V> {
@@ -232,6 +332,8 @@ pub struct MediaHub {
     waves: Lru<Key, Arc<Waveform>>,
     /// Whether a source has an audio stream; asked once per path and cached.
     audio_presence: HashMap<PathBuf, bool>,
+    /// Source metadata; `None` marks an unreadable file.
+    video_meta: HashMap<PathBuf, Option<VideoMeta>>,
     failures: HashMap<PathBuf, String>,
     pending: HashSet<Key>,
     budget: u32,
@@ -270,6 +372,7 @@ impl MediaHub {
             stills: Lru::new(STILL_CAPACITY),
             waves: Lru::new(WAVE_CAPACITY),
             audio_presence: HashMap::new(),
+            video_meta: HashMap::new(),
             failures: HashMap::new(),
             pending: HashSet::new(),
             budget: MAX_REQUESTS_PER_FRAME,
@@ -300,7 +403,7 @@ impl MediaHub {
     pub fn video_frame(&mut self, path: &Path, time: f64) -> Option<ThumbVisual> {
         let key = Key::Frame {
             path: path.to_path_buf(),
-            ms: (time.max(0.0) * 1000.0).round() as u64,
+            us: (time.max(0.0) * 1_000_000.0).round() as u64,
         };
         if let Some(visual) = self.thumbs.get(&key) {
             self.stats.cache_hits += 1;
@@ -317,6 +420,53 @@ impl MediaHub {
             }
         }
         None
+    }
+
+    /// Source metadata for a video, read once per path. Opening a decoder reads the header only;
+    /// no frame is decoded here and the actual frame work stays on the worker thread.
+    pub fn video_meta(&mut self, path: &Path) -> Option<VideoMeta> {
+        if let Some(meta) = self.video_meta.get(path) {
+            return *meta;
+        }
+        let meta = VideoDecoder::open(path).ok().map(|decoder| {
+            let info = decoder.info();
+            let rate = info
+                .frame_rate
+                .and_then(|ratio| FrameRate::from_ratio(ratio).ok());
+            VideoMeta {
+                rate,
+                vfr: info.vfr,
+                duration: info
+                    .duration
+                    .map(|duration| duration.to_f64_lossy())
+                    .unwrap_or(0.0),
+            }
+        });
+        self.video_meta.insert(path.to_path_buf(), meta);
+        meta
+    }
+
+    /// Sampling rate for one video: the source stream rate when known, otherwise the project rate.
+    pub fn video_rate(&mut self, path: &Path, project_rate: FrameRate) -> FrameRate {
+        self.video_meta(path)
+            .and_then(|meta| meta.rate)
+            .unwrap_or(project_rate)
+    }
+
+    /// Bounded cache usage for the performance report.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn cache_usage(&self) -> CacheUsage {
+        let thumb_bytes = self.thumbs.len() * (THUMB_W * THUMB_H * 4) as usize;
+        let still_bytes = self.stills.len() * (STILL_MAX * STILL_MAX * 4) as usize;
+        let wave_bytes = self.waves.iter().map(|(_, wave)| wave.bytes()).sum();
+        CacheUsage {
+            thumb_textures: self.thumbs.len(),
+            still_textures: self.stills.len(),
+            thumb_bytes,
+            still_bytes,
+            wave_files: self.waves.len(),
+            wave_bytes,
+        }
     }
 
     /// Decoded still image for `path`, or `None` while it is decoded.
@@ -385,7 +535,7 @@ impl MediaHub {
         if self.pending.contains(key) || self.failures.contains_key(path) {
             return false;
         }
-        if self.budget == 0 {
+        if self.budget == 0 || self.pending.len() >= MAX_PENDING {
             self.repaint_needed = true;
             return false;
         }
@@ -407,6 +557,7 @@ impl MediaHub {
                 width,
                 height,
                 rgba,
+                pts_us,
             } => {
                 self.pending.remove(&key);
                 if width == 0 || height == 0 || rgba.len() != (width * height * 4) as usize {
@@ -419,7 +570,14 @@ impl MediaHub {
                 let aspect = width as f32 / height.max(1) as f32;
                 match key {
                     Key::Frame { .. } => {
-                        self.thumbs.insert(key, ThumbVisual { texture, aspect });
+                        self.thumbs.insert(
+                            key,
+                            ThumbVisual {
+                                texture,
+                                aspect,
+                                pts_us,
+                            },
+                        );
                     }
                     Key::Still { .. } => {
                         self.stills.insert(key, StillVisual { texture, aspect });
@@ -449,19 +607,19 @@ impl MediaHub {
     }
 }
 
-/// Source-time step between thumbnails: the smallest ladder value whose tile is at least `tile_px`
-/// wide at this zoom. The ladder keeps the requested timestamps stable across small zoom changes.
-pub fn thumb_step(zoom: f32, tile_px: f32) -> f64 {
-    const LADDER: [f64; 24] = [
-        0.1, 0.125, 0.16, 0.2, 0.25, 0.32, 0.4, 0.5, 0.63, 0.8, 1.0, 1.25, 1.6, 2.0, 2.5, 3.2,
-        4.0, 5.0, 6.3, 8.0, 10.0, 12.5, 16.0, 20.0,
-    ];
-    let needed = (tile_px / zoom.max(1.0)) as f64;
-    LADDER
-        .iter()
-        .copied()
-        .find(|step| *step >= needed)
-        .unwrap_or(20.0)
+/// Source-frame step between thumbnails.
+///
+/// The step is always a whole number of source frames: at normal zoom one tile spans many frames
+/// (cheap, recognisable overview), while at extreme zoom the step reaches 1 and every tile is a
+/// distinct decoded source frame. `tile_px` is the desired thumbnail tile width.
+pub fn thumb_step_frames(zoom: f32, tile_px: f32, source_fps: f64) -> u64 {
+    let frame_px = zoom.max(1.0) as f64 / source_fps.max(1.0);
+    (tile_px as f64 / frame_px).ceil().max(1.0) as u64
+}
+
+/// Seconds covered by `step_frames` source frames.
+pub fn thumb_step_seconds(step_frames: u64, source_fps: f64) -> f64 {
+    step_frames.max(1) as f64 / source_fps.max(1.0)
 }
 
 /// Tile indices of a clip `[clip_start, clip_start + clip_dur)` visible in `[view_start, view_end)`.
@@ -530,20 +688,22 @@ fn picture_worker(rx: Receiver<Request>, tx: Sender<Event>) {
     for request in rx.iter() {
         let event = match request {
             Request::Frame { key, path, time } => match decode_frame(&mut decoders, &path, time) {
-                Ok((width, height, rgba)) => Event::Rgba {
+                Ok((width, height, rgba, pts_us)) => Event::Rgba {
                     key,
                     width,
                     height,
                     rgba,
+                    pts_us,
                 },
                 Err(error) => Event::Failed { key, path, error },
             },
             Request::Still { key, path } => match decode_still(&mut decoders, &path) {
-                Ok((width, height, rgba)) => Event::Rgba {
+                Ok((width, height, rgba, pts_us)) => Event::Rgba {
                     key,
                     width,
                     height,
                     rgba,
+                    pts_us,
                 },
                 Err(error) => Event::Failed { key, path, error },
             },
@@ -589,7 +749,7 @@ fn decode_frame(
     decoders: &mut Lru<PathBuf, VideoDecoder>,
     path: &Path,
     time: f64,
-) -> Result<(u32, u32, Vec<u8>), String> {
+) -> Result<(u32, u32, Vec<u8>, u64), String> {
     let decoder = open_decoder(decoders, path)?;
     let duration = decoder
         .info()
@@ -600,26 +760,30 @@ fn decode_frame(
     let micros = (t * 1_000_000.0).round() as i64;
     let time = Time::new(micros, 1_000_000).map_err(|error| error.to_string())?;
     let frame = decoder.frame_at(time).map_err(|error| error.to_string())?;
-    Ok(downscale(frame.rgba, frame.width, frame.height, THUMB_W, THUMB_H))
+    let pts_us = (frame.time.to_f64_lossy() * 1_000_000.0).round().max(0.0) as u64;
+    let (w, h, rgba) = downscale(frame.rgba, frame.width, frame.height, THUMB_W, THUMB_H);
+    Ok((w, h, rgba, pts_us))
 }
 
 fn decode_still(
     decoders: &mut Lru<PathBuf, VideoDecoder>,
     path: &Path,
-) -> Result<(u32, u32, Vec<u8>), String> {
+) -> Result<(u32, u32, Vec<u8>, u64), String> {
     let decoder = open_decoder(decoders, path)?;
     let frame = decoder
         .frame_at(Time::ZERO)
         .map_err(|error| error.to_string())?;
-    Ok(downscale(frame.rgba, frame.width, frame.height, STILL_MAX, STILL_MAX))
+    let (w, h, rgba) = downscale(frame.rgba, frame.width, frame.height, STILL_MAX, STILL_MAX);
+    Ok((w, h, rgba, 0))
 }
 
 fn decode_peaks(path: &Path) -> Result<Waveform, String> {
     const RATE: u32 = 8_000;
-    const SAMPLES_PER_PEAK: usize = 40; // 8 kHz / 40 = 200 peaks per second
+    /// Two 8 kHz samples per 4000 Hz envelope peak.
+    const SAMPLES_PER_FINE_PEAK: usize = 2;
     let mut decoder = AudioDecoder::open(path, RATE).map_err(|error| error.to_string())?;
     let mut block = vec![0.0f32; 4096 * 2];
-    let mut peaks = Vec::new();
+    let mut fine = Vec::new();
     let mut min = 0.0f32;
     let mut max = 0.0f32;
     let mut in_peak = 0usize;
@@ -637,8 +801,8 @@ fn decode_peaks(path: &Path) -> Result<Waveform, String> {
             min = min.min(sample);
             max = max.max(sample);
             in_peak += 1;
-            if in_peak == SAMPLES_PER_PEAK {
-                peaks.push(Peak { min, max });
+            if in_peak == SAMPLES_PER_FINE_PEAK {
+                fine.push(Peak { min, max });
                 min = 0.0;
                 max = 0.0;
                 in_peak = 0;
@@ -650,10 +814,46 @@ fn decode_peaks(path: &Path) -> Result<Waveform, String> {
         }
     }
     if in_peak > 0 {
-        peaks.push(Peak { min, max });
+        fine.push(Peak { min, max });
     }
-    let duration = peaks.len() as f64 / PEAKS_PER_SECOND;
-    Ok(Waveform::new(duration, PEAKS_PER_SECOND, peaks))
+
+    let fine_pps = RATE as f64 / SAMPLES_PER_FINE_PEAK as f64;
+    let mut levels = Vec::with_capacity(WAVE_LEVELS.len());
+    levels.push(WaveLevel {
+        peaks_per_second: fine_pps,
+        peaks: fine,
+    });
+    for target_pps in WAVE_LEVELS.iter().copied().skip(1) {
+        let previous = levels.last().expect("fine level");
+        let factor = (previous.peaks_per_second / target_pps).round().max(1.0) as usize;
+        let peaks = downsample_peaks(&previous.peaks, factor);
+        levels.push(WaveLevel {
+            peaks_per_second: target_pps,
+            peaks,
+        });
+    }
+    let duration = levels
+        .first()
+        .map(|level| level.peaks.len() as f64 / fine_pps)
+        .unwrap_or(0.0);
+    Ok(Waveform::from_levels(duration, levels))
+}
+
+fn downsample_peaks(src: &[Peak], factor: usize) -> Vec<Peak> {
+    if factor <= 1 {
+        return src.to_vec();
+    }
+    src.chunks(factor)
+        .map(|chunk| {
+            let mut min = f32::INFINITY;
+            let mut max = f32::NEG_INFINITY;
+            for peak in chunk {
+                min = min.min(peak.min);
+                max = max.max(peak.max);
+            }
+            Peak { min, max }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -674,20 +874,34 @@ mod tests {
     }
 
     #[test]
-    fn thumb_step_grows_as_the_timeline_zooms_out() {
-        let zoomed_in = thumb_step(480.0, 128.0);
-        let normal = thumb_step(58.0, 128.0);
-        let zoomed_out = thumb_step(12.0, 128.0);
-        assert!(zoomed_in < normal && normal < zoomed_out);
-        // The tile is at least the requested width, and not much wider (the ladder is fine).
-        for zoom in [12.0f32, 58.0, 200.0, 480.0] {
-            let step = thumb_step(zoom, 128.0);
-            let tile = step * zoom as f64;
-            assert!(tile >= 128.0, "zoom {zoom}: tile {tile}");
-            assert!(tile <= 128.0 * 1.3, "zoom {zoom}: tile {tile}");
+    fn cache_usage_stays_within_the_bounded_budgets() {
+        let hub = MediaHub::new();
+        let usage = hub.cache_usage();
+        assert_eq!(usage.thumb_textures, 0);
+        assert!(usage.thumb_bytes <= THUMB_CAPACITY * (THUMB_W * THUMB_H * 4) as usize);
+        assert!(usage.wave_files <= WAVE_CAPACITY);
+        assert!(usage.wave_bytes <= WAVE_CAPACITY * 6 * 1024 * 1024);
+    }
+
+    #[test]
+    fn thumbnail_tiles_step_by_whole_source_frames() {
+        // 24 fps: 1 tile at 4800 px/s is exactly one source frame (200 px). At normal zoom a tile
+        // spans many frames; at low zoom it spans more still.
+        assert_eq!(thumb_step_frames(4_800.0, 128.0, 24.0), 1);
+        let normal = thumb_step_frames(58.0, 128.0, 24.0);
+        let wide = thumb_step_frames(12.0, 128.0, 24.0);
+        assert!(normal > 1 && wide > normal);
+        for zoom in [12.0f32, 58.0, 480.0, 4_800.0] {
+            let step = thumb_step_frames(zoom, 128.0, 24.0);
+            let tile = step as f64 / 24.0 * zoom as f64;
+            assert!(tile >= 128.0 - 0.01, "zoom {zoom}: tile {tile}");
+            if zoom < 4_800.0 {
+                assert!(tile <= 128.0 + zoom as f64 / 24.0, "zoom {zoom}: tile {tile}");
+            }
         }
-        // Steps are stable while the zoom changes within one ladder rung.
-        assert_eq!(thumb_step(58.0, 128.0), thumb_step(60.0, 128.0));
+        // A 30 fps source reaches per-frame tiles at 6000 px/s.
+        assert_eq!(thumb_step_frames(6_000.0, 128.0, 30.0), 1);
+        assert!(thumb_step_frames(600.0, 128.0, 30.0) > 1);
     }
 
     #[test]
@@ -778,16 +992,116 @@ mod tests {
     }
 
     #[test]
+    fn waveform_picks_a_resolution_for_the_zoom_and_keeps_silence_flat() {
+        let mut levels = Vec::new();
+        for (pps, amp) in [(4_000.0, 0.9), (1_000.0, 0.6), (200.0, 0.3)] {
+            let count = (pps * 1.0) as usize;
+            levels.push(WaveLevel {
+                peaks_per_second: pps,
+                peaks: vec![Peak { min: -amp, max: amp }; count],
+            });
+        }
+        let wave = Waveform::from_levels(1.0, levels);
+        assert_eq!(wave.levels().len(), 3);
+        assert_eq!(wave.level_for_px(12.0), 200.0);
+        assert_eq!(wave.level_for_px(480.0), 1_000.0);
+        assert_eq!(wave.level_for_px(4_800.0), 4_000.0);
+        let low = wave.envelope_at(0.0, 0.1, 12.0).expect("low envelope");
+        let high = wave.envelope_at(0.0, 0.1, 4_800.0).expect("high envelope");
+        assert!((low.max - 0.3).abs() < 1e-6, "coarse level for low zoom");
+        assert!((high.max - 0.9).abs() < 1e-6, "fine level for extreme zoom");
+        assert!(wave.bytes() > 0);
+
+        let silent = Waveform::new(
+            1.0,
+            200.0,
+            vec![Peak { min: 0.0, max: 0.0 }; 200],
+        );
+        let peak = silent.envelope_at(0.2, 0.4, 4_800.0).expect("silent range");
+        assert_eq!(peak, Peak { min: 0.0, max: 0.0 });
+    }
+
+    #[test]
     fn frame_keys_quantize_the_source_time() {
         let a = Key::Frame {
             path: PathBuf::from("a.mp4"),
-            ms: 1_000,
+            us: 1_000_000,
         };
         let b = Key::Frame {
             path: PathBuf::from("a.mp4"),
-            ms: 1_000,
+            us: 1_000_000,
         };
-        assert_eq!(a, b, "the same millisecond reuses one cache entry");
+        let c = Key::Frame {
+            path: PathBuf::from("a.mp4"),
+            us: 1_000_042,
+        };
+        assert_eq!(a, b, "the same microsecond reuses one cache entry");
+        assert_ne!(a, c, "adjacent source frames have distinct keys");
+    }
+
+    #[test]
+    #[ignore = "needs the pinned FFmpeg DLLs and assets/demo (run with --ignored)"]
+    fn extreme_zoom_thumbnail_cache_reuses_textures() {
+        let ctx = egui::Context::default();
+        let mut hub = MediaHub::new();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/demo/city_street.mp4");
+        // Eight adjacent 24 fps source frames, as the 1f zoom level requests them.
+        let times: Vec<f64> = (0..8)
+            .map(|frame| 1.0 + (frame as f64 + 0.5) / 24.0)
+            .collect();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let mut missing = 0;
+            for &time in &times {
+                if hub.video_frame(&path, time).is_none() {
+                    missing += 1;
+                }
+            }
+            hub.poll(&ctx);
+            if missing == 0 {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "thumbnail cache did not settle"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let requested = hub.stats().requested;
+        assert_eq!(requested, times.len() as u64, "one request per source frame");
+        for &time in &times {
+            assert!(hub.video_frame(&path, time).is_some());
+        }
+        assert_eq!(
+            hub.stats().requested,
+            requested,
+            "cached frames must not be requested again"
+        );
+        let usage = hub.cache_usage();
+        assert!(usage.thumb_textures >= times.len());
+        assert!(usage.thumb_bytes <= THUMB_CAPACITY * (THUMB_W * THUMB_H * 4) as usize);
+    }
+
+    #[test]
+    #[ignore = "needs the pinned FFmpeg DLLs and assets/demo (run with --ignored)"]
+    fn real_demo_thumbnail_throughput() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/demo");
+        let mut decoders = Lru::new(DECODER_CAPACITY);
+        let started = std::time::Instant::now();
+        for frame in 0..24 {
+            let time = 1.0 + frame as f64 / 24.0;
+            decode_frame(&mut decoders, &root.join("city_street.mp4"), time).expect("frame");
+        }
+        let per_frame = started.elapsed().as_secs_f64() * 1000.0 / 24.0;
+        let started = std::time::Instant::now();
+        let wave = decode_peaks(&root.join("narration.wav")).expect("peaks");
+        let wave_ms = started.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "thumbnail decode+downscale: {per_frame:.2} ms/frame; waveform 3-level decode: {wave_ms:.1} ms, {} bytes, levels {:?}",
+            wave.bytes(),
+            wave.levels().iter().map(|l| l.peaks_per_second).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -795,15 +1109,23 @@ mod tests {
     fn real_demo_media_decodes() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/demo");
         let mut decoders = Lru::new(DECODER_CAPACITY);
-        let (w, h, rgba) =
+        let (w, h, rgba, pts_a) =
             decode_frame(&mut decoders, &root.join("city_street.mp4"), 3.0).expect("frame");
         assert!(w > 0 && h > 0 && rgba.len() == (w * h * 4) as usize);
-        let (iw, ih, _) =
+        // Adjacent 24 fps source frames must be different real frames.
+        let (_, _, rgba_b, pts_b) =
+            decode_frame(&mut decoders, &root.join("city_street.mp4"), 3.0 + 1.0 / 24.0)
+                .expect("next frame");
+        assert_ne!(pts_a, pts_b, "the decoder must advance to the next PTS");
+        assert_ne!(rgba, rgba_b, "adjacent source frames must not be identical");
+        let (iw, ih, _, _) =
             decode_still(&mut decoders, &root.join("mountain_lake.png")).expect("still");
         assert!(iw > 0 && ih > 0);
         let wave = decode_peaks(&root.join("narration.wav")).expect("peaks");
         assert!(!wave.is_empty());
         assert!(wave.duration > 5.0);
+        assert_eq!(wave.level_for_px(12.0), 200.0);
+        assert_eq!(wave.level_for_px(4_800.0), 4_000.0);
         let loudest = wave
             .peaks()
             .iter()
@@ -825,5 +1147,8 @@ mod tests {
         let mut hub = MediaHub::new();
         assert!(hub.has_audio(&root.join("city_street.mp4")));
         assert!(!hub.has_audio(&root.join("market_crowd.mp4")));
+        let meta = hub.video_meta(&root.join("city_street.mp4")).expect("video meta");
+        assert_eq!(meta.rate, Some(FrameRate::Fps24));
+        assert!(!meta.vfr);
     }
 }

@@ -72,12 +72,22 @@ impl std::fmt::Debug for App {
 
 impl App {
     pub fn new(opts: Options) -> App {
+        let shell = opts
+            .project
+            .as_deref()
+            .and_then(|path| arc_core::store::load_container(path).ok())
+            .and_then(|(project, _)| {
+                project
+                    .sequence()
+                    .map(|sequence| Shell::with_frame_rate(sequence.frame_rate()))
+            })
+            .unwrap_or_default();
         App {
             parent: opts.parent,
             opts,
             gfx: None,
             workload: Workload::new(),
-            shell: Shell::default(),
+            shell,
             started: Instant::now(),
             popped_out: None,
             exit_requested: false,

@@ -1,6 +1,7 @@
 //! Drawing primitives for the timeline: lanes, clips, ruler, playhead, track controls, toolbar
 //! icons and scrollbars. Everything is painted with vector strokes, so no icon font is needed.
 
+use arc_core::time::{FrameRate, Round, Time};
 use super::model::TrackKind;
 use egui::{
     Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind,
@@ -33,8 +34,10 @@ pub const AUDIO_WAVE_H: f32 = 30.0;
 pub const LABEL_FONT_PT: f32 = 10.5;
 pub const LABEL_PAD_X: f32 = 6.0;
 pub const LABEL_TEXT: Color32 = Color32::from_rgb(0xf2, 0xf4, 0xf6);
-/// Bright blue used by every waveform (audio clips and embedded video audio).
+/// Bright blue used by standalone audio clips.
 pub const WAVE_BLUE: Color32 = Color32::from_rgb(0x2b, 0xb3, 0xff);
+/// Cyan-green used by the audio embedded inside a video clip.
+pub const WAVE_EMBEDDED: Color32 = Color32::from_rgb(0x3d, 0xd6, 0xb4);
 
 pub fn lane_bg(index: usize) -> Color32 {
     if index % 2 == 0 {
@@ -148,6 +151,7 @@ pub fn draw_waveform_bars(
     clip_left: f32,
     zoom: f32,
     wave: &super::media::Waveform,
+    color: Color32,
 ) {
     if rect.width() < 2.0 || rect.height() < 4.0 || zoom <= 0.0 {
         return;
@@ -159,19 +163,22 @@ pub fn draw_waveform_bars(
             egui::pos2(rect.left(), baseline),
             egui::pos2(rect.right(), baseline),
         ],
-        Stroke::new(0.7, Color32::from_rgba_unmultiplied(0x2b, 0xb3, 0xff, 70)),
+        Stroke::new(
+            0.7,
+            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 70),
+        ),
     );
     let mut x = rect.left();
     while x < rect.right() {
         let t0 = ((x - clip_left) / zoom) as f64;
         let t1 = t0 + 1.0 / zoom as f64;
-        if let Some(peak) = wave.envelope(t0, t1) {
+        if let Some(peak) = wave.envelope_at(t0, t1, zoom as f64) {
             let level = peak.max.max(-peak.min).clamp(0.0, 1.0);
             if level > 0.004 {
                 let top = (baseline - level * amplitude).max(rect.top());
                 painter.line_segment(
                     [egui::pos2(x, baseline), egui::pos2(x, top)],
-                    Stroke::new(1.0, WAVE_BLUE),
+                    Stroke::new(1.0, color),
                 );
             }
         }
@@ -233,30 +240,33 @@ const TICK_FRAME_LABEL_H: f32 = 6.0;
 const TICK_MINOR_H: f32 = 4.0;
 const TICK_FRAME_H: f32 = 3.0;
 
-/// A frame grid: the real rate plus the nominal integer rate used by the `mm:ss`/frame labels.
+/// A frame grid: the exact project rate plus its nominal integer rate for `mm:ss`/frame labels.
 ///
-/// `fps` places frames on the ruler (`frame / fps` seconds); `nominal` is `fps.round()` and is the
-/// number of frame labels inside one timecode second. For 29.97/59.94 the nominal rates are 30/60,
-/// so frame ticks land on real frame boundaries and `00:01` is frame 30/60, not a rounded decimal
-/// second.
+/// `frame_time` converts a frame index through [`FrameRate::time_of_frame`], never through an
+/// accumulated floating-point second count. `nominal` is `fps.round()` and is the number of frame
+/// labels inside one timecode second. For 29.97/59.94 the nominal rates are 30/60, so frame ticks
+/// land on real frame boundaries and `00:01` is frame 30/60, not a rounded decimal second.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FrameGrid {
-    pub fps: f64,
+    pub rate: FrameRate,
     pub nominal: u32,
 }
 
 impl FrameGrid {
-    pub fn new(fps: f64) -> FrameGrid {
-        let fps = fps.max(1.0);
+    pub fn new(rate: FrameRate) -> FrameGrid {
         FrameGrid {
-            fps,
-            nominal: fps.round() as u32,
+            rate,
+            nominal: rate.nominal() as u32,
         }
     }
 
-    /// Real seconds at the start of `frame`.
+    pub fn fps(&self) -> f64 {
+        self.rate.rate().to_f64_lossy()
+    }
+
+    /// Exact start time of `frame` in real seconds.
     pub fn frame_time(&self, frame: u64) -> f64 {
-        frame as f64 / self.fps
+        self.rate.time_of_frame(frame as i64).to_f64_lossy()
     }
 }
 
@@ -281,10 +291,10 @@ pub enum TickMode {
 /// split into frame ticks, the ruler switches to the densest whole-frame subdivision of the
 /// project rate that keeps labels [`LABEL_GAP`] apart. The step always divides the nominal rate,
 /// so `mm:ss` labels stay on frame-aligned second boundaries.
-pub fn ruler_mode(px_per_sec: f32, fps: f64) -> TickMode {
-    let grid = FrameGrid::new(fps);
+pub fn ruler_mode(px_per_sec: f32, rate: FrameRate) -> TickMode {
+    let grid = FrameGrid::new(rate);
     let nominal = grid.nominal;
-    let px_per_frame = px_per_sec / grid.fps as f32;
+    let px_per_frame = px_per_sec / grid.fps() as f32;
     let mut step = None;
     for n in 2..=nominal {
         if !nominal.is_multiple_of(n) {
@@ -336,7 +346,7 @@ pub fn draw_ruler(
     rect: Rect,
     view_start: f64,
     px_per_sec: f32,
-    fps: f64,
+    rate: FrameRate,
     playhead_x: Option<f32>,
 ) {
     painter.rect_filled(rect, CornerRadius::ZERO, RULER_BG);
@@ -344,7 +354,7 @@ pub fn draw_ruler(
         return;
     }
     let view_end = view_start + (rect.width() / px_per_sec.max(1.0)) as f64;
-    let mode = ruler_mode(px_per_sec, fps);
+    let mode = ruler_mode(px_per_sec, rate);
     match mode {
         TickMode::Seconds {
             grid,
@@ -387,7 +397,7 @@ fn draw_second_ticks(
 ) {
     // Major labels sit on frame-aligned second boundaries. The five minor ticks between them are
     // evenly spaced in real time and stay unlabelled, as before.
-    let first = ((view_start * grid.fps) / major_frames as f64).floor().max(0.0) as u64
+    let first = ((view_start * grid.fps()) / major_frames as f64).floor().max(0.0) as u64
         * major_frames;
     let mut frame = first;
     loop {
@@ -425,10 +435,10 @@ fn draw_frame_ticks(
     grid: FrameGrid,
     step: u32,
 ) {
-    let px_per_frame = px_per_sec / grid.fps as f32;
+    let px_per_frame = px_per_sec / grid.fps() as f32;
     let step_time = grid.frame_time(step as u64);
     let view_end = view_start + (rect.width() / px_per_sec.max(1.0)) as f64;
-    let first = ((view_start * grid.fps) / step as f64).floor().max(0.0) as u64 * step as u64;
+    let first = ((view_start * grid.fps()) / step as f64).floor().max(0.0) as u64 * step as u64;
     let mut frame = first;
     while grid.frame_time(frame) <= view_end + step_time {
         let t = grid.frame_time(frame);
@@ -717,7 +727,7 @@ pub fn draw_track_icon(painter: &Painter, kind: TrackKind, center: Pos2, color: 
 /// apart. Sub-second steps are handled by [`ruler_mode`]'s frame scale instead, so every label here
 /// falls on a whole second.
 pub fn tick_step(px_per_sec: f32) -> f64 {
-    const LADDER: [f64; 9] = [1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0];
+    const LADDER: [f64; 10] = [1.0, 2.0, 3.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0];
     for step in LADDER {
         if step as f32 * px_per_sec >= LABEL_GAP {
             return step;
@@ -726,16 +736,19 @@ pub fn tick_step(px_per_sec: f32) -> f64 {
     *LADDER.last().expect("ladder")
 }
 
-/// Project-frame-aware clip timecode: `HH:MM:SS:FF`, never a decimal duration.
-pub fn timecode_hhmmssff(seconds: f64, fps: f64) -> String {
-    let fps = fps.round().max(1.0) as u64;
-    let total_frames = (seconds.max(0.0) * fps as f64).round().max(0.0) as u64;
-    let frames = total_frames % fps;
-    let total_seconds = total_frames / fps;
-    let secs = total_seconds % 60;
-    let minutes = (total_seconds / 60) % 60;
-    let hours = total_seconds / 3600;
-    format!("{hours:02}:{minutes:02}:{secs:02}:{frames:02}")
+/// Exact frame time of a real-seconds instant. Used for labels; the ruler itself works in frame
+/// indices.
+pub fn time_of_seconds(seconds: f64) -> Time {
+    let micros = (seconds.max(0.0) * 1_000_000.0).round() as i64;
+    Time::new(micros, 1_000_000).unwrap_or(Time::ZERO)
+}
+
+/// NDF timecode for a duration at the project's exact rate: `HH:MM:SS:FF`, never a decimal.
+pub fn timecode_ndf(seconds: f64, rate: FrameRate) -> String {
+    let frame = rate
+        .frame_at(time_of_seconds(seconds), Round::Nearest)
+        .unwrap_or(0);
+    rate.format_ndf(frame)
 }
 
 /// Compact icon button; returns the interaction response for tooltips.
@@ -1011,8 +1024,12 @@ mod tests {
     }
 
     #[test]
-    fn normal_zoom_uses_second_ticks_and_high_zoom_uses_frames() {
-        match ruler_mode(58.0, 24.0) {
+    fn ruler_levels_follow_zoom_and_project_rate() {
+        assert_eq!(tick_step(20.0), 5.0);
+        assert_eq!(tick_step(30.0), 3.0);
+        assert_eq!(tick_step(58.0), 2.0);
+
+        match ruler_mode(58.0, FrameRate::Fps24) {
             TickMode::Seconds {
                 grid,
                 seconds,
@@ -1020,93 +1037,140 @@ mod tests {
             } => {
                 assert_eq!(seconds, 2);
                 assert_eq!(major_frames, 48);
-                assert_eq!(grid, FrameGrid::new(24.0));
+                assert_eq!(grid, FrameGrid::new(FrameRate::Fps24));
             }
             other => panic!("expected second ticks, got {other:?}"),
         }
-        match ruler_mode(120.0, 24.0) {
-            TickMode::Seconds { seconds, .. } => assert_eq!(seconds, 1),
-            other => panic!("expected second ticks, got {other:?}"),
-        }
-        match ruler_mode(240.0, 24.0) {
+        match ruler_mode(180.0, FrameRate::Fps30) {
             TickMode::Frames { grid, step } => {
-                assert_eq!(step, 8);
-                assert_eq!(grid.nominal, 24);
+                assert_eq!(step, 15, "fine zoom shows 15f at 30 fps");
+                assert_eq!(grid.nominal, 30);
             }
-            other => panic!("expected 8-frame ticks, got {other:?}"),
+            other => panic!("expected 15-frame ticks, got {other:?}"),
         }
-        match ruler_mode(480.0, 24.0) {
-            TickMode::Frames { step, .. } => assert_eq!(step, 4),
-            other => panic!("expected 4-frame ticks, got {other:?}"),
+        match ruler_mode(600.0, FrameRate::Fps30) {
+            TickMode::Frames { step, .. } => assert_eq!(step, 5, "5f level"),
+            other => panic!("expected 5-frame ticks, got {other:?}"),
         }
-        // 29.97/59.94 use their nominal rates for the labels and the real rate for positions.
-        match ruler_mode(240.0, 29.97) {
+        match ruler_mode(1_500.0, FrameRate::Fps30) {
+            TickMode::Frames { step, .. } => assert_eq!(step, 2, "2f level"),
+            other => panic!("expected 2-frame ticks, got {other:?}"),
+        }
+        match ruler_mode(3_000.0, FrameRate::Fps30) {
+            TickMode::Frames { step, .. } => assert_eq!(step, 1, "1f level"),
+            other => panic!("expected 1-frame ticks, got {other:?}"),
+        }
+        // 29.97/59.94 use their nominal rates for labels and the real rate for positions.
+        match ruler_mode(240.0, FrameRate::Fps29_97) {
             TickMode::Frames { grid, step } => {
                 assert_eq!(step, 10);
                 assert_eq!(grid.nominal, 30);
-                assert_eq!(grid.fps, 29.97);
+                assert!((grid.fps() - 30_000.0 / 1001.0).abs() < 1e-9);
             }
             other => panic!("expected 10-frame ticks at 29.97, got {other:?}"),
         }
-        match ruler_mode(480.0, 29.97) {
-            TickMode::Frames { step, .. } => assert_eq!(step, 5),
-            other => panic!("expected 5-frame ticks at 29.97, got {other:?}"),
-        }
-        match ruler_mode(480.0, 59.94) {
+        match ruler_mode(480.0, FrameRate::Fps59_94) {
             TickMode::Frames { grid, step } => {
                 assert_eq!(step, 10);
                 assert_eq!(grid.nominal, 60);
-                assert_eq!(grid.fps, 59.94);
+                assert!((grid.fps() - 60_000.0 / 1001.0).abs() < 1e-9);
             }
             other => panic!("expected 10-frame ticks at 59.94, got {other:?}"),
+        }
+        // 25 fps cannot split a second into frame labels until 5f is wide enough.
+        match ruler_mode(480.0, FrameRate::Fps25) {
+            TickMode::Frames { step, .. } => assert_eq!(step, 5),
+            other => panic!("expected 5-frame ticks at 25 fps, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ruler_labels_never_overlap_across_rates_and_zooms() {
+        for rate in [
+            FrameRate::Fps24,
+            FrameRate::Fps25,
+            FrameRate::Fps30,
+            FrameRate::Fps29_97,
+            FrameRate::Fps59_94,
+        ] {
+            let max = rate.rate().to_f64_lossy() as f32 * 200.0;
+            for zoom in [
+                12.0f32, 20.0, 30.0, 58.0, 78.0, 120.0, 156.0, 180.0, 240.0, 480.0, 600.0,
+                1_200.0, 1_500.0, 2_400.0, 3_000.0, 4_800.0, 6_000.0, 12_000.0,
+            ] {
+                if zoom > max {
+                    continue;
+                }
+                let spacing = match ruler_mode(zoom, rate) {
+                    TickMode::Seconds { grid, major_frames, .. } => {
+                        major_frames as f64 / grid.fps() * zoom as f64
+                    }
+                    TickMode::Frames { grid, step } => {
+                        step as f64 / grid.fps() * zoom as f64
+                    }
+                };
+                assert!(
+                    spacing >= LABEL_GAP as f64 - 0.01,
+                    "{rate:?} {zoom} px/s: label spacing {spacing}"
+                );
+            }
         }
     }
 
     #[test]
     fn frame_tick_labels_follow_the_project_frame_rate() {
-        let at_24 = FrameGrid::new(24.0);
+        let at_24 = FrameGrid::new(FrameRate::Fps24);
         assert_eq!(frame_tick_label(0, at_24), "00:00");
         assert_eq!(frame_tick_label(8, at_24), "08f");
         assert_eq!(frame_tick_label(16, at_24), "16f");
         assert_eq!(frame_tick_label(24, at_24), "00:01");
 
-        let at_30 = FrameGrid::new(29.97);
+        let at_30 = FrameGrid::new(FrameRate::Fps29_97);
         assert_eq!(frame_tick_label(10, at_30), "10f");
         assert_eq!(frame_tick_label(20, at_30), "20f");
         assert_eq!(frame_tick_label(30, at_30), "00:01");
 
-        let at_60 = FrameGrid::new(59.94);
+        let at_60 = FrameGrid::new(FrameRate::Fps59_94);
         assert_eq!(frame_tick_label(10, at_60), "10f");
         assert_eq!(frame_tick_label(50, at_60), "50f");
         assert_eq!(frame_tick_label(60, at_60), "00:01");
+
+        let at_25 = FrameGrid::new(FrameRate::Fps25);
+        assert_eq!(frame_tick_label(5, at_25), "05f");
+        assert_eq!(frame_tick_label(25, at_25), "00:01");
     }
 
     #[test]
     fn non_integer_rates_place_frames_on_real_boundaries() {
-        let at_29_97 = FrameGrid::new(29.97);
-        assert!((at_29_97.frame_time(30) - 30.0 / 29.97).abs() < 1e-12);
-        assert!((at_29_97.frame_time(30) - 1.001_001_001).abs() < 1e-6);
+        let at_29_97 = FrameGrid::new(FrameRate::Fps29_97);
+        let f30 = 30.0 * 1001.0 / 30_000.0;
+        assert!((at_29_97.frame_time(30) - f30).abs() < 1e-12);
+        assert!((at_29_97.frame_time(30) - 1.001).abs() < 1e-9);
         assert_eq!(
-            (at_29_97.frame_time(1234) * at_29_97.fps).round() as u64,
+            (at_29_97.frame_time(1234) * at_29_97.fps()).round() as u64,
             1234
         );
 
-        let at_59_94 = FrameGrid::new(59.94);
-        assert!((at_59_94.frame_time(60) - 60.0 / 59.94).abs() < 1e-12);
-        assert!((at_59_94.frame_time(60) - 1.001_001_001).abs() < 1e-6);
+        let at_59_94 = FrameGrid::new(FrameRate::Fps59_94);
+        let f60 = 60.0 * 1001.0 / 60_000.0;
+        assert!((at_59_94.frame_time(60) - f60).abs() < 1e-12);
+        assert!((at_59_94.frame_time(60) - 1.001).abs() < 1e-9);
         assert_eq!(
-            (at_59_94.frame_time(987) * at_59_94.fps).round() as u64,
+            (at_59_94.frame_time(987) * at_59_94.fps()).round() as u64,
             987
         );
     }
 
     #[test]
     fn clip_timecode_is_frame_accurate_and_never_decimal() {
-        assert_eq!(timecode_hhmmssff(0.0, 24.0), "00:00:00:00");
-        assert_eq!(timecode_hhmmssff(5.0, 24.0), "00:00:05:00");
-        assert_eq!(timecode_hhmmssff(4.5, 24.0), "00:00:04:12");
-        assert_eq!(timecode_hhmmssff(18.0, 24.0), "00:00:18:00");
-        assert_eq!(timecode_hhmmssff(3661.5, 24.0), "01:01:01:12");
+        assert_eq!(timecode_ndf(0.0, FrameRate::Fps24), "00:00:00:00");
+        assert_eq!(timecode_ndf(5.0, FrameRate::Fps24), "00:00:05:00");
+        assert_eq!(timecode_ndf(4.5, FrameRate::Fps24), "00:00:04:12");
+        assert_eq!(timecode_ndf(18.0, FrameRate::Fps24), "00:00:18:00");
+        assert_eq!(timecode_ndf(3661.5, FrameRate::Fps24), "01:01:01:12");
+        assert_eq!(timecode_ndf(1.0, FrameRate::Fps29_97), "00:00:01:00");
+        assert_eq!(timecode_ndf(0.5, FrameRate::Fps30), "00:00:00:15");
+        assert_eq!(timecode_ndf(0.48, FrameRate::Fps25), "00:00:00:12");
     }
 
     #[test]

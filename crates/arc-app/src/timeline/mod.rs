@@ -8,6 +8,7 @@ pub mod draw;
 pub mod media;
 pub mod model;
 
+use arc_core::time::FrameRate;
 use draw::{CANVAS_BG, CONTROLS_BG, DIM, TOOLBAR_BG, ToolbarIcon};
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Sense, Stroke, Ui, Vec2};
 use media::MediaHub;
@@ -22,9 +23,8 @@ pub const TOOLBAR_H: f32 = 34.0;
 pub const RULER_H: f32 = 22.0;
 /// Scrollbar thickness, in points.
 pub const SCROLLBAR_W: f32 = 9.0;
-/// Zoom limits, in points per second.
+/// Minimum horizontal zoom, in points per second.
 pub const MIN_ZOOM: f32 = 12.0;
-pub const MAX_ZOOM: f32 = 480.0;
 /// Right-aligned zoom controls: two 24 pt buttons around a 110 pt horizontal slider.
 const ZOOM_BUTTON: f32 = 24.0;
 const ZOOM_SLIDER_W: f32 = 110.0;
@@ -79,17 +79,17 @@ fn zoom_controls(toolbar: Rect) -> Option<ZoomControls> {
     })
 }
 
-/// Slider position of a zoom level, 0 at [`MIN_ZOOM`] and 1 at [`MAX_ZOOM`].
+/// Slider position of a zoom level, 0 at [`MIN_ZOOM`] and 1 at `max_zoom`.
 ///
 /// The mapping is logarithmic because zoom itself is multiplicative: equal drags feel like equal
-/// relative changes, and the whole 12–480 px/s range is reachable.
-fn zoom_slider_fraction(zoom: f32) -> f32 {
-    let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-    (zoom / MIN_ZOOM).ln() / (MAX_ZOOM / MIN_ZOOM).ln()
+/// relative changes, and the whole 12 px/s … frame-max range is reachable.
+fn zoom_slider_fraction(zoom: f32, max_zoom: f32) -> f32 {
+    let zoom = zoom.clamp(MIN_ZOOM, max_zoom.max(MIN_ZOOM));
+    (zoom / MIN_ZOOM).ln() / (max_zoom.max(MIN_ZOOM) / MIN_ZOOM).ln()
 }
 
-fn zoom_from_fraction(fraction: f32) -> f32 {
-    MIN_ZOOM * (MAX_ZOOM / MIN_ZOOM).powf(fraction.clamp(0.0, 1.0))
+fn zoom_from_fraction(fraction: f32, max_zoom: f32) -> f32 {
+    MIN_ZOOM * (max_zoom.max(MIN_ZOOM) / MIN_ZOOM).powf(fraction.clamp(0.0, 1.0))
 }
 
 /// Rectangles of the timeline chrome inside the timeline card.
@@ -217,6 +217,14 @@ impl Default for Timeline {
 }
 
 impl Timeline {
+    /// Timeline at the project's exact sequence rate. The zoom ceiling is derived from it.
+    pub fn new(frame_rate: FrameRate) -> Timeline {
+        Timeline {
+            model: TimelineModel::mock().with_frame_rate(frame_rate),
+            ..Timeline::default()
+        }
+    }
+
     /// Empty timeline (used by the empty-state rendering and tests).
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn empty() -> Timeline {
@@ -224,6 +232,16 @@ impl Timeline {
             model: TimelineModel::empty(),
             ..Timeline::default()
         }
+    }
+
+    pub fn frame_rate(&self) -> FrameRate {
+        self.model.frame_rate
+    }
+
+    /// Highest horizontal zoom: 200 px per project frame, so it scales with the real rate
+    /// (24 fps → 4800 px/s, 30 fps → 6000 px/s, 59.94 fps → 11988 px/s).
+    pub fn max_zoom(&self) -> f32 {
+        self.frame_rate().rate().to_f64_lossy() as f32 * model::MAX_FRAME_PX
     }
 
     /// First visible timeline position, in seconds.
@@ -301,7 +319,7 @@ impl Timeline {
             && let Some(pos) = response.interact_pointer_pos()
         {
             let t = x_to_time(origin, view_start, self.zoom, pos.x);
-            let snapped = model::snap_to_frame(t, model::PROJECT_FPS);
+            let snapped = model::snap_to_frame(t, self.model.frame_rate);
             self.model.playhead = snapped.clamp(0.0, self.model.duration.max(0.0));
         }
         if response.hovered() {
@@ -361,6 +379,7 @@ impl Timeline {
         // gone; the slider is the one continuous zoom control.
         let mut requested = self.zoom;
         if let Some(z) = zoom_controls(rect) {
+            let max_zoom = self.max_zoom();
             if tb_at(ui, z.out, ToolbarIcon::ZoomOut, false)
                 .on_hover_text("Zoom out")
                 .clicked()
@@ -379,12 +398,12 @@ impl Timeline {
                 z.slider.center(),
                 Vec2::new((z.slider.width() - 10.0).max(1.0), 3.0),
             );
-            let mut fraction = zoom_slider_fraction(requested);
+            let mut fraction = zoom_slider_fraction(requested, max_zoom);
             if (response.clicked() || response.dragged())
                 && let Some(pos) = response.interact_pointer_pos()
             {
                 fraction = ((pos.x - track.left()) / track.width()).clamp(0.0, 1.0);
-                requested = zoom_from_fraction(fraction);
+                requested = zoom_from_fraction(fraction, max_zoom);
             }
             if response.hovered() || response.dragged() {
                 ui.ctx().set_cursor_icon(if response.dragged() {
@@ -435,7 +454,7 @@ impl Timeline {
     /// Change the horizontal scale. The playhead stays under its current pixel when it is visible;
     /// otherwise the canvas centre is the anchor, so a toolbar zoom never jumps.
     fn set_zoom(&mut self, zoom: f32, canvas: Rect) {
-        let zoom = zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        let zoom = zoom.clamp(MIN_ZOOM, self.max_zoom());
         if (zoom - self.zoom).abs() < 0.001 {
             return;
         }
@@ -449,6 +468,13 @@ impl Timeline {
         let time = x_to_time(origin, self.view_start(), self.zoom, anchor);
         self.zoom = zoom;
         self.scroll.x = (time as f32 * self.zoom - (anchor - origin)).max(0.0);
+    }
+
+    /// Zoom around a canvas pixel: the time under `pointer_x` stays fixed.
+    fn zoom_at_pointer(&mut self, pointer_x: f32, origin: f32, factor: f32) {
+        let time = x_to_time(origin, self.view_start(), self.zoom, pointer_x);
+        self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, self.max_zoom());
+        self.scroll.x = (time as f32 * self.zoom - (pointer_x - origin)).max(0.0);
     }
 
     fn wheel(&mut self, ui: &Ui, l: &Layout) {
@@ -473,13 +499,8 @@ impl Timeline {
             return;
         }
         if ctrl {
-            let origin = l.canvas.left();
-            let view_start = self.view_start();
-            let t = x_to_time(origin, view_start, self.zoom, pos.x);
             let factor: f32 = (1.0 + delta.y * 0.004).clamp(0.8, 1.25);
-            self.zoom = (self.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
-            // Keep the time under the pointer where it is while zooming.
-            self.scroll.x = (t as f32 * self.zoom - (pos.x - origin)).max(0.0);
+            self.zoom_at_pointer(pos.x, l.canvas.left(), factor);
         } else if shift {
             self.scroll.x -= delta.y;
         } else {
@@ -495,7 +516,7 @@ impl Timeline {
             rect,
             view_start,
             self.zoom,
-            model::PROJECT_FPS,
+            self.model.frame_rate,
             visible.then_some(playhead_x),
         );
     }
@@ -607,10 +628,18 @@ impl Timeline {
             }
             let is_selected = *selected == Some((index, clip_index));
             draw::draw_clip_body(&painter, visible, clip.kind);
-            paint_clip_content(media.as_mut(), &painter, body, rect, clip, *zoom);
+            paint_clip_content(
+                media.as_mut(),
+                &painter,
+                body,
+                rect,
+                clip,
+                *zoom,
+                model.frame_rate,
+            );
             draw::draw_clip_outline(&painter, visible, is_selected);
             let label_rect = clip_label_rect(clip.kind, rect, content);
-            draw::draw_clip_label(&painter, label_rect, &clip_label(clip));
+            draw::draw_clip_label(&painter, label_rect, &clip_label(clip, model.frame_rate));
 
             let hit = visible.intersect(content);
             if hit.width() < 2.0 || hit.height() < 2.0 {
@@ -734,8 +763,8 @@ fn clip_label_rect(kind: model::TrackKind, clip_rect: Rect, content: Rect) -> Re
 /// Label of one clip: actual text/effect/sticker content and `HH:MM:SS:FF` durations, never a
 /// decimal duration. Text clips carry only their text; media, effects and stickers also show the
 /// clip duration on the same line when the clip is wide enough.
-fn clip_label(clip: &model::Clip) -> String {
-    let duration = draw::timecode_hhmmssff(clip.duration, model::PROJECT_FPS);
+fn clip_label(clip: &model::Clip, frame_rate: FrameRate) -> String {
+    let duration = draw::timecode_ndf(clip.duration, frame_rate);
     match clip.kind {
         model::TrackKind::Text => clip.name.clone(),
         model::TrackKind::Effect | model::TrackKind::Sticker => {
@@ -758,6 +787,7 @@ fn paint_clip_content(
     clip_rect: Rect,
     clip: &model::Clip,
     zoom: f32,
+    frame_rate: FrameRate,
 ) {
     if !matches!(
         clip.kind,
@@ -794,7 +824,16 @@ fn paint_clip_content(
                 egui::pos2(clip_rect.left(), clip_rect.top() + header_h),
                 Vec2::new(clip_rect.width(), thumb_h),
             );
-            paint_video(media, painter, body, clip_rect, thumb_rect, source, zoom);
+            paint_video(
+                media,
+                painter,
+                body,
+                clip_rect,
+                thumb_rect,
+                source,
+                zoom,
+                frame_rate,
+            );
             if has_audio {
                 let audio_rect = Rect::from_min_size(
                     egui::pos2(clip_rect.left(), thumb_rect.bottom()),
@@ -827,6 +866,7 @@ fn paint_clip_content(
 /// Real decoded frames, tiled continuously across the thumbnail region. Each tile is one source
 /// timestamp; the tile width is a ladder-quantised source-time step, so thumbnails stay cached while
 /// the timeline scrolls. `uv_fill` centre-crops each frame into its tile, so nothing is distorted.
+#[allow(clippy::too_many_arguments)]
 fn paint_video(
     media: &mut MediaHub,
     painter: &egui::Painter,
@@ -835,6 +875,7 @@ fn paint_video(
     thumb_rect: Rect,
     source: &Path,
     zoom: f32,
+    frame_rate: FrameRate,
 ) {
     let zoom = zoom.max(1.0);
     let visible = thumb_rect.intersect(body);
@@ -843,7 +884,10 @@ fn paint_video(
     }
     let painter = painter.with_clip_rect(visible);
     let tile_w = (thumb_rect.height() * 16.0 / 9.0).max(24.0);
-    let step = media::thumb_step(zoom, tile_w);
+    let source_rate = media.video_rate(source, frame_rate);
+    let source_fps = source_rate.rate().to_f64_lossy();
+    let step_frames = media::thumb_step_frames(zoom, tile_w, source_fps);
+    let step = media::thumb_step_seconds(step_frames, source_fps);
     let view_start = ((body.left() - clip_rect.left()) / zoom) as f64;
     let view_end = ((body.right() - clip_rect.left()) / zoom) as f64;
     let clip_dur = (clip_rect.width() / zoom) as f64;
@@ -860,7 +904,13 @@ fn paint_video(
         if !rect.intersects(visible) {
             continue;
         }
-        let time = index as f64 * step + step * 0.5;
+        // Aim at the centre of the source frame range using a frame index, never by accumulating
+        // floating-point seconds; `frame_at` resolves the actual PTS.
+        let frame_index = index as u64 * step_frames;
+        let time = source_rate
+            .time_of_frame(frame_index as i64)
+            .to_f64_lossy()
+            + (step_frames as f64 / 2.0) / source_fps;
         if let Some(visual) = media.video_frame(source, time) {
             let uv = draw::uv_fill(visual.aspect, rect);
             painter.image(visual.texture.id(), rect, uv, Color32::WHITE);
@@ -893,7 +943,14 @@ fn paint_video_audio(
             (visible.bottom() - 1.0).max(visible.top() + 2.0),
         ),
     );
-    draw::draw_waveform_bars(painter, rect, clip_rect.left(), zoom.max(1.0), &wave);
+    draw::draw_waveform_bars(
+        painter,
+        rect,
+        clip_rect.left(),
+        zoom.max(1.0),
+        &wave,
+        draw::WAVE_EMBEDDED,
+    );
 }
 
 /// The decoded still image, repeated across the image region. Every repeat keeps the image's
@@ -953,7 +1010,14 @@ fn paint_audio(
             (visible.bottom() - 1.0).max(visible.top() + 2.0),
         ),
     );
-    draw::draw_waveform_bars(painter, rect, clip_rect.left(), zoom.max(1.0), &wave);
+    draw::draw_waveform_bars(
+        painter,
+        rect,
+        clip_rect.left(),
+        zoom.max(1.0),
+        &wave,
+        draw::WAVE_BLUE,
+    );
 }
 
 #[cfg(test)]
@@ -1071,26 +1135,45 @@ mod tests {
             .iter()
             .find(|c| c.source_name().as_deref() == Some("city_street.mp4"))
             .expect("city street clip");
-        assert_eq!(clip_label(video), "city_street.mp4  00:00:05:00");
-        assert!(!clip_label(video).contains(".0s"));
+        assert_eq!(
+            clip_label(video, model.frame_rate),
+            "city_street.mp4  00:00:05:00"
+        );
+        assert!(!clip_label(video, model.frame_rate).contains(".0s"));
 
         let effect = clips
             .iter()
             .find(|c| c.name == "调色 · 暖阳")
             .expect("effect clip");
-        assert_eq!(clip_label(effect), "调色 · 暖阳  00:00:05:00");
+        assert_eq!(
+            clip_label(effect, model.frame_rate),
+            "调色 · 暖阳  00:00:05:00"
+        );
 
         let text = clips
             .iter()
             .find(|c| c.name == "开场 · 山海之间")
             .expect("text clip");
-        assert_eq!(clip_label(text), "开场 · 山海之间");
+        assert_eq!(clip_label(text, model.frame_rate), "开场 · 山海之间");
 
         let audio = clips
             .iter()
             .find(|c| c.source_name().as_deref() == Some("narration.wav"))
             .expect("narration clip");
-        assert_eq!(clip_label(audio), "narration.wav  00:00:18:00");
+        assert_eq!(
+            clip_label(audio, model.frame_rate),
+            "narration.wav  00:00:18:00"
+        );
+
+        // The duration label follows the project rate, not a fixed 24 fps.
+        assert_eq!(
+            clip_label(video, FrameRate::Fps29_97),
+            "city_street.mp4  00:00:05:00"
+        );
+        assert_eq!(
+            clip_label(audio, FrameRate::Fps30),
+            "narration.wav  00:00:18:00"
+        );
     }
 
     #[test]
@@ -1239,7 +1322,8 @@ mod tests {
         let heights = |t: &Timeline| -> Vec<f32> { t.model.tracks.iter().map(|tr| tr.height()).collect() };
         let before = heights(&t);
         let content_h = t.model.content_height();
-        for zoom in [MIN_ZOOM, 40.0, 58.0, 200.0, MAX_ZOOM] {
+        let max_zoom = t.max_zoom();
+        for zoom in [MIN_ZOOM, 40.0, 58.0, 200.0, 480.0, max_zoom] {
             t.zoom = zoom;
             assert_eq!(heights(&t), before, "zoom {zoom} changed lane heights");
             assert_eq!(t.model.content_height(), content_h);
@@ -1377,11 +1461,13 @@ mod tests {
         let body = t.body_rect(l.underlay);
         painted_playhead(&ctx, &mut t, screen, Vec::new());
 
-        for zoom in [MIN_ZOOM, 58.0, 120.0, MAX_ZOOM] {
+        for zoom in [MIN_ZOOM, 58.0, 120.0, 480.0, t.max_zoom()] {
             t.zoom = zoom;
             let max = t.max_scroll(l.canvas).x;
-            for cursor in [0.25f64, 0.5, 1.0] {
-                // Place the playhead `cursor` seconds into the visible canvas.
+            // Place the playhead at 25 %, 50 % and 75 % of the visible canvas width, which stays
+            // inside the view even at the extreme zoom levels.
+            for fraction in [0.25f64, 0.5, 0.75] {
+                let cursor = (l.canvas.width() as f64 * fraction) / zoom as f64;
                 let scroll = ((t.model.playhead - cursor) * zoom as f64) as f32;
                 t.scroll.x = scroll.clamp(0.0, max);
                 let p = painted_playhead(&ctx, &mut t, screen, Vec::new());
@@ -1488,15 +1574,17 @@ mod tests {
         );
         let expected_time = model::snap_to_frame(
             x_to_time(origin, t.view_start(), t.zoom, end.x),
-            model::PROJECT_FPS,
+            t.model.frame_rate,
         );
         let expected_x = time_to_x(origin, t.view_start(), t.zoom, expected_time);
         assert!(
             (dragged.line_x - expected_x).abs() < 0.01,
             "the line is on the snapped frame"
         );
+        let half_frame_px =
+            t.zoom / t.frame_rate().rate().to_f64_lossy() as f32 / 2.0 + 0.01;
         assert!(
-            (dragged.line_x - end.x).abs() <= t.zoom / model::PROJECT_FPS as f32 / 2.0 + 0.01,
+            (dragged.line_x - end.x).abs() <= half_frame_px,
             "the snapped line stays within half a frame of the pointer"
         );
         assert!(
@@ -1521,9 +1609,26 @@ mod tests {
         let target = 2.03;
         let x = time_to_x(l.canvas.left(), t.view_start(), t.zoom, target);
         click(&ctx, &mut t, screen, egui::pos2(x, l.ruler.center().y));
-        let expected = model::snap_to_frame(target, model::PROJECT_FPS);
+        let expected = model::snap_to_frame(target, t.model.frame_rate);
         assert_eq!(t.model.playhead, expected);
         assert!((expected - 2.041_666_666_666_666_5).abs() < 1e-9);
+    }
+
+    /// Ctrl+wheel calls this anchor path; the time under the pointer must not drift.
+    #[test]
+    fn wheel_zoom_keeps_the_time_under_the_pointer() {
+        let mut t = Timeline::default();
+        let origin = 142.0;
+        let pointer_x = origin + 320.0;
+        let before = x_to_time(origin, t.view_start(), t.zoom, pointer_x);
+        let before_zoom = t.zoom;
+        t.zoom_at_pointer(pointer_x, origin, 1.25);
+        assert!(t.zoom > before_zoom, "wheel factor did not zoom");
+        let after = x_to_time(origin, t.view_start(), t.zoom, pointer_x);
+        assert!(
+            (after - before).abs() < 1e-6,
+            "pointer time drifted {before} -> {after}"
+        );
     }
 
     /// Toolbar zoom anchors on the playhead's pixel when the playhead is visible.
@@ -1607,13 +1712,16 @@ mod tests {
 
     #[test]
     fn the_zoom_slider_covers_the_whole_scale() {
-        assert!((zoom_from_fraction(0.0) - MIN_ZOOM).abs() < 0.01);
-        assert!((zoom_from_fraction(1.0) - MAX_ZOOM).abs() < 0.01);
+        let max_zoom = Timeline::default().max_zoom();
+        assert!((zoom_from_fraction(0.0, max_zoom) - MIN_ZOOM).abs() < 0.01);
+        assert!((zoom_from_fraction(1.0, max_zoom) - max_zoom).abs() < 0.01);
         let default = Timeline::default().zoom;
-        let fraction = zoom_slider_fraction(default);
-        assert!((zoom_from_fraction(fraction) - default).abs() < 0.01);
+        let fraction = zoom_slider_fraction(default, max_zoom);
+        assert!((zoom_from_fraction(fraction, max_zoom) - default).abs() < 0.01);
         // Logarithmic: the midpoint is the geometric mean, not the arithmetic one.
-        assert!((zoom_from_fraction(0.5) - (MIN_ZOOM * MAX_ZOOM).sqrt()).abs() < 0.01);
+        assert!(
+            (zoom_from_fraction(0.5, max_zoom) - (MIN_ZOOM * max_zoom).sqrt()).abs() < 0.01
+        );
     }
 
     /// Clicking the right-hand zoom-in/out buttons and dragging the slider all change the scale.
@@ -1621,6 +1729,7 @@ mod tests {
     fn toolbar_zoom_controls_change_the_zoom() {
         let ctx = egui::Context::default();
         let mut t = Timeline::default();
+        let max_zoom = t.max_zoom();
         let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1200.0, 500.0));
         frame(&ctx, &mut t, screen, Vec::new());
         let toolbar = layout(screen).toolbar;
@@ -1633,15 +1742,38 @@ mod tests {
         click(&ctx, &mut t, screen, z.out.center());
         assert!(t.zoom < after_in, "zoom out: {} -> {}", after_in, t.zoom);
 
-        // Clicking at the right end of the slider reaches the maximum.
+        // Clicking at the right end of the slider reaches the dynamic maximum.
         let track = Rect::from_center_size(
             z.slider.center(),
             egui::vec2(z.slider.width() - 10.0, 3.0),
         );
         click(&ctx, &mut t, screen, egui::pos2(track.right(), track.center().y));
-        assert!((t.zoom - MAX_ZOOM).abs() < 0.5, "slider right edge: {}", t.zoom);
+        assert!(
+            (t.zoom - max_zoom).abs() < 0.5,
+            "slider right edge: {} (max {max_zoom})",
+            t.zoom
+        );
         // And the left end reaches the minimum.
         click(&ctx, &mut t, screen, egui::pos2(track.left(), track.center().y));
         assert!((t.zoom - MIN_ZOOM).abs() < 0.5, "slider left edge: {}", t.zoom);
+    }
+
+    #[test]
+    fn max_zoom_scales_with_the_project_frame_rate() {
+        for (rate, expected) in [
+            (FrameRate::Fps24, 4_800.0),
+            (FrameRate::Fps25, 5_000.0),
+            (FrameRate::Fps30, 6_000.0),
+            (FrameRate::Fps29_97, 5_994.0),
+            (FrameRate::Fps59_94, 11_988.0),
+        ] {
+            let t = Timeline::new(rate);
+            assert!(
+                (t.max_zoom() - expected).abs() < 0.1,
+                "{rate:?}: {} vs {expected}",
+                t.max_zoom()
+            );
+            assert_eq!(t.frame_rate(), rate);
+        }
     }
 }

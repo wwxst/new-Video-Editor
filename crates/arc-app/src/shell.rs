@@ -126,6 +126,14 @@ impl Default for Shell {
 }
 
 impl Shell {
+    /// Shell whose timeline uses the real sequence frame rate from a loaded project.
+    pub fn with_frame_rate(frame_rate: arc_core::time::FrameRate) -> Shell {
+        Shell {
+            sizes: PanelSizes::default(),
+            timeline: crate::timeline::Timeline::new(frame_rate),
+        }
+    }
+
     /// Draw the four panels into the root UI of one frame.
     pub fn ui(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();

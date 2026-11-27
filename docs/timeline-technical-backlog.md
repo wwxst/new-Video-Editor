@@ -1,28 +1,45 @@
 # Timeline technical backlog
 
 Living list for work that is intentionally outside the visual acceptance slices. Updated
-2026-11-27 after the timeline Phase 2 zoom supplement.
+2026-11-27 after the timeline Phase 2 zoom supplement and T1 VFR verification.
 
 ## T1 — VFR end-to-end verification (must do)
 
-**Status:** open. **Priority:** high.
+**Status:** **closed 2026-11-27**. **Priority:** high.
+**Report:** [timeline T1 VFR acceptance](../reports/timeline-t1-vfr-2026-11-27.md).
 
-The thumbnail path already asks `VideoDecoder` for the frame displayed at the project time and
-records the returned PTS. `VideoDecoder::frame_at`/`frame_displayed_at` use the actual stream PTS,
-including for streams flagged VFR. However, there is no VFR asset in the repository, so the pipeline
-is not proven end to end.
+The thumbnail path asks `VideoDecoder` for the frame displayed at the project time and records the
+returned PTS. T1 added a generated VFR fixture and proved the whole path, including cache sharing
+for repeated project frames.
 
-**Acceptance**
+**Acceptance — all met**
 
-1. Add a generated VFR fixture (e.g. MPEG-TS/MP4 with deliberately uneven frame durations) to the
-   generated-fixture set; do not use third-party footage.
-2. Decode a project-frame range and assert every returned PTS equals the expected PTS from the
-   fixture, including a repeated PTS where the VFR gap spans more than one project frame.
-3. Confirm the cache shares one texture for repeated project frames that resolve to the same PTS.
-4. Confirm no UI-thread decode and no unbounded pending requests.
+1. **Generated VFR fixture.** `arc_media::fixtures::write_vfr_counter_video` builds a 30-frame,
+   320×180 MP4/FFV1 counter with unique frame numbers and 0.2 s gaps at frames 10 and 20. It is
+   generated from the existing counter writer, not third-party footage. MP4 is required: the MKV
+   muxer hides the VFR flag by writing the nominal default duration.
+2. **PTS mapping.** `vfr_counter_maps_every_project_frame_to_expected_pts` decodes project frames
+   at 24, 25, 30 and 59.94 fps and asserts both the actual PTS and the embedded counter equal the
+   fixture's expected source frame. The 0.233 s gap spans seven 30 fps project frames; the same
+   source PTS is observed for those repeated project frames.
+3. **Cache sharing.** `vfr_thumbnail_cache_shares_one_texture_per_source_pts` requests 30 project
+   frames at 30 fps. They resolve to 20 distinct source frames, so the hub reports 20 requests and
+   20 textures (10 repeated tiles are cache hits). VFR intervals are learned from the decoder's
+   look-ahead PTS; `FrameKey::Pts` is the cache key.
+4. **UI-thread/bounded guards.** `MediaHub::video_frame` only enqueues work; the test asserts
+   `decoded == 0` before the UI poll and `pending <= MAX_PENDING` (24). A per-path `vfr_probe`
+   guard allows one probe decode per unknown interval, so a long gap cannot flood the worker.
 
-Until then, VFR is “supported by the decoder, not proven by a fixture”; the sampler uses the
-stream's reported average rate for tile spacing.
+**Timeline/preview consistency:** `VideoDecoder::frame_at` intentionally applies a half-frame seek
+bias; `frame_displayed_at` returns the frame whose presentation interval contains the time. Preview
+and export now use `frame_displayed_at`, matching thumbnail sampling. The regression
+`preview_uses_the_displayed_source_frame_at_project_rate_mismatch` checks a 24 fps source in a
+30 fps project: project frame 1 shows source frame 0, not frame 1.
+
+**Remaining limitation:** tile spacing still uses the stream's reported average rate, not a full
+VFR index. The cache is correct once an interval is decoded; the first tile in an unknown interval
+costs one probe decode. This is acceptable for the current thumbnail path and is recorded in the
+T1 report.
 
 ## T2 — Idle continuous repaint / CPU (optimize later)
 

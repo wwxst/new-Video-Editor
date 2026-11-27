@@ -387,6 +387,14 @@ int arc_av_video_at(ArcAv *a, int64_t target_pts, uint8_t *dst, int stride, int6
     return 0;
 }
 
+/* PTS of the look-ahead frame kept by the last successful arc_av_video_at call, or INT64_MIN when
+ * there is no next frame (EOF). Used by the caller to close the current frame's display interval
+ * without a second decode. */
+int64_t arc_av_video_next_pts(const ArcAv *a) {
+    if (!a || !a->held->buf[0]) return INT64_MIN;
+    return frame_pts(a->held);
+}
+
 /* ---- audio ---------------------------------------------------------------------------------- */
 
 /* Output frames kept behind the read cursor. The mixer reads one frame more than it advances, so

@@ -389,7 +389,9 @@ impl PreviewEngine {
             }
         }
         let (_, decoder) = self.decoders.get_mut(asset)?;
-        match decoder.frame_at(time) {
+        // Display semantics, not the seek-biased `frame_at`: at a project frame the source frame
+        // whose presentation interval contains the time is what the timeline thumbnail shows.
+        match decoder.frame_displayed_at(time) {
             Ok(f) => {
                 self.stats.decodes += 1;
                 let cached = Arc::new(CachedFrame {

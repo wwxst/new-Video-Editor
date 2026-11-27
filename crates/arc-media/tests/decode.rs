@@ -51,6 +51,31 @@ fn frame_accurate_random_sequential_and_backward_access() {
 }
 
 #[test]
+fn displayed_at_is_interval_based_and_seek_bias_is_documented() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let p = fixture(dir.path(), FrameRate::Fps24, 2);
+    let mut d = VideoDecoder::open(&p).expect("open");
+    // At a 30 fps project frame 1 the 24 fps source has not advanced: frame 0 is displayed until
+    // 1/24 s. The interval-based API returns frame 0; `frame_at` is the half-frame seek helper and
+    // returns frame 1 here. The preview/export paths use `frame_displayed_at` so they match the
+    // timeline thumbnail.
+    let t = Time::new(1, 30).expect("t");
+    let displayed = d.frame_displayed_at(t).expect("displayed");
+    assert_eq!(read_counter(displayed.rgba, W, H), Some(0));
+    let next = displayed.next_time.expect("next frame PTS");
+    assert!(
+        (next.to_f64_lossy() - 1.0 / 24.0).abs() <= 0.0011,
+        "frame 0's display interval ends at source frame 1 (within the 1 ms container tick), got {next}"
+    );
+    let seek = d.frame_at(t).expect("seek");
+    assert_eq!(
+        read_counter(seek.rgba, W, H),
+        Some(1),
+        "frame_at's half-frame bias is intentionally different and not used by the UI"
+    );
+}
+
+#[test]
 fn audio_decode_is_sample_addressed() {
     let dir = tempfile::tempdir().expect("tmp");
     let p = fixture(dir.path(), FrameRate::Fps30, 60); // 2 s of 1 kHz tone

@@ -180,7 +180,9 @@ pub fn export(
                                 }
                             }
                         });
-                        match dec.as_mut().map(|d| d.frame_at(*time)) {
+                        // Match the viewer/thumbnail frame selection: the frame displayed at the
+                        // planned source time, not a half-frame-biased seek target.
+                        match dec.as_mut().map(|d| d.frame_displayed_at(*time)) {
                             Some(Ok(fr)) => Some((fr.width, fr.height, fr.rgba.to_vec())),
                             Some(Err(e)) => {
                                 warnings.push(format!("frame {f}: {asset} at {time}: {e}"));

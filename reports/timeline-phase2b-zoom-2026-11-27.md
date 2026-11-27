@@ -79,8 +79,8 @@ now steps by **project frames**, never by source frames:
     number and PTS (`counter == k`, `PTS == k/30`);
   - a **24 fps counter fixture in a 30 fps project**: exactly 24 distinct source frames per second,
     repeated project-frame hits, and 24 cached textures for 30 project tiles.
-- VFR sources keep a requested-time key (`FrameKey::TimeUs`) and the decoder's actual PTS; VFR
-  end-to-end verification remains backlog T1.
+- VFR sources now use the decoder's actual PTS and a learned display interval; T1 was completed on
+  2026-11-27. See [timeline T1 VFR acceptance](timeline-t1-vfr-2026-11-27.md).
 - Requests stay visible-area-only, deduplicated and bounded to `MAX_PENDING = 24` with 6 new
   requests per UI frame. Cache: 128 thumbnails × 320×180×4 ≈ **29.5 MB** texture budget.
 

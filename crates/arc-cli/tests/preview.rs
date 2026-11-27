@@ -12,7 +12,7 @@ use arc_core::time::{FrameRate, Time};
 use arc_core::{Command, StaticCatalog};
 use arc_media::VideoDecoder;
 use arc_media::encode::VideoCodec;
-use arc_media::fixtures::write_counter_video;
+use arc_media::fixtures::{read_counter, write_counter_video};
 use serde_json::json;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -20,13 +20,19 @@ use std::sync::{Arc, Mutex, MutexGuard};
 static GPU_SERIAL: Mutex<()> = Mutex::new(());
 
 fn serial() -> MutexGuard<'static, ()> {
-    GPU_SERIAL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    GPU_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// 30-frame, 1 s, 320×180 counter video and a project with one clip on V1.
 fn project_with_clip(dir: &Path) -> Project {
+    project_with_source_rate(dir, FrameRate::Fps30, 30)
+}
+
+fn project_with_source_rate(dir: &Path, source_rate: FrameRate, frames: u32) -> Project {
     let media = dir.join("counter.mkv");
-    write_counter_video(&media, 30, FrameRate::Fps30.rate(), 320, 180, false).expect("fixture");
+    write_counter_video(&media, frames, source_rate.rate(), 320, 180, false).expect("fixture");
     let mut e = Engine::new(
         Project::new("Preview", FrameRate::Fps30, Resolution { w: 320, h: 180 }),
         0,
@@ -91,18 +97,37 @@ fn preview_frame_matches_the_export() {
     );
 }
 
+/// A 24 fps source in a 30 fps project must repeat its frame in the second half of each source
+/// interval. Preview and thumbnails use `frame_displayed_at`, so project frame 1 shows source frame
+/// 0, not source frame 1 (the half-frame seek-bias answer).
+#[test]
+fn preview_uses_the_displayed_source_frame_at_project_rate_mismatch() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().expect("tmp");
+    let project = project_with_source_rate(dir.path(), FrameRate::Fps24, 24);
+    let mut e = engine(&project, dir.path());
+    let f = e.frame(1).expect("preview frame 1");
+    assert_eq!(
+        read_counter(&f.rgba, f.width, f.height),
+        Some(0),
+        "project frame 1 of a 30 fps sequence is still source frame 0"
+    );
+    let f = e.frame(2).expect("preview frame 2");
+    assert_eq!(
+        read_counter(&f.rgba, f.width, f.height),
+        Some(1),
+        "project frame 2 (66.7 ms) is source frame 1 at 24 fps"
+    );
+}
+
 /// C1 acceptance 2: half quality halves the output while decoding the source at native size.
 #[test]
 fn half_quality_halves_the_frame() {
     let _serial = serial();
     let dir = tempfile::tempdir().expect("tmp");
     let project = project_with_clip(dir.path());
-    let mut e = PreviewEngine::new(
-        project,
-        dir.path().to_path_buf(),
-        PreviewQuality::Half,
-    )
-    .expect("preview");
+    let mut e = PreviewEngine::new(project, dir.path().to_path_buf(), PreviewQuality::Half)
+        .expect("preview");
     let f = e.frame(0).expect("half frame");
     assert_eq!((f.width, f.height), (160, 90));
     assert_eq!(f.rgba.len(), 160 * 90 * 4);
@@ -146,7 +171,10 @@ fn unavailable_asset_warns_and_renders_the_background() {
         f.warnings
     );
     assert!(
-        f.rgba.iter().enumerate().all(|(i, b)| i % 4 == 3 || *b == 0),
+        f.rgba
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i % 4 == 3 || *b == 0),
         "a missing source must render the background, not a stale frame"
     );
     assert_eq!(e.stats().decodes, 0);
@@ -268,7 +296,10 @@ fn preview_matches_the_export_with_two_layers() {
     .expect("export");
     let mut decoded = VideoDecoder::open(&out).expect("open export");
     let frame = decoded.frame_at(Time::ZERO).expect("exported frame");
-    assert_eq!(frame.rgba, preview.rgba, "two-layer preview must equal the export");
+    assert_eq!(
+        frame.rgba, preview.rgba,
+        "two-layer preview must equal the export"
+    );
 }
 
 /// The cache is bounded by bytes, so large frames cannot grow it without limit; eviction is LRU.
@@ -284,7 +315,10 @@ fn cache_eviction_respects_the_byte_budget() {
     assert!(e.cache_bytes() <= frame_bytes + 1);
     e.frame(11).expect("frame 11");
     assert_eq!(e.stats().decodes, 2);
-    assert!(e.cache_bytes() <= frame_bytes + 1, "evicted down to the budget");
+    assert!(
+        e.cache_bytes() <= frame_bytes + 1,
+        "evicted down to the budget"
+    );
     e.frame(10).expect("frame 10 again");
     assert_eq!(e.stats().decodes, 3, "frame 10 was evicted");
 }
@@ -393,7 +427,10 @@ fn changing_an_asset_path_reopens_the_decoder() {
     e.set_project(edited);
 
     let after = e.frame(0).expect("after relink").rgba;
-    assert_ne!(before, after, "the new source must be decoded, not the old one");
+    assert_ne!(
+        before, after,
+        "the new source must be decoded, not the old one"
+    );
     assert_eq!(e.stats().decodes, 2);
 }
 /// P3-4: a file repaired in place (same path) must be picked up, not served from the stale
@@ -413,7 +450,13 @@ fn repairing_the_file_at_the_same_path_is_picked_up() {
         "{:?}",
         missing.warnings
     );
-    assert!(missing.rgba.iter().enumerate().all(|(i, b)| i % 4 == 3 || *b == 0));
+    assert!(
+        missing
+            .rgba
+            .iter()
+            .enumerate()
+            .all(|(i, b)| i % 4 == 3 || *b == 0)
+    );
 
     // The same path gets a valid file again (different size and mtime).
     write_counter_video(&media, 20, FrameRate::Fps30.rate(), 320, 180, false).expect("repaired");

@@ -227,6 +227,7 @@ unsafe extern "C" {
         err: *mut c_char,
         errlen: c_int,
     ) -> c_int;
+    fn arc_av_video_next_pts(a: *const ArcAv) -> i64;
     fn arc_av_audio_read(
         a: *mut ArcAv,
         rate: c_int,
@@ -375,6 +376,10 @@ pub struct FrameRef<'a> {
     pub rgba: &'a [u8],
     /// Presentation time of the delivered frame, relative to the stream start.
     pub time: Time,
+    /// Presentation time of the next source frame, relative to the stream start, when the decoder
+    /// has a look-ahead frame. `None` at end of stream. This is the end of this frame's display
+    /// interval; VFR caches use it to map every project frame in a long gap to one source frame.
+    pub next_time: Option<Time>,
 }
 
 /// Upper bound for one decoded frame: 2^28 pixels is 1 GiB of RGBA, comfortably above any real
@@ -480,11 +485,23 @@ impl VideoDecoder {
         let time = Time::new(rel, 1)
             .and_then(|x| x.checked_mul(tb))
             .unwrap_or(Time::ZERO);
+        // SAFETY: `self.h` is the live context that just served the frame; the look-ahead frame,
+        // if any, belongs to that context.
+        let next_ticks = unsafe { arc_av_video_next_pts(self.h.0) };
+        let next_time = (next_ticks > i64::MIN)
+            .then(|| {
+                Time::new(next_ticks - self.info.start_pts, 1)
+                    .and_then(|x| x.checked_mul(tb))
+                    .ok()
+            })
+            .flatten()
+            .filter(|next| *next > time);
         Ok(FrameRef {
             width: self.info.width,
             height: self.info.height,
             rgba: &self.buf,
             time,
+            next_time,
         })
     }
 }

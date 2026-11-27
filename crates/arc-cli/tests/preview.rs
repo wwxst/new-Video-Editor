@@ -31,18 +31,30 @@ fn project_with_clip(dir: &Path) -> Project {
 }
 
 fn project_with_source_rate(dir: &Path, source_rate: FrameRate, frames: u32) -> Project {
+    project_with_rates(dir, FrameRate::Fps30, source_rate, frames)
+}
+
+fn project_with_rates(
+    dir: &Path,
+    project_rate: FrameRate,
+    source_rate: FrameRate,
+    frames: u32,
+) -> Project {
     let media = dir.join("counter.mkv");
     write_counter_video(&media, frames, source_rate.rate(), 320, 180, false).expect("fixture");
+    let source_duration = source_rate.time_of_frame(frames as i64);
     let mut e = Engine::new(
-        Project::new("Preview", FrameRate::Fps30, Resolution { w: 320, h: 180 }),
+        Project::new("Preview", project_rate, Resolution { w: 320, h: 180 }),
         0,
         Arc::new(StaticCatalog::default()),
     )
     .expect("engine");
+    // 29.97/59.94 need a whole number of project frames, not 1.0 s (which is off-boundary).
+    let duration = project_rate.time_of_frame(project_rate.nominal());
     let commands: Vec<Command> = vec![
         json!({"op":"track.add","id":"tr_v1","kind":"video"}),
-        json!({"op":"asset.import","id":"as_a","path":media.to_str().expect("utf8"),"kind":"video","probe":{"duration":{"num":1,"den":1}}}),
-        json!({"op":"timeline.add_clip","id":"cl_1","track":"tr_v1","asset":"as_a","start":{"num":0,"den":1},"duration":{"num":1,"den":1}}),
+        json!({"op":"asset.import","id":"as_a","path":media.to_str().expect("utf8"),"kind":"video","probe":{"duration":{"num":source_duration.num(),"den":source_duration.den()}}}),
+        json!({"op":"timeline.add_clip","id":"cl_1","track":"tr_v1","asset":"as_a","start":{"num":0,"den":1},"duration":{"num":duration.num(),"den":duration.den()}}),
     ]
     .into_iter()
     .map(|v| serde_json::from_value(v).expect("command"))
@@ -104,19 +116,69 @@ fn preview_frame_matches_the_export() {
 fn preview_uses_the_displayed_source_frame_at_project_rate_mismatch() {
     let _serial = serial();
     let dir = tempfile::tempdir().expect("tmp");
-    let project = project_with_source_rate(dir.path(), FrameRate::Fps24, 24);
-    let mut e = engine(&project, dir.path());
-    let f = e.frame(1).expect("preview frame 1");
+    // A 24 fps source in each supported project rate. Frame times are exact project-frame starts;
+    // the expected source frame is the one whose display interval contains that time.
+    for project_rate in [
+        FrameRate::Fps24,
+        FrameRate::Fps25,
+        FrameRate::Fps30,
+        FrameRate::Fps29_97,
+        FrameRate::Fps59_94,
+    ] {
+        let project = project_with_rates(dir.path(), project_rate, FrameRate::Fps24, 60);
+        let mut e = engine(&project, dir.path());
+        let last = project_rate.nominal() - 1;
+        for frame in [0, 1, 2, project_rate.nominal() / 2, last - 1, last] {
+            if frame < 0 {
+                continue;
+            }
+            let f = e.frame(frame).expect("preview frame");
+            let expected = FrameRate::Fps24
+                .frame_at(project_rate.time_of_frame(frame), arc_core::time::Round::Floor)
+                .expect("source frame") as u32;
+            assert_eq!(
+                read_counter(&f.rgba, f.width, f.height),
+                Some(expected),
+                "{project_rate:?} project frame {frame}: source 24 fps frame {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn export_uses_the_same_displayed_source_frame_as_preview() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().expect("tmp");
+    let project = project_with_rates(dir.path(), FrameRate::Fps30, FrameRate::Fps24, 24);
+    let preview = {
+        let mut e = engine(&project, dir.path());
+        e.frame(1).expect("preview frame 1")
+    };
     assert_eq!(
-        read_counter(&f.rgba, f.width, f.height),
+        read_counter(&preview.rgba, preview.width, preview.height),
         Some(0),
-        "project frame 1 of a 30 fps sequence is still source frame 0"
+        "preview project frame 1 must show source frame 0"
     );
-    let f = e.frame(2).expect("preview frame 2");
+
+    let out = dir.path().join("export-frame1.mkv");
+    export(
+        &project,
+        &ExportSpec {
+            output: out.clone(),
+            codec: VideoCodec::Ffv1,
+            from: Some(1),
+            to: Some(2),
+            media_root: dir.path().to_path_buf(),
+        },
+        |_, _| {},
+    )
+    .expect("export");
+    let mut decoded = VideoDecoder::open(&out).expect("open export");
+    let frame = decoded.frame_at(Time::ZERO).expect("exported frame");
     assert_eq!(
-        read_counter(&f.rgba, f.width, f.height),
-        Some(1),
-        "project frame 2 (66.7 ms) is source frame 1 at 24 fps"
+        read_counter(frame.rgba, frame.width, frame.height),
+        Some(0),
+        "export project frame 1 must match preview's source frame 0"
     );
 }
 

@@ -19,7 +19,7 @@ for repeated project frames.
    generated from the existing counter writer, not third-party footage. MP4 is required: the MKV
    muxer hides the VFR flag by writing the nominal default duration.
 2. **PTS mapping.** `vfr_counter_maps_every_project_frame_to_expected_pts` decodes project frames
-   at 24, 25, 30 and 59.94 fps and asserts both the actual PTS and the embedded counter equal the
+   at 24, 25, 30, 29.97 and 59.94 fps and asserts both the actual PTS and the embedded counter equal the
    fixture's expected source frame. The 0.233 s gap spans seven 30 fps project frames; the same
    source PTS is observed for those repeated project frames.
 3. **Cache sharing.** `vfr_thumbnail_cache_shares_one_texture_per_source_pts` requests 30 project
@@ -29,12 +29,25 @@ for repeated project frames.
 4. **UI-thread/bounded guards.** `MediaHub::video_frame` only enqueues work; the test asserts
    `decoded == 0` before the UI poll and `pending <= MAX_PENDING` (24). A per-path `vfr_probe`
    guard allows one probe decode per unknown interval, so a long gap cannot flood the worker.
+5. **1f thumbnail sample time.** `paint_video` now samples the **start** of the project-frame span
+   via `thumbnail_sample_time`/`FrameRate::time_of_frame`, matching `plan_frame` in preview/export.
+   The old midpoint sampled 50 ms for project frame 1 at 30 fps and disagreed with a 24 fps source.
+   `thumbnail_sample_time_is_the_exact_project_frame_start` covers 24/25/30/29.97/59.94.
+6. **Real-fixture three-way checks.** `thumbnail_source_frame_matches_displayed_at_cfr_rates_and_reverse`
+   drives the real thumbnail worker/cache for 24/25/30/29.97/59.94 and 24-in-30, forward and
+   reverse, and compares actual thumbnail PTS + counter with `frame_displayed_at`.
+   `thumbnail_source_frame_matches_displayed_at_vfr_boundaries_and_reverse` covers the VFR gap,
+   exact tick-shifted boundary, last frame and reverse access.
+7. **Exact interval metadata.** VFR intervals use rational `Time`, shifted by the decoder's tick so
+   `[pts - tick, next - tick)` selects the same frame as `frame_displayed_at`; the last interval is
+   open-ended. Metadata is capped at 4096 spans per path and the bound is tested.
 
 **Timeline/preview consistency:** `VideoDecoder::frame_at` intentionally applies a half-frame seek
-bias; `frame_displayed_at` returns the frame whose presentation interval contains the time. Preview
-and export now use `frame_displayed_at`, matching thumbnail sampling. The regression
-`preview_uses_the_displayed_source_frame_at_project_rate_mismatch` checks a 24 fps source in a
-30 fps project: project frame 1 shows source frame 0, not frame 1.
+bias; `frame_displayed_at` returns the frame whose presentation interval contains the time. Preview,
+export and the timeline now all use `frame_displayed_at` at exact project-frame starts. The regression
+`preview_uses_the_displayed_source_frame_at_project_rate_mismatch` loops 24/25/30/29.97/59.94 and
+checks a 24 fps source: project frame 1 shows source frame 0, not frame 1. The export regression
+decodes project frame 1 and confirms counter 0.
 
 **Remaining limitation:** tile spacing still uses the stream's reported average rate, not a full
 VFR index. The cache is correct once an interval is decoded; the first tile in an unknown interval

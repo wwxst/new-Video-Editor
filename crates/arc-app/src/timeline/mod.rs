@@ -907,10 +907,11 @@ fn paint_video(
         if !rect.intersects(visible) {
             continue;
         }
-        // Centre of the project-frame span represented by this tile.
-        let project_frame = index as u64 * step_frames;
-        let time = (project_frame as f64 + step_frames as f64 / 2.0) / project_fps;
-        if let Some(visual) = media.video_frame(source, time, source_rate, vfr) {
+        // Start of the project-frame span represented by this tile. This is the same exact
+        // `FrameRate::time_of_frame` used by preview/export; a midpoint would disagree with a
+        // lower-rate source near the end of its display interval.
+        let time = media::thumbnail_sample_time(frame_rate, index as u64, step_frames);
+        if let Some(visual) = media.video_frame_at(source, time, source_rate, vfr) {
             let uv = draw::uv_fill(visual.aspect, rect);
             painter.image(visual.texture.id(), rect, uv, Color32::WHITE);
         }

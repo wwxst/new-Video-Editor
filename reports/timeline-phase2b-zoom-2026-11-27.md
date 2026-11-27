@@ -199,10 +199,10 @@ Default 30 fps timeline and toolbar:
 
 ## 10. Unresolved / limits
 
-1. **VFR is supported by the decoder, not proven by a VFR fixture.** `VideoDecoder::frame_displayed_at`
-   returns the actual PTS and `ThumbVisual` carries it, but the repository has no VFR test asset; VFR
-   tiles use a requested-time key and the stream's reported average rate for spacing. Tracked as
-   **T1** in [the technical backlog](../docs/timeline-technical-backlog.md).
+1. **VFR is now proven by a generated fixture (T1 closed 2026-11-27).** The earlier requested-time
+   key was replaced by exact-PTS intervals, and 1f thumbnails, preview and export now share the
+   project-frame-start mapping; see [the T1 report](timeline-t1-vfr-2026-11-27.md). VFR tile spacing
+   still uses the stream's reported average rate; that limitation remains in the T1 report.
 2. **NDF only.** As requested, 29.97/59.94 use NDF `mm:ss` labels; drop-frame timecode is not added.
 3. **The app still repaints continuously** (`request_redraw` after every frame, pre-existing). This
    keeps CPU busy at idle even though the media caches settle; tracked as **T2**.

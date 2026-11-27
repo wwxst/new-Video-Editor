@@ -35,7 +35,7 @@ pts_us(n) = round((n / 30 + 0.2 * floor(n / 10)) * 1_000_000)
 ## 2. PTS mapping
 
 `vfr_counter_maps_every_project_frame_to_expected_pts` samples the 30 fps VFR source from projects
-at **24, 25, 30 and 59.94 fps**. For every project frame it asserts:
+at **24, 25, 30, 29.97 and 59.94 fps**. For every project frame it asserts:
 
 - the decoded `FrameRef::time` equals the fixture's expected PTS (within the 1 ms container tick);
 - the counter read from the RGBA frame equals the expected source frame index;
@@ -51,9 +51,14 @@ frames inside one long source interval each issued a decode. T1 changes this to 
 
 - `VideoDecoder` now exposes **`FrameRef::next_time`** (the decoder's look-ahead PTS) through a tiny
   C accessor, `arc_av_video_next_pts`.
-- `MediaHub` learns `[pts, next_pts)` intervals and keys decoded textures by **`FrameKey::Pts`**.
+- `MediaHub` learns exact-rational `Time` intervals and keys decoded textures by **`FrameKey::Pts`**.
+  The interval is `[pts - tick, next_pts - tick)`, mirroring `frame_displayed_at`, which adds one
+  container tick to the requested time. This keeps the cache and decoder on the same side of a VFR
+  boundary at sub-microsecond PTS values.
 - A per-path `vfr_probe` guard allows one probe decode per unknown interval; other project frames
   wait for that probe instead of flooding the worker.
+- Interval metadata is capped at **4096 spans per path** (oldest evicted first, ~160 KiB worst
+  case). Eviction only costs a re-probe; textures and the LRU are untouched.
 
 `vfr_thumbnail_cache_shares_one_texture_per_source_pts` requests 30 project frames at 30 fps:
 
@@ -71,36 +76,65 @@ The last row is the UI-thread guard: `MediaHub::video_frame` only enqueues; deco
 counted and uploaded in `poll` on the UI thread. Header probing still opens a decoder on the UI
 thread and remains backlog T3.
 
-## 4. Thumbnail vs preview mapping
+## 4. Thumbnail vs preview/export mapping
 
-The check found a real inconsistency:
+The first check found a real inconsistency in the **frame selector**:
 
 - **Thumbnail:** `frame_displayed_at` returns the frame whose presentation interval contains the
   project time (one container tick of tolerance).
 - **Preview/export:** used `frame_at`, which applies a **half-frame seek bias**. In the second half
   of a source frame, `frame_at` can advance to the next frame early.
 
+The second source review found another inconsistency in the **sample time**:
+
+- Preview/export sample the **start** of each project frame (`plan_frame` → `FrameRate::time_of_frame`).
+- `paint_video` sampled the **middle** of the project-frame span: for 30 fps it used 50 ms for
+  project frame 1. A 24 fps source has advanced by then, so the thumbnail showed source frame 1 while
+  preview showed source frame 0.
+
+**Fixes:**
+
+1. Preview (`crates/arc-cli/src/preview.rs`) and export (`crates/arc-cli/src/export.rs`) now use
+   `frame_displayed_at`, matching the thumbnail's interval rule. `frame_at` remains for
+   seek/nearest compatibility.
+2. `paint_video` (`crates/arc-app/src/timeline/mod.rs`) now calls
+   `media::thumbnail_sample_time(frame_rate, tile, step_frames)`, which returns the exact rational
+   `FrameRate::time_of_frame` start. `MediaHub::video_frame_at` carries that `Time` into the cache
+   and derives CFR frame identity with `FrameRate::frame_at(…, Round::Floor)`, not `floor(t*fps)`.
+   This also removes a 29.97/59.94 frame-start rounding hazard.
+
 Concrete case: a 24 fps source in a 30 fps project at project frame 1 (`t = 1/30 s`). Frame 0 is
-displayed until `1/24 s`, but `frame_at` aims at `1/30 + 1/48` and returns frame 1. The thumbnail
-correctly shows frame 0.
+displayed until `1/24 s`; preview and thumbnail now both show source frame 0. Project frame 2
+(66.7 ms) shows source frame 1.
 
-**Fix:** preview (`crates/arc-cli/src/preview.rs`) and export (`crates/arc-cli/src/export.rs`) now use
-`frame_displayed_at`, matching the thumbnail mapping. `frame_at` remains for seek/nearest
-compatibility and is covered by its existing tests.
+Regressions:
 
-Regression: `preview_uses_the_displayed_source_frame_at_project_rate_mismatch` builds a 24 fps
-counter source in a 30 fps project and asserts project frame 1 → source frame 0, project frame 2 →
-source frame 1. `preview_frame_matches_the_export` and the export end-to-end suite still pass.
+- `preview_uses_the_displayed_source_frame_at_project_rate_mismatch` loops 24/25/30/29.97/59.94
+  project rates with a 24 fps fixture and checks every sampled frame against the 24 fps source
+  interval.
+- `export_uses_the_same_displayed_source_frame_as_preview` exports project frame 1 and checks the
+  decoded export counter is 0, matching preview.
+- `thumbnail_source_frame_matches_displayed_at_cfr_rates_and_reverse` drives the real thumbnail
+  worker/cache for 24/25/30/29.97/59.94 plus 24-in-30, in forward and reverse order, and compares
+  the thumbnail's actual PTS *and* the fixture counter with `frame_displayed_at`.
+- `thumbnail_source_frame_matches_displayed_at_vfr_boundaries_and_reverse` does the same around the
+  VFR gap, the exact interval boundary, the last source frame, and reverse seeks.
 
 ## 5. CFR, VFR, project rates and extreme zoom
 
-- **CFR:** existing 24/25/29.97/30 fps decode tests and the 24 fps-in-30 fps cache test still pass.
-- **VFR:** 24/25/30/59.94 project-rate mapping, repeated PTS, 20-texture cache, bounded pending.
-- **Different project rates:** the VFR mapping test loops 24/25/30/59.94; ruler/zoom tests already
-  cover 24/25/30/29.97/59.94.
+- **CFR:** 24/25/29.97/30/59.94 decode tests; the 24 fps-in-30 fps cache test; the new real-fixture
+  1f thumbnail test checks 24/25/30/29.97/59.94 and reverse access.
+- **VFR:** 24/25/30/29.97/59.94 project-rate mapping, repeated PTS, 20-texture cache, exact gap
+  boundary, last frame (open-ended interval) and reverse access.
+- **Different project rates:** the VFR mapping test loops 24/25/30/59.94; preview/thumbnail tests
+  loop 24/25/30/29.97/59.94; ruler/zoom tests already cover the same rates.
 - **Extreme zoom:** `thumbnail_tiles_step_by_whole_project_frames` now also asserts that at the
   200 px-per-project-frame ceiling a 128 px tile is exactly one project frame for 24/25/30/29.97/
   59.94 fps. No fractional step can skip or duplicate a frame at maximum zoom.
+- **1f start-time unit test:** `thumbnail_sample_time_is_the_exact_project_frame_start` asserts
+  project frame 1 at 30 fps is `1/30 s` (not the old 50 ms midpoint) for all five rates.
+- **Interval metadata test:** `vfr_interval_metadata_is_half_open_and_bounded` checks the tick-shifted
+  boundary and that 4100+ intervals stay capped at 4096.
 
 ## 6. Commands and results
 
@@ -110,9 +144,9 @@ Environment: Windows 11, GNU Rust 1.100, FFmpeg 9.1 LGPL on `PATH` and `ARCLINE_
 |---|---|
 | `cargo check -p arc-media -p arc-app -p arc-cli` | pass |
 | `cargo test -p arc-media` | **35 passed**, 0 failed |
-| `cargo test -p arc-app` | **61 passed**, 0 failed, 7 ignored |
-| `cargo test -p arc-app -- --ignored` | **7 passed**, 0 failed (includes both VFR tests) |
-| `cargo test -p arc-cli --test preview` | **16 passed**, 0 failed |
+| `cargo test -p arc-app` | **63 passed**, 0 failed, 9 ignored |
+| `cargo test -p arc-app -- --ignored` | **9 passed**, 0 failed (includes both VFR tests) |
+| `cargo test -p arc-cli --test preview` | **17 passed**, 0 failed |
 | `cargo test -p arc-cli --test render_e2e` | **6 passed**, 0 failed |
 
 Full logs are kept locally as `reports/vfr-test-*.log` and `reports/vfr-check.log` (gitignored;
@@ -121,9 +155,9 @@ only this report and the test code are committed).
 ## 7. Remaining limitations
 
 1. **Tile spacing is still based on the reported average rate**, not a full VFR index. The sampler
-   currently steps by project frames using that average; the PTS/cache itself is exact. Consequence:
-   tile density in a very long VFR gap is conservative, but no wrong frame is shown and no duplicate
-   decode occurs after the interval is learned.
+   steps by project frames using that average; the sample time, PTS mapping and cache are exact.
+   Consequence: tile density in a very long VFR gap is conservative, but no wrong frame is shown and
+   no duplicate decode occurs after the interval is learned.
 2. **First probe per unknown interval costs one decode.** A direct seek into an unknown VFR region
    decodes once to learn its PTS and next PTS; subsequent project frames reuse the texture. This is
    bounded and acceptable for thumbnails; a future full VFR index would remove it.
@@ -134,16 +168,21 @@ only this report and the test code are committed).
 5. **No full-workspace test run** was repeated after the change. Targeted suites above are the
    regression evidence; the full workspace remains the broader CI gate.
 6. Thumbnail visual density was not re-screenshotted: the UI layout and paint code are unchanged;
-   only the source-frame/time mapping and cache key changed.
+   only the source-frame/time mapping, cache key and interval metadata changed.
+7. **`VfrIntervals` is capped, not discarded with the texture LRU.** After 4096 distinct source
+   frames on one path, an old interval is evicted and re-probed if revisited; this is intentional
+   and bounded, but a future full VFR index would make seeks O(1) without re-probing.
 
 ## 8. Files changed
 
 - `crates/arc-media/csrc/arc_av.c` — `arc_av_video_next_pts`.
 - `crates/arc-media/src/libav.rs` — `FrameRef::next_time`.
 - `crates/arc-media/src/fixtures.rs` — VFR counter writer + expected PTS helper.
-- `crates/arc-app/src/timeline/media.rs` — `FrameKey::Pts`, `VfrIntervals`, `vfr_probe`, cache
-  handling, VFR/CFR/zoom tests.
+- `crates/arc-app/src/timeline/mod.rs` — `paint_video` samples the exact project-frame start through
+  `thumbnail_sample_time`, not the frame midpoint.
+- `crates/arc-app/src/timeline/media.rs` — `FrameKey::Pts`, exact-`Time` `VfrIntervals` with tick
+  shift and 4096-span cap, `video_frame_at`, `thumbnail_sample_time`, CFR/VFR/reverse tests.
 - `crates/arc-cli/src/preview.rs`, `crates/arc-cli/src/export.rs` — `frame_displayed_at`.
 - `crates/arc-media/tests/decode.rs` — displayed-vs-seek-bias regression.
-- `crates/arc-cli/tests/preview.rs` — 24 fps source in 30 fps project regression.
+- `crates/arc-cli/tests/preview.rs` — 24 fps source in five project rates plus export consistency.
 - `docs/timeline-technical-backlog.md` — T1 closed; T2/T3 unchanged.

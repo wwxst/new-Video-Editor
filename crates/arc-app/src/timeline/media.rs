@@ -5,7 +5,7 @@
 //! blocks on a file. This module owns the requests, the bounded LRU caches and the texture uploads:
 //! the painting code only ever asks "is this frame decoded yet?" and draws what is in the cache.
 
-use arc_core::time::{FrameRate, Time};
+use arc_core::time::{FrameRate, Round, Time};
 use arc_media::{AudioDecoder, VideoDecoder};
 use egui::{ColorImage, TextureHandle, TextureOptions};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -237,32 +237,52 @@ enum FrameKey {
     Pts(u64),
 }
 
+/// VFR display intervals kept per source path. Each span is ~40 bytes, so this is ~160 KiB per open
+/// source: enough for normal scrubbing, bounded even on a multi-hour VFR file. Evicting an old
+/// interval only costs one re-probe; it never changes the decoded frame.
+const MAX_VFR_SPANS: usize = 4096;
+
 /// Display intervals learned from decoded VFR frames.
 ///
-/// Each entry is `(start_pts_us, end_pts_us)`; `end` is the next frame's PTS, or `u64::MAX` for the
-/// last frame. Sorted by start.
+/// Each entry is `(display_start, display_end, pts_us)`, using exact [`Time`] values. The decoder's
+/// `frame_displayed_at(t)` selects `pts` while `pts <= t + tick < next_pts`, so the display interval
+/// is `[pts - tick, next_pts - tick)`, not `[pts, next_pts)`. `end = None` for the last frame.
+/// Sorted by display start. Times stay rational: a microsecond-rounded end can be 0.33 µs early and
+/// disagree with the decoder at the boundary.
 #[derive(Debug, Default)]
 struct VfrIntervals {
-    spans: Vec<(u64, u64)>,
+    spans: Vec<(Time, Option<Time>, u64)>,
 }
 
 impl VfrIntervals {
-    fn find(&self, t_us: u64) -> Option<u64> {
-        let idx = self.spans.partition_point(|(start, _)| *start <= t_us);
-        let (start, end) = *self.spans.get(idx.checked_sub(1)?)?;
-        (t_us >= start && t_us < end).then_some(start)
+    fn find(&self, t: Time) -> Option<u64> {
+        let idx = self.spans.partition_point(|(start, _, _)| *start <= t);
+        let (start, end, pts) = *self.spans.get(idx.checked_sub(1)?)?;
+        (t >= start && end.is_none_or(|end| t < end)).then_some(pts)
     }
 
-    fn insert(&mut self, pts_us: u64, next_pts_us: Option<u64>) {
-        let end = next_pts_us
-            .filter(|next| *next > pts_us)
-            .unwrap_or(u64::MAX);
-        if let Some(existing) = self.spans.iter_mut().find(|(start, _)| *start == pts_us) {
-            existing.1 = existing.1.max(end);
+    fn insert(&mut self, pts: Time, next: Option<Time>, tick: Time, pts_us: u64) {
+        let start = pts.checked_sub(tick).unwrap_or(Time::ZERO);
+        let end = next.and_then(|next| next.checked_sub(tick).ok());
+        if let Some(existing) = self
+            .spans
+            .iter_mut()
+            .find(|(_, _, stored)| *stored == pts_us)
+        {
+            if let Some(end) = end
+                && existing.1.is_none_or(|old| end > old)
+            {
+                existing.1 = Some(end);
+            }
             return;
         }
-        self.spans.push((pts_us, end));
-        self.spans.sort_unstable_by_key(|(start, _)| *start);
+        if self.spans.len() >= MAX_VFR_SPANS {
+            // Keep the most recently learned intervals; the oldest can be re-probed on a backward
+            // seek. This is metadata only and never invalidates a texture in the LRU.
+            self.spans.remove(0);
+        }
+        self.spans.push((start, end, pts_us));
+        self.spans.sort_unstable_by_key(|(start, _, _)| *start);
     }
 }
 
@@ -290,7 +310,11 @@ enum Event {
         height: u32,
         rgba: Vec<u8>,
         pts_us: u64,
-        next_pts_us: Option<u64>,
+        /// Exact source PTS and next PTS, used to build the VFR display interval.
+        pts_time: Time,
+        next_time: Option<Time>,
+        /// Container timestamp tolerance used by `frame_displayed_at`.
+        tick_time: Time,
     },
     Peaks {
         key: Key,
@@ -457,6 +481,7 @@ impl MediaHub {
     /// faster sequence therefore share one texture instead of being decoded as fake new frames.
     /// VFR sources probe the requested time once, learn `[pts, next_pts)`, and then key by the
     /// actual PTS, so every project frame inside a long source interval shares one texture.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn video_frame(
         &mut self,
         path: &Path,
@@ -464,17 +489,28 @@ impl MediaHub {
         source_rate: FrameRate,
         vfr: bool,
     ) -> Option<ThumbVisual> {
-        let request_time = time.max(0.0);
+        let micros = (time.max(0.0) * 1_000_000.0).round() as i64;
+        let time = Time::new(micros, 1_000_000).unwrap_or(Time::ZERO);
+        self.video_frame_exact(path, time, source_rate, vfr)
+    }
+
+    /// Exact-time variant used by the timeline. CFR frame identity is derived with
+    /// [`FrameRate::frame_at`] (floor) rather than `floor(t * fps)` in floating point, so 29.97 and
+    /// 59.94 frame starts cannot round down into the previous frame.
+    fn video_frame_exact(
+        &mut self,
+        path: &Path,
+        time: Time,
+        source_rate: FrameRate,
+        vfr: bool,
+    ) -> Option<ThumbVisual> {
+        let request_time = time.to_f64_lossy();
         let request_us = (request_time * 1_000_000.0).round() as u64;
         let (key, request_time) = if vfr {
             // If a decoded interval already covers this project time, its actual PTS is the cache
             // key. Otherwise ask the worker once for this path and wait: a long VFR gap must not
             // launch one decode per project frame.
-            match self
-                .vfr
-                .get(path)
-                .and_then(|intervals| intervals.find(request_us))
-            {
+            match self.vfr.get(path).and_then(|intervals| intervals.find(time)) {
                 Some(pts_us) => (
                     Key::Frame {
                         path: path.to_path_buf(),
@@ -496,14 +532,13 @@ impl MediaHub {
                 }
             }
         } else {
-            let fps = source_rate.rate().to_f64_lossy().max(1.0);
-            let index = (request_time * fps).floor() as u64;
+            let index = source_rate.frame_at(time, Round::Floor).unwrap_or(0);
             (
                 Key::Frame {
                     path: path.to_path_buf(),
-                    frame: FrameKey::Index(index),
+                    frame: FrameKey::Index(index.max(0) as u64),
                 },
-                index as f64 / fps,
+                source_rate.time_of_frame(index.max(0)).to_f64_lossy(),
             )
         };
         let probing = matches!(
@@ -531,6 +566,18 @@ impl MediaHub {
             }
         }
         None
+    }
+
+    /// [`video_frame`](Self::video_frame) with the exact project-frame time. The timeline computes
+    /// the sample as `FrameRate::time_of_frame`, never as `frame / fps` in floating point.
+    pub fn video_frame_at(
+        &mut self,
+        path: &Path,
+        time: Time,
+        source_rate: FrameRate,
+        vfr: bool,
+    ) -> Option<ThumbVisual> {
+        self.video_frame_exact(path, time, source_rate, vfr)
     }
 
     /// Source metadata for a video, read once per path. Opening a decoder reads the header only;
@@ -671,7 +718,9 @@ impl MediaHub {
                 height,
                 rgba,
                 pts_us,
-                next_pts_us,
+                pts_time,
+                next_time,
+                tick_time,
             } => {
                 self.pending.remove(&key);
                 if let Key::Frame { path, .. } = &key {
@@ -696,7 +745,7 @@ impl MediaHub {
                                 self.vfr
                                     .entry(path.clone())
                                     .or_default()
-                                    .insert(pts_us, next_pts_us);
+                                    .insert(pts_time, next_time, tick_time, pts_us);
                                 Key::Frame {
                                     path,
                                     frame: FrameKey::Pts(pts_us),
@@ -751,6 +800,17 @@ pub fn thumbnail_step_frames(zoom: f32, tile_px: f32, project_fps: f64) -> u64 {
 /// Seconds covered by `step_frames` project frames.
 pub fn thumbnail_step_seconds(step_frames: u64, project_fps: f64) -> f64 {
     step_frames.max(1) as f64 / project_fps.max(1.0)
+}
+
+/// Exact start time of the project frame that starts thumbnail tile `tile`.
+///
+/// A 1f tile samples the project frame's **start**, the same time `plan_frame` uses for preview and
+/// export. Sampling the middle of the frame (the old behaviour) disagreed with a lower-rate source:
+/// at a 30 fps project frame 1, 50 ms shows source frame 1 from a 24 fps source while 33.33 ms shows
+/// source frame 0.
+pub fn thumbnail_sample_time(frame_rate: FrameRate, tile: u64, step_frames: u64) -> Time {
+    let frame = tile.saturating_mul(step_frames.max(1));
+    frame_rate.time_of_frame(frame.min(i64::MAX as u64) as i64)
 }
 
 /// Tile indices of a clip `[clip_start, clip_start + clip_dur)` visible in `[view_start, view_end)`.
@@ -819,13 +879,15 @@ fn picture_worker(rx: Receiver<Request>, tx: Sender<Event>) {
     for request in rx.iter() {
         let event = match request {
             Request::Frame { key, path, time } => match decode_frame(&mut decoders, &path, time) {
-                Ok((width, height, rgba, pts_us, next_pts_us)) => Event::Rgba {
+                Ok(decoded) => Event::Rgba {
                     key,
-                    width,
-                    height,
-                    rgba,
-                    pts_us,
-                    next_pts_us,
+                    width: decoded.width,
+                    height: decoded.height,
+                    rgba: decoded.rgba,
+                    pts_us: decoded.pts_us,
+                    pts_time: decoded.pts_time,
+                    next_time: decoded.next_time,
+                    tick_time: decoded.tick_time,
                 },
                 Err(error) => Event::Failed { key, path, error },
             },
@@ -836,7 +898,9 @@ fn picture_worker(rx: Receiver<Request>, tx: Sender<Event>) {
                     height,
                     rgba,
                     pts_us,
-                    next_pts_us: None,
+                    pts_time: Time::ZERO,
+                    next_time: None,
+                    tick_time: Time::ZERO,
                 },
                 Err(error) => Event::Failed { key, path, error },
             },
@@ -880,11 +944,21 @@ fn open_decoder<'a>(
         .ok_or_else(|| "decoder lost".to_string())
 }
 
+struct DecodedFrame {
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    pts_us: u64,
+    pts_time: Time,
+    next_time: Option<Time>,
+    tick_time: Time,
+}
+
 fn decode_frame(
     decoders: &mut Lru<PathBuf, VideoDecoder>,
     path: &Path,
     time: f64,
-) -> Result<(u32, u32, Vec<u8>, u64, Option<u64>), String> {
+) -> Result<DecodedFrame, String> {
     let decoder = open_decoder(decoders, path)?;
     let duration = decoder
         .info()
@@ -894,15 +968,25 @@ fn decode_frame(
     let t = time.clamp(0.0, (duration - 0.001).max(0.0));
     let micros = (t * 1_000_000.0).round() as i64;
     let time = Time::new(micros, 1_000_000).map_err(|error| error.to_string())?;
+    let tick_time = Time::new(
+        decoder.info().time_base.num(),
+        i64::from(decoder.info().time_base.den()),
+    )
+    .map_err(|error| error.to_string())?;
     let frame = decoder
         .frame_displayed_at(time)
         .map_err(|error| error.to_string())?;
     let pts_us = (frame.time.to_f64_lossy() * 1_000_000.0).round().max(0.0) as u64;
-    let next_pts_us = frame
-        .next_time
-        .map(|next| (next.to_f64_lossy() * 1_000_000.0).round().max(0.0) as u64);
-    let (w, h, rgba) = downscale(frame.rgba, frame.width, frame.height, THUMB_W, THUMB_H);
-    Ok((w, h, rgba, pts_us, next_pts_us))
+    let (width, height, rgba) = downscale(frame.rgba, frame.width, frame.height, THUMB_W, THUMB_H);
+    Ok(DecodedFrame {
+        width,
+        height,
+        rgba,
+        pts_us,
+        pts_time: frame.time,
+        next_time: frame.next_time,
+        tick_time,
+    })
 }
 
 fn decode_still(
@@ -1000,6 +1084,29 @@ fn downsample_peaks(src: &[Peak], factor: usize) -> Vec<Peak> {
 mod tests {
     use super::*;
 
+    /// Request one thumbnail through the real worker/cache and return its actual source PTS.
+    fn settle_thumbnail(
+        hub: &mut MediaHub,
+        ctx: &egui::Context,
+        path: &Path,
+        time: Time,
+        rate: FrameRate,
+        vfr: bool,
+    ) -> u64 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            if let Some(visual) = hub.video_frame_at(path, time, rate, vfr) {
+                return visual.pts_us;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "thumbnail for {time} did not settle"
+            );
+            hub.poll(ctx);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     #[test]
     fn lru_keeps_the_most_recent_entries() {
         let mut lru: Lru<u32, &str> = Lru::new(2);
@@ -1054,6 +1161,78 @@ mod tests {
                 "{fps} fps at the zoom ceiling"
             );
         }
+    }
+
+    #[test]
+    fn thumbnail_sample_time_is_the_exact_project_frame_start() {
+        for rate in [
+            FrameRate::Fps24,
+            FrameRate::Fps25,
+            FrameRate::Fps30,
+            FrameRate::Fps29_97,
+            FrameRate::Fps59_94,
+        ] {
+            let sample = thumbnail_sample_time(rate, 1, 1);
+            assert_eq!(
+                sample,
+                rate.time_of_frame(1),
+                "{rate:?} must sample the project frame start"
+            );
+            assert!(
+                sample < rate.time_of_frame(2),
+                "{rate:?} samples before the next frame"
+            );
+        }
+        // The old midpoint formula sampled project frame 1 at 50 ms (the next 24 fps source frame);
+        // the start is 33.33 ms.
+        assert_eq!(
+            thumbnail_sample_time(FrameRate::Fps30, 1, 1),
+            Time::new(1, 30).expect("1/30")
+        );
+    }
+
+    #[test]
+    fn vfr_interval_metadata_is_half_open_and_bounded() {
+        let us = |n: i64| Time::new(n, 1_000_000).expect("microseconds");
+        let mut intervals = VfrIntervals::default();
+        intervals.insert(us(300_000), Some(us(533_333)), Time::ZERO, 300_000);
+        assert_eq!(intervals.find(us(300_000)), Some(300_000));
+        assert_eq!(intervals.find(us(533_332)), Some(300_000));
+        assert_eq!(
+            intervals.find(us(533_333)),
+            None,
+            "the end belongs to the next frame"
+        );
+        intervals.insert(us(533_333), None, Time::ZERO, 533_333);
+        assert_eq!(intervals.find(us(9_999_999)), Some(533_333));
+
+        // The decoder adds one container tick to the requested time; the cache interval is shifted
+        // by the same tick so the two select the same frame at the boundary.
+        let mut biased = VfrIntervals::default();
+        biased.insert(us(300_000), Some(us(533_333)), us(1_000), 300_000);
+        assert_eq!(biased.find(us(299_000)), Some(300_000));
+        assert_eq!(biased.find(us(298_999)), None);
+        assert_eq!(biased.find(us(532_332)), Some(300_000));
+        assert_eq!(
+            biased.find(us(532_333)),
+            None,
+            "one tick before the next PTS the decoder has already advanced"
+        );
+        for i in 0..MAX_VFR_SPANS + 8 {
+            let start = 1_000_000 + i as i64 * 1_000;
+            intervals.insert(us(start), Some(us(start + 1_000)), Time::ZERO, start as u64);
+        }
+        assert_eq!(
+            intervals.spans.len(),
+            MAX_VFR_SPANS,
+            "VFR interval metadata must stay bounded"
+        );
+        assert!(
+            intervals
+                .find(us(1_000_000 + (MAX_VFR_SPANS as i64 + 7) * 1_000))
+                .is_some(),
+            "newest intervals survive the cap"
+        );
     }
 
     #[test]
@@ -1224,14 +1403,15 @@ mod tests {
 
     #[test]
     fn vfr_intervals_cover_a_long_source_gap() {
+        let us = |n: i64| Time::new(n, 1_000_000).expect("microseconds");
         let mut intervals = VfrIntervals::default();
-        intervals.insert(300_000, Some(533_333));
-        assert_eq!(intervals.find(300_000), Some(300_000));
-        assert_eq!(intervals.find(400_000), Some(300_000));
-        assert_eq!(intervals.find(533_332), Some(300_000));
-        assert_eq!(intervals.find(533_333), None);
-        intervals.insert(533_333, None);
-        assert_eq!(intervals.find(9_999_999), Some(533_333));
+        intervals.insert(us(300_000), Some(us(533_333)), Time::ZERO, 300_000);
+        assert_eq!(intervals.find(us(300_000)), Some(300_000));
+        assert_eq!(intervals.find(us(400_000)), Some(300_000));
+        assert_eq!(intervals.find(us(533_332)), Some(300_000));
+        assert_eq!(intervals.find(us(533_333)), None);
+        intervals.insert(us(533_333), None, Time::ZERO, 533_333);
+        assert_eq!(intervals.find(us(9_999_999)), Some(533_333));
     }
 
     #[test]
@@ -1374,7 +1554,7 @@ mod tests {
         let expected = vfr_counter_pts_us(30, base_rate, 10, 0.2);
         // The same 30 fps VFR source is sampled by several project rates. The source PTS table is
         // fixed; only the project-frame times move.
-        for project_fps in [24.0_f64, 25.0, 30.0, 60_000.0 / 1001.0] {
+        for project_fps in [24.0_f64, 25.0, 30.0, 30_000.0 / 1001.0, 60_000.0 / 1001.0] {
             let mut seen = Vec::new();
             let mut seen_pts = Vec::new();
             let frames = project_fps.ceil() as u32;
@@ -1480,6 +1660,181 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "needs the pinned FFmpeg DLLs and generated fixtures (run with --ignored)"]
+    fn thumbnail_source_frame_matches_displayed_at_cfr_rates_and_reverse() {
+        use arc_media::fixtures::{read_counter, write_counter_video};
+
+        // Same-rate projects plus the 24-in-30 mismatch that originally exposed the midpoint bug.
+        let cases = [
+            (FrameRate::Fps24, FrameRate::Fps24),
+            (FrameRate::Fps25, FrameRate::Fps25),
+            (FrameRate::Fps30, FrameRate::Fps30),
+            (FrameRate::Fps29_97, FrameRate::Fps29_97),
+            (FrameRate::Fps59_94, FrameRate::Fps59_94),
+            (FrameRate::Fps30, FrameRate::Fps24),
+        ];
+        for (project_rate, source_rate) in cases {
+            let source_frames = source_rate.nominal() as u32;
+            let project_frames = project_rate.nominal() as u32;
+            let path = std::env::temp_dir().join(format!(
+                "arcline-thumb-{}-{}-{}.mkv",
+                project_rate.label(),
+                source_rate.label(),
+                std::process::id()
+            ));
+            let _ = std::fs::remove_file(&path);
+            write_counter_video(&path, source_frames, source_rate.rate(), 320, 180, false)
+                .expect("counter fixture");
+            let mut decoder = VideoDecoder::open(&path).expect("open counter");
+            let ctx = egui::Context::default();
+            let mut hub = MediaHub::new();
+            let mut order = vec![
+                0,
+                1,
+                2,
+                project_frames / 2,
+                project_frames.saturating_sub(2),
+                project_frames - 1,
+            ];
+            order.sort_unstable();
+            order.dedup();
+            for pass in 0..2 {
+                let frames: Vec<u32> = if pass == 0 {
+                    order.clone()
+                } else {
+                    order.iter().rev().copied().collect()
+                };
+                for project_frame in frames {
+                    let sample = thumbnail_sample_time(project_rate, project_frame as u64, 1);
+                    let expected = decoder.frame_displayed_at(sample).expect("displayed frame");
+                    let expected_pts =
+                        (expected.time.to_f64_lossy() * 1e6).round().max(0.0) as u64;
+                    let expected_counter =
+                        read_counter(expected.rgba, expected.width, expected.height)
+                            .expect("counter");
+                    let expected_index = source_rate.frame_at(sample, Round::Floor).unwrap() as u32;
+                    assert_eq!(
+                        expected_counter, expected_index,
+                        "{project_rate:?} project / {source_rate:?} source, frame {project_frame}: counter must be the displayed source frame"
+                    );
+                    let thumb_pts = settle_thumbnail(
+                        &mut hub,
+                        &ctx,
+                        &path,
+                        sample,
+                        source_rate,
+                        false,
+                    );
+                    assert_eq!(
+                        thumb_pts, expected_pts,
+                        "{project_rate:?} project / {source_rate:?} source, frame {project_frame}, pass {pass}"
+                    );
+                }
+            }
+            drop(hub);
+            drop(decoder);
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+
+    #[test]
+    #[ignore = "needs the pinned FFmpeg DLLs and generated fixtures (run with --ignored)"]
+    fn thumbnail_source_frame_matches_displayed_at_vfr_boundaries_and_reverse() {
+        use arc_core::time::Ratio;
+        use arc_media::fixtures::{read_counter, vfr_counter_pts_us, write_vfr_counter_video};
+
+        let path = std::env::temp_dir().join(format!(
+            "arcline-vfr-thumb-{}.mp4",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let base_rate = Ratio::new(30, 1).unwrap();
+        write_vfr_counter_video(&path, 30, base_rate, 320, 180, 10, 0.2)
+            .expect("VFR fixture");
+        let expected = vfr_counter_pts_us(30, base_rate, 10, 0.2);
+        let mut decoder = VideoDecoder::open(&path).expect("open VFR");
+        let ctx = egui::Context::default();
+        let mut hub = MediaHub::new();
+        // 9 is the frame before the first gap, 10 the first repeated project frame, 16 the first
+        // project frame at the next source PTS, 29 the last project frame.
+        let milestones = [0u32, 1, 9, 10, 15, 16, 17, 29];
+        for pass in 0..2 {
+            let frames: Vec<u32> = if pass == 0 {
+                milestones.to_vec()
+            } else {
+                milestones.iter().rev().copied().collect()
+            };
+            for project_frame in frames {
+                let sample = thumbnail_sample_time(FrameRate::Fps30, project_frame as u64, 1);
+                let expected_frame = decoder.frame_displayed_at(sample).expect("displayed");
+                let expected_pts =
+                    (expected_frame.time.to_f64_lossy() * 1e6).round().max(0.0) as u64;
+                let expected_counter =
+                    read_counter(expected_frame.rgba, expected_frame.width, expected_frame.height)
+                        .expect("counter");
+                let thumb_pts = settle_thumbnail(
+                    &mut hub,
+                    &ctx,
+                    &path,
+                    sample,
+                    FrameRate::Fps30,
+                    true,
+                );
+                assert_eq!(
+                    thumb_pts, expected_pts,
+                    "VFR project frame {project_frame}, pass {pass}"
+                );
+                assert_eq!(
+                    expected_counter as usize,
+                    expected
+                        .iter()
+                        .rposition(|pts| *pts <= (sample.to_f64_lossy() * 1e6).round() as u64 + 1_000)
+                        .expect("expected source frame"),
+                    "the fixture counter and PTS table must agree"
+                );
+            }
+        }
+
+        // The last source frame has no look-ahead frame; its cache interval is open-ended.
+        let tail = Time::new(139, 100).expect("1.39 s");
+        let last = decoder.frame_displayed_at(tail).expect("last frame");
+        assert_eq!(read_counter(last.rgba, last.width, last.height), Some(29));
+        assert_eq!(last.next_time, None, "last frame has no next PTS");
+
+        // The learned interval matches the decoder's one-tick boundary exactly: the cache switches
+        // to frame 10 at the same rational time `frame_displayed_at` does.
+        let tick = decoder.info().time_base;
+        let tick_time =
+            Time::new(tick.num(), i64::from(tick.den())).expect("container tick");
+        let next_pts = {
+            let frame9 = decoder
+                .frame_displayed_at(Time::new(300_000, 1_000_000).expect("0.3 s"))
+                .expect("frame 9");
+            frame9.next_time.expect("next PTS")
+        };
+        let boundary = next_pts.checked_sub(tick_time).expect("boundary");
+        let before = boundary
+            .checked_sub(Time::new(1, 1_000_000).expect("1 us"))
+            .expect("before");
+        let spans = hub.vfr.get(&path).expect("learned intervals");
+        assert_eq!(spans.find(before), Some(expected[9]));
+        assert_eq!(spans.find(boundary), Some(expected[10]));
+        let before_counter = {
+            let frame = decoder.frame_displayed_at(before).expect("boundary-1us");
+            read_counter(frame.rgba, frame.width, frame.height)
+        };
+        let at_counter = {
+            let frame = decoder.frame_displayed_at(boundary).expect("boundary");
+            read_counter(frame.rgba, frame.width, frame.height)
+        };
+        assert_eq!(before_counter, Some(9));
+        assert_eq!(at_counter, Some(10));
+        drop(hub);
+        drop(decoder);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     #[ignore = "needs the pinned FFmpeg DLLs and assets/demo (run with --ignored)"]
     fn lower_rate_source_repeats_without_extra_decode() {
         use arc_core::time::Ratio;
@@ -1558,18 +1913,19 @@ mod tests {
     fn real_demo_media_decodes() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/demo");
         let mut decoders = Lru::new(DECODER_CAPACITY);
-        let (w, h, rgba, pts_a, _) =
-            decode_frame(&mut decoders, &root.join("city_street.mp4"), 3.0).expect("frame");
-        assert!(w > 0 && h > 0 && rgba.len() == (w * h * 4) as usize);
+        let a = decode_frame(&mut decoders, &root.join("city_street.mp4"), 3.0).expect("frame");
+        assert!(
+            a.width > 0 && a.height > 0 && a.rgba.len() == (a.width * a.height * 4) as usize
+        );
         // Adjacent 24 fps source frames must be different real frames.
-        let (_, _, rgba_b, pts_b, _) = decode_frame(
+        let b = decode_frame(
             &mut decoders,
             &root.join("city_street.mp4"),
             3.0 + 1.0 / 24.0,
         )
         .expect("next frame");
-        assert_ne!(pts_a, pts_b, "the decoder must advance to the next PTS");
-        assert_ne!(rgba, rgba_b, "adjacent source frames must not be identical");
+        assert_ne!(a.pts_us, b.pts_us, "the decoder must advance to the next PTS");
+        assert_ne!(a.rgba, b.rgba, "adjacent source frames must not be identical");
         let (iw, ih, _, _) =
             decode_still(&mut decoders, &root.join("mountain_lake.png")).expect("still");
         assert!(iw > 0 && ih > 0);

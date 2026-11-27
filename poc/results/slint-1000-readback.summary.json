@@ -1,0 +1,33 @@
+{
+    "tag":  "slint-1000-readback",
+    "label":  "slint",
+    "clips":  1000,
+    "video":  "readback",
+    "interact":  "scroll",
+    "exit":  0,
+    "wall_s":  10.89,
+    "cpu_s":  4.359,
+    "peak_rss_mb":  446,
+    "result":  {
+                   "extra":  {
+                                 "clips":  1002,
+                                 "interact":  "Scroll",
+                                 "renderer":  "",
+                                 "software_fallback":  false,
+                                 "video":  "Readback",
+                                 "zoom":  60.0
+                             },
+                   "fps_from_mean":  237.0410638086889,
+                   "frame_us_max":  366708,
+                   "frame_us_mean":  4218.678333333333,
+                   "frame_us_p50":  3510,
+                   "frame_us_p95":  5340,
+                   "frames":  600,
+                   "label":  "slint",
+                   "steady_frames":  590,
+                   "steady_us_max":  6969,
+                   "steady_us_mean":  3635.437288135593,
+                   "steady_us_p50":  3515,
+                   "steady_us_p95":  5340
+               }
+}

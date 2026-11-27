@@ -1,0 +1,36 @@
+{
+  "environment": {
+    "rust": "1.100.0 (0ef1bc386 2026-11-09)",
+    "target": "x86_64-pc-windows-gnu",
+    "cargo": "1.100.0 (3acc79c0c 2026-11-05)",
+    "profile": "release, lto=thin, codegen-units=4, opt-level=3",
+    "method": "separate CARGO_TARGET_DIR per package, cold target directory, serial builds"
+  },
+  "egui": {
+    "clean_seconds": 89.0,
+    "incremental_rust_seconds": 21.31,
+    "dependencies_unique": 168,
+    "target_bytes": 918572876,
+    "binary_bytes": 17652966,
+    "full_log_lines": 199,
+    "full_log_bytes": 14118,
+    "warnings": 2
+  },
+  "slint": {
+    "clean_seconds": 92.18,
+    "incremental_rust_seconds": 22.96,
+    "incremental_slint_seconds": 26.95,
+    "dependencies_unique": 276,
+    "target_bytes": 1788254532,
+    "binary_bytes": 29608929,
+    "full_log_lines": 290,
+    "full_log_bytes": 19942,
+    "warnings": 0
+  },
+  "notes": [
+    "Both clean builds were measured from separate empty target directories.",
+    "The target sizes are dominated by wgpu/winit dependency artifacts, not the POC code.",
+    "The Slint build includes the .slint compiler and i-slint-* crates; the egui build includes egui/egui-wgpu/egui-winit.",
+    "First build times are within 4% of each other on this machine; the disk and dependency gap is much larger."
+  ]
+}

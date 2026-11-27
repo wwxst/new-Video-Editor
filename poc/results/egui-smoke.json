@@ -1,0 +1,21 @@
+{
+  "extra": {
+    "clips": 102,
+    "ui_and_paint_us_p50": 2676,
+    "ui_and_paint_us_p95": 293,
+    "video": "None",
+    "zoom": 60.0
+  },
+  "fps_from_mean": 1430.3622512937545,
+  "frame_us_max": 5739,
+  "frame_us_mean": 699.123595505618,
+  "frame_us_p50": 408,
+  "frame_us_p95": 2141,
+  "frames": 89,
+  "label": "egui",
+  "steady_frames": 79,
+  "steady_us_max": 5739,
+  "steady_us_mean": 629.873417721519,
+  "steady_us_p50": 390,
+  "steady_us_p95": 1491
+}

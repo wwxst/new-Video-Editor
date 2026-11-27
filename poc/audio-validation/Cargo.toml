@@ -1,0 +1,21 @@
+[workspace]
+
+[package]
+name = "audio-probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "audio-probe"
+path = "src/main.rs"
+
+[dependencies]
+arc-audio = { path = "../../crates/arc-audio" }
+arc-core = { path = "../../crates/arc-core" }
+arc-media = { path = "../../crates/arc-media" }
+serde_json = "1"
+cpal = "0.18"
+rtrb = "0.4"
+memmap2 = "0.9"
+blake3 = { version = "1", default-features = false, features = ["pure", "std"] }

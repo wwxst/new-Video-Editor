@@ -1,0 +1,12 @@
+{
+  "method": "Get-Counter '\\GPU Engine(*)\\Utilization Percentage' filtered to the process pid, 2-3 one-second samples after the first frame, with no animation",
+  "egui": {
+    "pid_sampled": true,
+    "max_utilization_pct": 0.0
+  },
+  "slint": {
+    "pid_sampled": true,
+    "max_utilization_pct": 0.0
+  },
+  "note": "Both idle windows are fully occluded/no redraw; 0% is the expected and measured result. This does not measure GPU cost while playing."
+}

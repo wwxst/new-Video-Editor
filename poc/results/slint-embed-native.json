@@ -1,0 +1,18 @@
+{
+    "host_title":  "Arcline Agent Client â€?Slint child host",
+    "host_hwnd":  "0x1d0d96",
+    "child":  {
+                  "child_hwnd":  "0x4380bd0",
+                  "get_parent_hwnd":  "0x1d0d96",
+                  "is_child_of_host":  true,
+                  "parent_hwnd":  "0x1d0d96",
+                  "renderer":  "femtovg-wgpu",
+                  "scale_factor":  1.0,
+                  "size":  [
+                               1200,
+                               752
+                           ],
+                  "standalone":  false
+              },
+    "screenshot":  "D:\\Develop\\Projects\\Video Editing\\reports\\screenshots\\slint-embedded-native.png"
+}

@@ -1,0 +1,691 @@
+// Arcline four-panel shell, Slint implementation.
+//
+// This is a validation shell, not a production editor: it exercises the exact layout, panel
+// splitters, timeline control, Chinese text/IME and texture import that a migration would need.
+
+import { AboutSlint } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import {
+    TimelinePanel, ClipView, TrackView, TickView,
+} from "timeline.slint";
+
+import "./fonts/ArclineCJK.ttf";
+
+export struct MediaView {
+    name: string,
+    kind: string,
+    duration: string,
+    detail: string,
+    color: color,
+}
+
+component PanelTitle inherits Rectangle {
+    in property <string> title;
+    in property <string> subtitle;
+    in property <string> trailing;
+
+    width: 100%;
+    height: 38px;
+    background: transparent;
+
+    Text {
+        x: 14px; y: 10px;
+        text: root.title;
+        color: Theme.text;
+        font-size: 12px;
+        font-weight: 700;
+    }
+    Text {
+        x: 104px; y: 11px;
+        text: root.subtitle;
+        color: Theme.text-faint;
+        font-size: 10px;
+    }
+    Text {
+        x: parent.width - 130px; y: 10px;
+        width: 116px;
+        text: root.trailing;
+        color: Theme.text-faint;
+        font-size: 9px;
+        horizontal-alignment: right;
+        overflow: elide;
+    }
+}
+
+component PropRow inherits Rectangle {
+    in property <string> key;
+    in property <string> value;
+    width: 100%;
+    height: 25px;
+    background: transparent;
+
+    Text {
+        x: 0; y: 4px;
+        width: 78px;
+        text: root.key;
+        color: Theme.text-faint;
+        font-size: 10px;
+    }
+    Text {
+        x: 82px; y: 4px;
+        width: max(parent.width - 82px, 1px);
+        text: root.value;
+        color: Theme.text;
+        font-size: 10px;
+        overflow: elide;
+    }
+}
+
+component SmallButton inherits Rectangle {
+    in property <string> label;
+    callback clicked;
+    width: 74px;
+    height: 26px;
+    border-radius: 5px;
+    background: #24272e;
+    border-width: 1px;
+    border-color: #343942;
+
+    Text {
+        width: parent.width; height: parent.height;
+        text: root.label;
+        color: Theme.text;
+        font-size: 10px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    tap := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Arcline · Slint 技术验证";
+    in property <length> requested-width: 1600px;
+    in property <length> requested-height: 1000px;
+    width: requested-width;
+    height: requested-height;
+    background: Theme.window-bg;
+    default-font-family: "Arcline CJK";
+    default-font-size: 12px;
+
+    in property <[ClipView]> clips;
+    in property <[TrackView]> tracks;
+    in property <[TickView]> ticks;
+    in property <[MediaView]> media;
+    in property <image> preview;
+    in property <image> thumb;
+    in property <bool> show-preview: false;
+    in property <int> selected-id: -1;
+    in property <int> selected-asset: -1;
+    in property <string> selected-label: "未选择素材";
+    in-out property <string> editable-label: "";
+    in property <string> selected-kind: "—";
+    in property <string> selected-time: "—";
+    in property <string> selected-track: "—";
+    in property <string> selected-source: "—";
+    in property <string> selected-position: "—";
+    in property <string> selected-duration: "—";
+    in property <string> status: "就绪";
+    in property <string> project-name: "未命名项目";
+    in property <string> media-count-label: "0 项";
+    in property <string> dpi-label: "100% · 1.0×";
+    in property <string> renderer-label: "FemtoVG / wgpu 30";
+    in property <string> timecode: "00:00:00:00";
+    out property <string> ime-preedit;
+    in property <float> zoom: 60;
+    in property <float> fps: 30;
+    in property <string> zoom-label: "60 px/s";
+    in property <string> fps-label: "30 fps";
+    in property <string> track-count-label: "6 轨";
+    in property <float> duration: 600;
+    in property <length> tracks-height: 300px;
+    in property <length> playhead-x: 0px;
+    in property <bool> playing: false;
+    in-out property <bool> show-about: false;
+    in property <bool> timeline-only: false;
+    in-out property <length> scroll-request-x: -1px;
+    in-out property <length> scroll-request-y: -1px;
+    out property <length> view-scroll-x: timeline.view-scroll-x;
+    out property <length> view-scroll-y: timeline.view-scroll-y;
+
+    // Panel proportions as fractions of the available area, adjusted by the splitters.
+    in-out property <float> left-frac: 0.245;
+    in-out property <float> right-frac: 0.245;
+    in-out property <float> bottom-frac: 0.34;
+
+    // Drag anchors for the three splitters.
+    property <length> left-drag-x: 0px;
+    property <length> right-drag-x: 0px;
+    property <length> bottom-drag-y: 0px;
+
+    callback select-clip(int);
+    callback select-asset(int);
+    callback zoom-in();
+    callback zoom-out();
+    callback zoom-set(float);
+    callback toggle-play();
+    callback step-frame(int);
+    callback seek-frame(int);
+    callback label-edited(string);
+    callback about-opened();
+
+    property <length> margin: 12px;
+    property <length> gap: 10px;
+    property <length> inner-w: max(1px, self.width - 2 * margin);
+    property <length> inner-h: max(1px, self.height - 2 * margin);
+    property <length> bottom-h: max(150px, inner-h * bottom-frac);
+    property <length> top-h: max(180px, inner-h - bottom-h - gap);
+    property <length> left-w: max(170px, inner-w * left-frac);
+    property <length> right-w: max(190px, inner-w * right-frac);
+    property <length> center-w: max(280px, inner-w - left-w - right-w - 2 * gap);
+    property <length> top-y: margin;
+    property <length> bottom-y: margin + top-h + gap;
+    property <length> center-x: margin + left-w + gap;
+    property <length> right-x: margin + left-w + gap + center-w + gap;
+
+    // --- MEDIA ----------------------------------------------------------------------------
+    Rectangle {
+        x: margin; y: top-y;
+        width: left-w; height: top-h;
+        visible: !root.timeline-only;
+        background: Theme.card;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        clip: true;
+
+        PanelTitle {
+            x: 0; y: 0;
+            title: "MEDIA";
+            subtitle: "媒体池";
+            trailing: root.media-count-label;
+        }
+
+        Rectangle {
+            x: 14px; y: 42px;
+            width: parent.width - 28px;
+            height: 1px;
+            background: Theme.border-soft;
+        }
+
+        Flickable {
+            x: 8px; y: 50px;
+            width: parent.width - 16px;
+            height: parent.height - 58px;
+            content-height: max(self.height, media.length * 64px);
+            interactive: true;
+            mouse-drag-pan-enabled: false;
+
+            for m[i] in root.media: Rectangle {
+                y: i * 64px;
+                width: parent.width;
+                height: 58px;
+                background: i == root.selected-asset ? #262b34 : transparent;
+                border-radius: 6px;
+
+                Rectangle {
+                    x: 4px; y: 6px;
+                    width: 48px; height: 46px;
+                    background: m.color;
+                    border-radius: 5px;
+                    Text {
+                        width: parent.width; height: parent.height;
+                        text: m.kind;
+                        color: #ffffffd0;
+                        font-size: 9px;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
+                }
+                Text {
+                    x: 60px; y: 7px;
+                    width: max(parent.width - 70px, 1px);
+                    text: m.name;
+                    color: Theme.text;
+                    font-size: 11px;
+                    overflow: elide;
+                }
+                Text {
+                    x: 60px; y: 24px;
+                    width: max(parent.width - 70px, 1px);
+                    text: m.detail;
+                    color: Theme.text-faint;
+                    font-size: 9px;
+                    overflow: elide;
+                }
+                Text {
+                    x: 60px; y: 39px;
+                    width: max(parent.width - 70px, 1px);
+                    text: m.duration;
+                    color: Theme.text-dim;
+                    font-size: 9px;
+                }
+
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.select-asset(i); }
+                }
+            }
+        }
+    }
+
+    // --- PREVIEW --------------------------------------------------------------------------
+    Rectangle {
+        x: center-x; y: top-y;
+        width: center-w; height: top-h;
+        visible: !root.timeline-only;
+        background: Theme.card;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        clip: true;
+
+        PanelTitle {
+            x: 0; y: 0;
+            title: "PREVIEW";
+            subtitle: "节目监视器";
+            trailing: root.renderer-label;
+        }
+
+        Rectangle {
+            x: 14px; y: 42px;
+            width: parent.width - 28px;
+            height: 1px;
+            background: Theme.border-soft;
+        }
+
+        // 16:9 stage, centred in the available area.
+        property <length> avail-h: max(80px, parent.height - 126px);
+        property <length> stage-w: max(120px, min(parent.width - 32px, avail-h * 16 / 9));
+        property <length> stage-h: stage-w * 9 / 16;
+
+        Rectangle {
+            x: (parent.width - stage-w) / 2;
+            y: 52px + (parent.avail-h - stage-h) / 2;
+            width: parent.stage-w;
+            height: parent.stage-h;
+            background: #090a0d;
+            border-radius: 7px;
+            border-width: 1px;
+            border-color: #2a2e36;
+            clip: true;
+
+            if root.show-preview: Image {
+                width: parent.width;
+                height: parent.height;
+                source: root.preview;
+                image-fit: contain;
+            }
+            if !root.show-preview: Text {
+                width: parent.width;
+                height: parent.height;
+                text: "预览纹理未加载";
+                color: Theme.text-faint;
+                font-size: 12px;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            Rectangle {
+                x: 10px; y: 9px;
+                width: 124px; height: 21px;
+                background: #00000088;
+                border-radius: 4px;
+                Text {
+                    x: 8px; y: 3px;
+                    text: root.timecode + "  ·  1920×1080";
+                    color: #ffffffd8;
+                    font-size: 9px;
+                }
+            }
+            Rectangle {
+                x: parent.width - 134px; y: parent.height - 30px;
+                width: 124px; height: 21px;
+                background: #00000088;
+                border-radius: 4px;
+                Text {
+                    x: 8px; y: 3px;
+                    text: "GPU 零拷贝预览";
+                    color: #9fe0b0;
+                    font-size: 9px;
+                }
+            }
+        }
+
+        // Transport row under the stage.
+        Rectangle {
+            x: 14px; y: parent.height - 58px;
+            width: parent.width - 28px;
+            height: 42px;
+            background: #191b20;
+            border-radius: 6px;
+
+            SmallButton {
+                x: 8px; y: 8px;
+                label: root.playing ? "暂停" : "播放";
+                clicked => { root.toggle-play(); }
+            }
+            SmallButton {
+                x: 88px; y: 8px;
+                label: "上一帧";
+                clicked => { root.step-frame(-1); }
+            }
+            SmallButton {
+                x: 168px; y: 8px;
+                label: "下一帧";
+                clicked => { root.step-frame(1); }
+            }
+            Text {
+                x: 256px; y: 8px;
+                width: max(parent.width - 266px, 1px);
+                text: root.project-name + "  ·  " + root.fps-label;
+                color: Theme.text-dim;
+                font-size: 10px;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+    }
+
+    // --- INSPECTOR ------------------------------------------------------------------------
+    Rectangle {
+        x: right-x; y: top-y;
+        width: right-w; height: top-h;
+        visible: !root.timeline-only;
+        background: Theme.card;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.border;
+        clip: true;
+
+        PanelTitle {
+            x: 0; y: 0;
+            title: "INSPECTOR";
+            subtitle: "检查器";
+            trailing: root.selected-id >= 0 ? "已选中" : "未选中";
+        }
+
+        Rectangle {
+            x: 14px; y: 42px;
+            width: parent.width - 28px;
+            height: 1px;
+            background: Theme.border-soft;
+        }
+
+        Text {
+            x: 16px; y: 54px;
+            width: parent.width - 32px;
+            text: root.selected-label;
+            color: Theme.text;
+            font-size: 13px;
+            font-weight: 600;
+            overflow: elide;
+        }
+        Text {
+            x: 16px; y: 75px;
+            width: parent.width - 32px;
+            text: root.selected-kind;
+            color: Theme.accent;
+            font-size: 10px;
+        }
+
+        Rectangle {
+            x: 14px; y: 98px;
+            width: parent.width - 28px;
+            height: 1px;
+            background: Theme.border-soft;
+        }
+
+        PropRow { x: 16px; y: 108px; width: parent.width - 32px; key: "轨道"; value: root.selected-track; }
+        PropRow { x: 16px; y: 133px; width: parent.width - 32px; key: "起点"; value: root.selected-position; }
+        PropRow { x: 16px; y: 158px; width: parent.width - 32px; key: "时长"; value: root.selected-duration; }
+        PropRow { x: 16px; y: 183px; width: parent.width - 32px; key: "源"; value: root.selected-source; }
+        PropRow { x: 16px; y: 208px; width: parent.width - 32px; key: "时间码"; value: root.selected-time; }
+
+        Text {
+            x: 16px; y: 246px;
+            text: "素材名称（中文输入法测试）";
+            color: Theme.text-faint;
+            font-size: 9px;
+        }
+        Rectangle {
+            x: 16px; y: 260px;
+            width: parent.width - 32px;
+            height: 30px;
+            background: #15171b;
+            border-radius: 5px;
+            border-width: 1px;
+            border-color: input.has-focus ? Theme.accent : #343942;
+
+            input := TextInput {
+                x: 8px; y: 4px;
+                width: parent.width - 16px;
+                height: 22px;
+                text: root.editable-label;
+                color: Theme.text;
+                font-size: 11px;
+                single-line: true;
+                edited => {
+                    root.editable-label = self.text;
+                    root.label-edited(self.text);
+                }
+                changed preedit-text => {
+                    root.ime-preedit = self.preedit-text;
+                }
+            }
+        }
+        Text {
+            x: 16px; y: 294px;
+            width: parent.width - 32px;
+            text: root.ime-preedit == "" ? "IME 预编辑：无" : "IME 预编辑：" + root.ime-preedit;
+            color: Theme.text-faint;
+            font-size: 9px;
+            overflow: elide;
+        }
+
+        Rectangle {
+            x: 14px; y: 318px;
+            width: parent.width - 28px;
+            height: 1px;
+            background: Theme.border-soft;
+        }
+
+        PropRow { x: 16px; y: 328px; width: parent.width - 32px; key: "渲染器"; value: root.renderer-label; }
+        PropRow { x: 16px; y: 353px; width: parent.width - 32px; key: "DPI"; value: root.dpi-label; }
+
+        SmallButton {
+            x: 16px; y: 384px;
+            label: "关于 Slint";
+            clicked => {
+                root.show-about = true;
+                root.about-opened();
+            }
+        }
+
+        Text {
+            x: 16px; y: parent.height - 54px;
+            width: parent.width - 32px;
+            text: "Slint 1.19.1 · FemtoVG / wgpu 30";
+            color: Theme.text-faint;
+            font-size: 9px;
+            overflow: elide;
+        }
+        Text {
+            x: 16px; y: parent.height - 38px;
+            width: parent.width - 32px;
+            text: "许可证：GPL-3.0 / Royalty-free 2.0 / 商业";
+            color: Theme.text-faint;
+            font-size: 9px;
+            overflow: elide;
+        }
+    }
+
+    // --- TIMELINE -------------------------------------------------------------------------
+    Rectangle {
+        x: root.timeline-only ? 0px : margin;
+        y: root.timeline-only ? 0px : bottom-y;
+        width: root.timeline-only ? root.width : inner-w;
+        height: root.timeline-only ? root.height : bottom-h;
+        background: Theme.card;
+        border-radius: root.timeline-only ? 0px : Theme.radius;
+        border-width: root.timeline-only ? 0px : 1px;
+        border-color: Theme.border;
+        clip: true;
+
+        timeline := TimelinePanel {
+            x: 1px; y: 1px;
+            width: parent.width - 2px;
+            height: parent.height - 2px;
+            clips: root.clips;
+            tracks: root.tracks;
+            ticks: root.ticks;
+            thumb: root.thumb;
+            selected-id: root.selected-id;
+            zoom: root.zoom;
+            zoom-label: root.zoom-label;
+            fps: root.fps;
+            fps-label: root.fps-label;
+            track-count-label: root.track-count-label;
+            playhead-x: root.playhead-x;
+            playing: root.playing;
+            selected-label: root.selected-label;
+            status: root.status;
+            duration: root.duration;
+            tracks-height: root.tracks-height;
+            scroll-request-x: root.scroll-request-x;
+            scroll-request-y: root.scroll-request-y;
+
+            select-clip(id) => { root.select-clip(id); }
+            zoom-in => { root.zoom-in(); }
+            zoom-out => { root.zoom-out(); }
+            zoom-set(v) => { root.zoom-set(v); }
+            toggle-play => { root.toggle-play(); }
+            step-frame(n) => { root.step-frame(n); }
+            seek-frame(n) => { root.seek-frame(n); }
+        }
+    }
+
+    // --- splitters ------------------------------------------------------------------------
+    left-splitter := TouchArea {
+        x: margin + left-w;
+        y: top-y;
+        width: gap;
+        height: top-h;
+        visible: !root.timeline-only;
+        mouse-cursor: ew-resize;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.left-drag-x = self.mouse-x;
+            }
+        }
+        moved => {
+            root.left-frac = min(0.40, max(0.12, root.left-frac + (self.mouse-x - root.left-drag-x) / root.inner-w));
+            root.left-drag-x = self.mouse-x;
+        }
+        Rectangle {
+            x: (parent.width - 3px) / 2;
+            y: (parent.height - 44px) / 2;
+            width: 3px; height: 44px;
+            border-radius: 2px;
+            background: left-splitter.has-hover ? Theme.accent : #2a2e36;
+        }
+    }
+    right-splitter := TouchArea {
+        x: center-x + center-w;
+        y: top-y;
+        width: gap;
+        height: top-h;
+        visible: !root.timeline-only;
+        mouse-cursor: ew-resize;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.right-drag-x = self.mouse-x;
+            }
+        }
+        moved => {
+            root.right-frac = min(0.40, max(0.12, root.right-frac - (self.mouse-x - root.right-drag-x) / root.inner-w));
+            root.right-drag-x = self.mouse-x;
+        }
+        Rectangle {
+            x: (parent.width - 3px) / 2;
+            y: (parent.height - 44px) / 2;
+            width: 3px; height: 44px;
+            border-radius: 2px;
+            background: right-splitter.has-hover ? Theme.accent : #2a2e36;
+        }
+    }
+    bottom-splitter := TouchArea {
+        x: margin;
+        y: margin + top-h;
+        width: inner-w;
+        height: gap;
+        visible: !root.timeline-only;
+        mouse-cursor: ns-resize;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.bottom-drag-y = self.mouse-y;
+            }
+        }
+        moved => {
+            root.bottom-frac = min(0.55, max(0.20, root.bottom-frac - (self.mouse-y - root.bottom-drag-y) / root.inner-h));
+            root.bottom-drag-y = self.mouse-y;
+        }
+        Rectangle {
+            x: (parent.width - 46px) / 2;
+            y: (parent.height - 3px) / 2;
+            width: 46px; height: 3px;
+            border-radius: 2px;
+            background: bottom-splitter.has-hover ? Theme.accent : #2a2e36;
+        }
+    }
+
+    // --- about / license ------------------------------------------------------------------
+    if root.show-about: Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #000000a8;
+
+        Rectangle {
+            x: (parent.width - 420px) / 2;
+            y: (parent.height - 340px) / 2;
+            width: 420px;
+            height: 340px;
+            background: Theme.card;
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.border;
+
+            Text {
+                x: 18px; y: 14px;
+                text: "关于 Arcline 的 Slint 验证";
+                color: Theme.text;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            Rectangle {
+                x: 18px; y: 38px;
+                width: parent.width - 36px;
+                height: 220px;
+                background: #15171b;
+                border-radius: 6px;
+                AboutSlint { }
+            }
+            Text {
+                x: 18px; y: 268px;
+                width: parent.width - 36px;
+                text: "Royalty-free 2.0 要求 About 界面展示 AboutSlint 或官网徽标。";
+                color: Theme.text-faint;
+                font-size: 9px;
+                wrap: word-wrap;
+            }
+            SmallButton {
+                x: parent.width - 92px; y: 296px;
+                label: "关闭";
+                clicked => { root.show-about = false; }
+            }
+        }
+    }
+}

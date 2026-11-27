@@ -1,0 +1,110 @@
+{
+  "scope": "1600x1000, release, Intel Graphics (DX12), 600 frames unless noted; Slint is FIFO/vsync, egui UI work is AutoNoVsync and a separate Fifo run measures pacing",
+  "timeline_1000_clips_native": {
+    "egui": {
+      "frame_us_p50": 568,
+      "frame_us_p95": 1598,
+      "ui_and_paint_us_p50": 273,
+      "peak_rss_mb": 321.3,
+      "wall_s": 1.90,
+      "cpu_s": 0.61,
+      "dropped_over_20ms": 0
+    },
+    "slint_timeline_only": {
+      "frame_us_p50": 6387,
+      "frame_us_p95": 9069,
+      "interval_us_p50": 16699,
+      "interval_us_p95": 20079,
+      "dropped_over_20ms": 35,
+      "prepare_us_p50": 205,
+      "peak_rss_mb": 398.5,
+      "wall_s": 11.77,
+      "cpu_s": 5.66
+    },
+    "slint_timeline_only_cull": {
+      "frame_us_p50": 5654,
+      "frame_us_p95": 7559,
+      "interval_us_p50": 16819,
+      "interval_us_p95": 19305,
+      "dropped_over_20ms": 6,
+      "peak_rss_mb": 399.5,
+      "wall_s": 6.00,
+      "cpu_s": 2.91,
+      "frames": 300,
+      "note": "Visible-window clip publishing with 30 s margin; 300 frames, not directly comparable to the 600-frame rows."
+    },
+    "slint_full_four_panel": {
+      "frame_us_p50": 7457,
+      "frame_us_p95": 10368,
+      "interval_us_p50": 16785,
+      "interval_us_p95": 20614,
+      "dropped_over_20ms": 45,
+      "prepare_us_p50": 193,
+      "peak_rss_mb": 413.9,
+      "wall_s": 11.24,
+      "cpu_s": 6.47
+    }
+  },
+  "timeline_1000_clips_zoom": {
+    "egui": {
+      "frame_us_p50": 526,
+      "frame_us_p95": 1749,
+      "dropped_over_20ms": 0
+    },
+    "slint": {
+      "frame_us_p50": 5190,
+      "frame_us_p95": 9465,
+      "dropped_over_20ms": 33,
+      "frames": 432
+    }
+  },
+  "preview_1000_clips": {
+    "slint_native_gpu_texture": {
+      "prepare_us_p50": 193,
+      "prepare_us_p95": 281,
+      "frame_us_p50": 7457,
+      "peak_rss_mb": 413.9
+    },
+    "slint_cpu_readback": {
+      "prepare_us_p50": 13402,
+      "prepare_us_p95": 14707,
+      "frame_us_p50": 6671,
+      "interval_us_p50": 21409,
+      "dropped_over_20ms": 299,
+      "frames": 300,
+      "peak_rss_mb": 495.7
+    },
+    "egui_native_gpu_texture": {
+      "frame_us_p50": 568,
+      "peak_rss_mb": 321.3
+    },
+    "egui_cpu_readback": {
+      "frame_us_p50": 6068,
+      "frame_us_p95": 8171,
+      "peak_rss_mb": 393.6,
+      "frames": 299
+    }
+  },
+  "startup_and_idle": {
+    "egui": {
+      "startup_external_ms": 1291.0,
+      "startup_internal_first_frame_ms": 464.6,
+      "idle_cpu_pct_of_one_core": 0.39,
+      "idle_working_set_mb": 310.7,
+      "idle_gpu_pct_max": 0.0
+    },
+    "slint": {
+      "startup_external_ms": 1248.3,
+      "startup_internal_first_frame_ms": 832.7,
+      "idle_cpu_pct_of_one_core": 0.0,
+      "idle_working_set_mb": 373.7,
+      "idle_gpu_pct_max": 0.0
+    }
+  },
+  "notes": [
+    "egui 'frame_us' is its UI+paint loop time; with AutoNoVsync it is 0.57 ms p50. Slint's notifier measures Build+Submit before presentation, also excluding present.",
+    "The egui Fifo run is the pacing control: interval p50 16.706 ms, p95 17.220 ms, 0 intervals over 20 ms.",
+    "Slint's dropped-over-20ms count is measured from the interval between AfterRendering callbacks, so it includes missed vsync deadlines.",
+    "The readback path is a deliberately unoptimised control (fresh 8 MB buffer + map + full upload each frame). It is not the proposed production path."
+  ]
+}

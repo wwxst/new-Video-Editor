@@ -1,0 +1,20 @@
+{
+    "host_hwnd":  "0x1a0d56",
+    "host_title":  "Arcline Agent Client â€?Slint child host",
+    "child_exe":  "D:\\Develop\\Projects\\Video Editing\\poc\\ui-validation\\target\\debug\\slint-poc.exe",
+    "child_report":  {
+                         "child_hwnd":  "0x9c0c12",
+                         "get_parent_hwnd":  "0x1a0d56",
+                         "is_child_of_host":  true,
+                         "parent_hwnd":  "0x1a0d56",
+                         "renderer":  "femtovg-wgpu",
+                         "scale_factor":  1.0,
+                         "size":  [
+                                      1180,
+                                      760
+                                  ],
+                         "standalone":  false
+                     },
+    "screenshot":  "D:\\Develop\\Projects\\Video Editing\\reports\\screenshots\\slint-embedded.png",
+    "host_screenshot":  true
+}

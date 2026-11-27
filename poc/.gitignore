@@ -1,0 +1,5 @@
+# Large media fixtures are local-only; the probes and reports are committed.
+media-validation/fixtures/
+
+# Build products are already ignored by the repository root, kept here for standalone use.
+**/target/

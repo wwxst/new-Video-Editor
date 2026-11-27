@@ -1,0 +1,1 @@
+{"bytes":1244160000,"checksum":14681017652095820666,"codec":"hevc","decode_ms":1604.7313000000001,"first_pts_us":0,"fps":93.47359274415598,"fps_nominal":30.0,"frames":150,"height":1080,"last_pts_us":4966666,"mode":"video-seq","pix_fmt":"yuv420p","tool":"shim","width":1920}

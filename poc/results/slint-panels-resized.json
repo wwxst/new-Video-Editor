@@ -1,0 +1,53 @@
+{
+  "dropped_over_20ms": 3,
+  "extra": {
+    "clips": 204,
+    "cull": false,
+    "duration_s": 202.79100036621094,
+    "editable_label": "",
+    "embedded": false,
+    "glyph_family": "Arcline CJK (embedded Noto Sans SC subset)",
+    "ime_preedit": "",
+    "interact": "Scroll",
+    "panel_fractions": [
+      0.30000001192092896,
+      0.20999999344348907,
+      0.4099999964237213
+    ],
+    "renderer": "femtovg-wgpu",
+    "scale_factor": 1.0,
+    "scenario": "Resized",
+    "selected_asset": -1,
+    "selected_id": -1,
+    "ui_mode": "full",
+    "video": "Native",
+    "view_scroll": [
+      696.99853515625,
+      -0.0
+    ],
+    "window_px": [
+      1600,
+      1000
+    ],
+    "zoom": 60.0
+  },
+  "fps_from_mean": 65.09862441599023,
+  "frame_us_max": 759917,
+  "frame_us_mean": 15361.307692307691,
+  "frame_us_p50": 5721,
+  "frame_us_p95": 8888,
+  "frames": 78,
+  "interval_us_max": 90518,
+  "interval_us_p50": 17042,
+  "interval_us_p95": 19647,
+  "interval_us_p99": 20401,
+  "label": "slint",
+  "prepare_us_max": 1014,
+  "prepare_us_p50": 291,
+  "prepare_us_p95": 715,
+  "steady_frames": 68,
+  "steady_us_max": 9559,
+  "steady_us_mean": 5761.661764705882,
+  "steady_us_p50": 6102,
+  "steady_us_p95": 8417
+}

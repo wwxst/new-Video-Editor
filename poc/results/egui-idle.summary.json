@@ -1,0 +1,13 @@
+{
+    "tag":  "egui-idle",
+    "exe":  "egui-poc.exe",
+    "startup_external_ms":  1291,
+    "startup_internal_ms":  464.6,
+    "idle_s":  4.02,
+    "idle_cpu_s":  0.0156,
+    "idle_cpu_pct_of_one_core":  0.39,
+    "idle_ws_mb":  310.7,
+    "peak_rss_mb":  310.7,
+    "exit":  null,
+    "app":  null
+}

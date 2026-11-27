@@ -1,0 +1,38 @@
+{
+    "tag":  "egui-release-1000-native-fifo",
+    "exe":  "egui-poc.exe",
+    "arguments":  "--clips 1000 --frames 600 --video-mode native --out ..\\results\\egui-release-1000-native-fifo.json",
+    "exit":  null,
+    "wall_s":  11.332,
+    "cpu_s":  2.062,
+    "peak_rss_mb":  314.8,
+    "result":  {
+                   "dropped_over_20ms":  0,
+                   "extra":  {
+                                 "clips":  1002,
+                                 "ui_and_paint_us_p50":  14694,
+                                 "ui_and_paint_us_p95":  12639,
+                                 "video":  "Native",
+                                 "zoom":  60.0
+                             },
+                   "fps_from_mean":  61.926559029553964,
+                   "frame_us_max":  19089,
+                   "frame_us_mean":  16148.160267111853,
+                   "frame_us_p50":  16402,
+                   "frame_us_p95":  17006,
+                   "frames":  599,
+                   "interval_us_max":  19378,
+                   "interval_us_p50":  16706,
+                   "interval_us_p95":  17220,
+                   "interval_us_p99":  17446,
+                   "label":  "egui",
+                   "prepare_us_max":  0,
+                   "prepare_us_p50":  0,
+                   "prepare_us_p95":  0,
+                   "steady_frames":  589,
+                   "steady_us_max":  19089,
+                   "steady_us_mean":  16242.855687606112,
+                   "steady_us_p50":  16402,
+                   "steady_us_p95":  17007
+               }
+}

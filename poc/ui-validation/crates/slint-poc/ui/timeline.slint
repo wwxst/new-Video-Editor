@@ -1,0 +1,534 @@
+// Arcline timeline, Slint implementation.
+//
+// The left track header is a foreground layer: it never moves horizontally, but follows the
+// vertical scroll of the lane canvas. The canvas is a Flickable that owns wheel/drag scrolling;
+// zoom, selection and the playhead are plain properties, so a scroll frame does not rebuild the
+// clip model.
+
+import { Theme } from "theme.slint";
+
+export struct KeyView {
+    // Horizontal position as a fraction of the clip duration.
+    x: float,
+    y: length,
+}
+
+export struct ClipView {
+    id: int,
+    start: float,
+    duration: float,
+    lane-y: length,
+    lane-h: length,
+    label: string,
+    fill: color,
+    has-thumb: bool,
+    wave-path: string,
+    keys: [KeyView],
+}
+
+export struct TrackView {
+    id: int,
+    name: string,
+    kind: string,
+    top: length,
+    height: length,
+    muted: bool,
+    locked: bool,
+    color: color,
+    clip-count: int,
+}
+
+export struct TickView {
+    x: length,
+    label: string,
+    major: bool,
+}
+
+component ToolButton inherits Rectangle {
+    in property <string> label;
+    in property <length> button-width: 30px;
+    in property <bool> active: false;
+    callback clicked;
+
+    width: button-width;
+    height: 24px;
+    border-radius: Theme.small-radius;
+    background: active ? Theme.accent-soft : (tap.has-hover ? #2c3038 : #23262c);
+    border-width: 1px;
+    border-color: active ? Theme.accent : #30343c;
+
+    Text {
+        width: parent.width;
+        height: parent.height;
+        text: root.label;
+        color: root.active ? #ffffff : Theme.text;
+        font-size: 11px;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    tap := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+component ZoomTrack inherits Rectangle {
+    in property <float> zoom: 60;
+    callback zoom-set(float);
+
+    width: 108px;
+    height: 18px;
+    background: transparent;
+
+    Rectangle {
+        x: 0;
+        y: 7px;
+        width: parent.width;
+        height: 4px;
+        border-radius: 2px;
+        background: #30343c;
+    }
+    Rectangle {
+        x: 0;
+        y: 7px;
+        width: max(4px, parent.width * (root.zoom - 2) / 398);
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.accent;
+    }
+    Rectangle {
+        x: max(0px, min(parent.width - 8px, parent.width * (root.zoom - 2) / 398 - 4px));
+        y: 4px;
+        width: 8px;
+        height: 10px;
+        border-radius: 3px;
+        background: #d8dde6;
+    }
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.zoom-set(2 + 398 * max(0px, min(parent.width, self.mouse-x)) / parent.width);
+        }
+        moved => {
+            if self.pressed {
+                root.zoom-set(2 + 398 * max(0px, min(parent.width, self.mouse-x)) / parent.width);
+            }
+        }
+    }
+}
+
+export component TimelinePanel inherits Rectangle {
+    in property <[ClipView]> clips;
+    in property <[TrackView]> tracks;
+    in property <[TickView]> ticks;
+    in property <int> selected-id: -1;
+    in property <float> zoom: 60;
+    in property <string> zoom-label: "60 px/s";
+    in property <string> fps-label: "30 fps";
+    in property <string> track-count-label: "6 轨";
+    in property <image> thumb;
+    in property <float> fps: 30;
+    in property <length> playhead-x: 0px;
+    in property <bool> playing: false;
+    in property <string> selected-label: "未选择素材";
+    in property <string> status: "就绪";
+    in property <float> duration: 600;
+    in property <length> tracks-height: 300px;
+
+    // Set from Rust to scroll programmatically (playhead follow / fit / tests).
+    in-out property <length> scroll-request-x: -1px;
+    in-out property <length> scroll-request-y: -1px;
+
+    // The actual Flickable offsets, exposed so an external harness can verify wheel/drag input.
+    out property <length> view-scroll-x: -lane.content-x;
+    out property <length> view-scroll-y: -lane.content-y;
+
+    callback select-clip(int);
+    callback zoom-in();
+    callback zoom-out();
+    callback zoom-set(float);
+    callback toggle-play();
+    callback step-frame(int);
+    callback seek-frame(int);
+
+    clip: true;
+    background: transparent;
+
+    property <length> header-w: 132px;
+    property <length> toolbar-h: 38px;
+    property <length> ruler-h: 26px;
+    property <length> lane-top: toolbar-h + ruler-h;
+    property <length> viewport-w: max(1px, self.width - header-w);
+    property <length> lane-h: max(1px, self.height - lane-top);
+    property <length> content-w: max(viewport-w, (duration * zoom) * 1px + 240px);
+    property <length> content-h: max(lane-h, tracks-height);
+    property <length> scroll-x: -lane.content-x;
+    property <length> scroll-y: -lane.content-y;
+    property <length> max-scroll-x: max(0px, content-w - viewport-w);
+    property <length> max-scroll-y: max(0px, content-h - lane-h);
+    property <length> h-thumb-w: max(24px, viewport-w * viewport-w / content-w);
+    property <length> v-thumb-h: max(24px, lane-h * lane-h / content-h);
+    property <length> playhead-screen-x: header-w + playhead-x + lane.content-x;
+
+    // --- toolbar -------------------------------------------------------------------------
+    Rectangle {
+        x: 0; y: 0;
+        width: parent.width;
+        height: root.toolbar-h;
+        background: transparent;
+
+        Text {
+            x: 12px; y: 4px;
+            text: "TIMELINE";
+            color: Theme.text;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        Text {
+            x: 82px; y: 5px;
+            text: "时间线";
+            color: Theme.text-dim;
+            font-size: 11px;
+        }
+        Text {
+            x: 132px; y: 5px;
+            text: root.fps-label;
+            color: Theme.text-faint;
+            font-size: 11px;
+        }
+
+        ToolButton {
+            x: 190px; y: 7px;
+            label: root.playing ? "暂停" : "播放";
+            button-width: 46px;
+            active: root.playing;
+            clicked => { root.toggle-play(); }
+        }
+        ToolButton {
+            x: 242px; y: 7px;
+            label: "上一帧";
+            button-width: 44px;
+            clicked => { root.step-frame(-1); }
+        }
+        ToolButton {
+            x: 290px; y: 7px;
+            label: "下一帧";
+            button-width: 44px;
+            clicked => { root.step-frame(1); }
+        }
+
+        Rectangle { x: 342px; y: 9px; width: 1px; height: 20px; background: Theme.border-soft; }
+
+        ToolButton {
+            x: 352px; y: 7px;
+            label: "缩小";
+            button-width: 40px;
+            clicked => { root.zoom-out(); }
+        }
+        ZoomTrack {
+            x: 398px; y: 10px;
+            zoom: root.zoom;
+            zoom-set(v) => { root.zoom-set(v); }
+        }
+        ToolButton {
+            x: 512px; y: 7px;
+            label: "放大";
+            button-width: 40px;
+            clicked => { root.zoom-in(); }
+        }
+        Text {
+            x: 558px; y: 5px;
+            text: root.zoom-label;
+            color: Theme.text-dim;
+            font-size: 10px;
+        }
+
+        Rectangle { x: 624px; y: 9px; width: 1px; height: 20px; background: Theme.border-soft; }
+
+        Text {
+            x: 636px; y: 5px;
+            text: "选中: " + root.selected-label;
+            color: root.selected-id >= 0 ? Theme.accent : Theme.text-dim;
+            font-size: 11px;
+            width: max(80px, parent.width - 760px);
+            overflow: elide;
+        }
+
+        Text {
+            x: parent.width - 168px; y: 5px;
+            width: 156px;
+            text: root.status;
+            color: Theme.text-faint;
+            font-size: 10px;
+            horizontal-alignment: right;
+            overflow: elide;
+        }
+    }
+
+    // --- fixed ruler corner ---------------------------------------------------------------
+    Rectangle {
+        x: 0; y: root.toolbar-h;
+        width: root.header-w;
+        height: root.ruler-h;
+        background: #191b20;
+        border-width: 0px;
+        border-color: Theme.border;
+
+        Text {
+            x: 10px; y: 3px;
+            text: "轨道";
+            color: Theme.text-dim;
+            font-size: 10px;
+        }
+        Text {
+            x: 44px; y: 3px;
+            text: root.track-count-label;
+            color: Theme.text-faint;
+            font-size: 10px;
+        }
+    }
+
+    // --- ruler ----------------------------------------------------------------------------
+    Rectangle {
+        x: root.header-w; y: root.toolbar-h;
+        width: root.viewport-w;
+        height: root.ruler-h;
+        background: #191b20;
+        border-width: 0px;
+        border-color: Theme.border;
+        clip: true;
+
+        for t in root.ticks: Rectangle {
+            x: t.x + lane.content-x;
+            y: t.major ? 11px : 17px;
+            width: 1px;
+            height: t.major ? 14px : 7px;
+            background: t.major ? #8e939c : #454a52;
+        }
+        for t in root.ticks: Text {
+            x: t.x + lane.content-x + 4px;
+            y: 2px;
+            text: t.label;
+            color: t.major ? #b6bac2 : Theme.text-faint;
+            font-size: t.major ? 10px : 9px;
+            visible: t.label != "";
+        }
+    }
+
+    // --- fixed track headers --------------------------------------------------------------
+    Rectangle {
+        x: 0; y: root.lane-top;
+        width: root.header-w;
+        height: root.lane-h;
+        background: #1a1c21;
+        clip: true;
+
+        for t in root.tracks: Rectangle {
+            y: t.top + lane.content-y;
+            width: parent.width;
+            height: t.height;
+            background: Math.mod(t.id, 2) == 0 ? #1c1e24 : #191b20;
+            border-width: 0px;
+            border-color: #24272d;
+
+            Rectangle {
+                x: 0; y: 0;
+                width: 3px;
+                height: parent.height;
+                background: t.color;
+                opacity: t.muted ? 0.3 : 1.0;
+            }
+            Text {
+                x: 12px; y: 7px;
+                text: t.name;
+                color: t.muted ? Theme.text-faint : Theme.text;
+                font-size: 11px;
+                font-weight: 600;
+                width: parent.width - 52px;
+                overflow: elide;
+            }
+            Text {
+                x: 12px; y: 24px;
+                text: t.kind;
+                color: Theme.text-faint;
+                font-size: 9px;
+                width: parent.width - 52px;
+                overflow: elide;
+            }
+            Text {
+                x: parent.width - 30px; y: 7px;
+                text: t.muted ? "静音" : "M";
+                color: t.muted ? Theme.warning : Theme.text-faint;
+                font-size: 9px;
+            }
+            Text {
+                x: parent.width - 30px; y: 23px;
+                text: t.locked ? "锁" : "L";
+                color: t.locked ? Theme.warning : Theme.text-faint;
+                font-size: 9px;
+            }
+        }
+    }
+
+    // --- lane canvas ----------------------------------------------------------------------
+    lane := Flickable {
+        x: root.header-w; y: root.lane-top;
+        width: root.viewport-w;
+        height: root.lane-h;
+        content-width: root.content-w;
+        content-height: root.content-h;
+        interactive: true;
+        mouse-drag-pan-enabled: true;
+
+        Rectangle {
+            width: root.content-w;
+            height: root.content-h;
+            background: Theme.card-deep;
+
+            // Lane rows.
+            for t in root.tracks: Rectangle {
+                y: t.top;
+                width: parent.width;
+                height: t.height;
+                background: Math.mod(t.id, 2) == 0 ? #17191e : #15171b;
+                border-width: 0px;
+                border-color: #21242a;
+            }
+            // Second-based grid, derived from the same zoom as the ruler.
+            for t in root.ticks: Rectangle {
+                x: t.x;
+                y: 0;
+                width: 1px;
+                height: parent.height;
+                background: #ffffff06;
+                visible: t.major;
+            }
+
+            // Clips.
+            for c in root.clips: Rectangle {
+                x: (c.start * root.zoom) * 1px;
+                y: c.lane-y + 1px;
+                width: max((c.duration * root.zoom) * 1px, 3px);
+                height: max(c.lane-h - 2px, 2px);
+                background: c.fill;
+                border-radius: 4px;
+                border-width: c.id == root.selected-id ? 2px : 1px;
+                border-color: c.id == root.selected-id ? #ffffff : #ffffff24;
+                clip: true;
+
+                Rectangle {
+                    x: 0; y: 0;
+                    width: parent.width;
+                    height: 15px;
+                    background: #00000028;
+                }
+                Text {
+                    x: 5px; y: 2px;
+                    width: max(parent.width - 10px, 1px);
+                    height: 13px;
+                    text: c.label;
+                    color: #f2f4f7;
+                    font-size: 9px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                if c.has-thumb: Image {
+                    x: 4px; y: 17px;
+                    width: min(parent.width - 8px, 76px);
+                    height: max(parent.height - 21px, 1px);
+                    source: root.thumb;
+                    image-fit: cover;
+                }
+                if c.wave-path != "": Path {
+                    x: 3px; y: 17px;
+                    width: max(parent.width - 6px, 1px);
+                    height: max(parent.height - 21px, 1px);
+                    commands: c.wave-path;
+                    viewbox-width: 100;
+                    viewbox-height: 100;
+                    fill: #ffffff;
+                    opacity: 0.18;
+                }
+                for k in c.keys: Rectangle {
+                    x: (k.x * c.duration * root.zoom) * 1px - 2px;
+                    y: k.y - 2px;
+                    width: 5px;
+                    height: 5px;
+                    background: Theme.warning;
+                    border-radius: 1px;
+                }
+
+                TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.select-clip(c.id); }
+                }
+            }
+
+        }
+    }
+
+    changed scroll-request-x => {
+        if (root.scroll-request-x >= 0px) {
+            lane.scroll-to({ x: root.scroll-request-x, y: -lane.content-y }, ScrollBehavior.instant);
+        }
+    }
+    changed scroll-request-y => {
+        if (root.scroll-request-y >= 0px) {
+            lane.scroll-to({ x: -lane.content-x, y: root.scroll-request-y }, ScrollBehavior.instant);
+        }
+    }
+
+    // --- playhead -------------------------------------------------------------------------
+    Rectangle {
+        x: root.playhead-screen-x;
+        y: root.toolbar-h + 6px;
+        width: 1px;
+        height: root.height - root.toolbar-h - 6px;
+        background: Theme.playhead;
+        visible: root.playhead-screen-x >= root.header-w && root.playhead-screen-x <= root.width;
+    }
+    Path {
+        x: root.playhead-screen-x - 5px;
+        y: root.toolbar-h;
+        width: 10px;
+        height: 7px;
+        viewbox-width: 10;
+        viewbox-height: 7;
+        commands: "M 0 0 L 10 0 L 5 7 Z";
+        fill: Theme.playhead;
+        visible: root.playhead-screen-x >= root.header-w && root.playhead-screen-x <= root.width;
+    }
+
+    // --- scrollbars -----------------------------------------------------------------------
+    Rectangle {
+        x: root.header-w; y: root.height - 8px;
+        width: root.viewport-w; height: 8px;
+        background: #15171b;
+        visible: root.max-scroll-x > 0px;
+
+        Rectangle {
+            x: root.max-scroll-x > 0px ? root.scroll-x / root.max-scroll-x * (root.viewport-w - root.h-thumb-w) : 0px;
+            y: 2px;
+            width: root.h-thumb-w;
+            height: 4px;
+            border-radius: 2px;
+            background: #454a54;
+        }
+    }
+    Rectangle {
+        x: root.width - 8px; y: root.lane-top;
+        width: 8px; height: root.lane-h;
+        background: #15171b;
+        visible: root.max-scroll-y > 0px;
+
+        Rectangle {
+            x: 2px;
+            y: root.max-scroll-y > 0px ? root.scroll-y / root.max-scroll-y * (root.lane-h - root.v-thumb-h) : 0px;
+            width: 4px;
+            height: root.v-thumb-h;
+            border-radius: 2px;
+            background: #454a54;
+        }
+    }
+}

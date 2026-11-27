@@ -1,0 +1,22 @@
+{
+  "extra": {
+    "clips": 4002,
+    "interact": "Scroll",
+    "renderer": "",
+    "software_fallback": false,
+    "video": "None",
+    "zoom": 60.0
+  },
+  "fps_from_mean": 142.56312338695767,
+  "frame_us_max": 376661,
+  "frame_us_mean": 7014.4366666666665,
+  "frame_us_p50": 6577,
+  "frame_us_p95": 8793,
+  "frames": 600,
+  "label": "slint",
+  "steady_frames": 590,
+  "steady_us_max": 15817,
+  "steady_us_mean": 6332.262711864407,
+  "steady_us_p50": 6561,
+  "steady_us_p95": 8531
+}

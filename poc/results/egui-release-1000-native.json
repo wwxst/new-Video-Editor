@@ -1,0 +1,29 @@
+{
+  "dropped_over_20ms": 0,
+  "extra": {
+    "clips": 1002,
+    "ui_and_paint_us_p50": 273,
+    "ui_and_paint_us_p95": 268,
+    "video": "Native",
+    "zoom": 60.0
+  },
+  "fps_from_mean": 1314.2132492002825,
+  "frame_us_max": 5733,
+  "frame_us_mean": 760.9115191986645,
+  "frame_us_p50": 572,
+  "frame_us_p95": 1770,
+  "frames": 599,
+  "interval_us_max": 0,
+  "interval_us_p50": 0,
+  "interval_us_p95": 0,
+  "interval_us_p99": 0,
+  "label": "egui",
+  "prepare_us_max": 0,
+  "prepare_us_p50": 0,
+  "prepare_us_p95": 0,
+  "steady_frames": 589,
+  "steady_us_max": 5733,
+  "steady_us_mean": 742.5382003395586,
+  "steady_us_p50": 568,
+  "steady_us_p95": 1598
+}

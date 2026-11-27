@@ -1,0 +1,14 @@
+[package]
+name = "shim-probe"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "shim-probe"
+path = "src/main.rs"
+
+[dependencies]
+arc-media = { path = "../../../../crates/arc-media" }
+arc-core = { path = "../../../../crates/arc-core" }
+serde_json.workspace = true

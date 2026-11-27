@@ -1,0 +1,32 @@
+{
+    "tag":  "egui-1000-native",
+    "label":  "egui",
+    "clips":  1000,
+    "video":  "native",
+    "interact":  "scroll",
+    "exit":  0,
+    "wall_s":  1.152,
+    "cpu_s":  0.75,
+    "peak_rss_mb":  321.1,
+    "result":  {
+                   "extra":  {
+                                 "clips":  1002,
+                                 "ui_and_paint_us_p50":  250,
+                                 "ui_and_paint_us_p95":  230,
+                                 "video":  "Native",
+                                 "zoom":  60.0
+                             },
+                   "fps_from_mean":  1508.4931437853356,
+                   "frame_us_max":  4639,
+                   "frame_us_mean":  662.9131886477462,
+                   "frame_us_p50":  497,
+                   "frame_us_p95":  1993,
+                   "frames":  599,
+                   "label":  "egui",
+                   "steady_frames":  589,
+                   "steady_us_max":  4639,
+                   "steady_us_mean":  654.1850594227504,
+                   "steady_us_p50":  493,
+                   "steady_us_p95":  1990
+               }
+}

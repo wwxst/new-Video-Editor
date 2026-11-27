@@ -1,0 +1,33 @@
+{
+    "tag":  "slint-100-none-scroll",
+    "label":  "slint",
+    "clips":  100,
+    "video":  "none",
+    "interact":  "scroll",
+    "exit":  0,
+    "wall_s":  11.03,
+    "cpu_s":  3.234,
+    "peak_rss_mb":  439.3,
+    "result":  {
+                   "extra":  {
+                                 "clips":  102,
+                                 "interact":  "Scroll",
+                                 "renderer":  "",
+                                 "software_fallback":  false,
+                                 "video":  "None",
+                                 "zoom":  60.0
+                             },
+                   "fps_from_mean":  376.54241185455925,
+                   "frame_us_max":  412670,
+                   "frame_us_mean":  2655.7433333333333,
+                   "frame_us_p50":  1983,
+                   "frame_us_p95":  2978,
+                   "frames":  600,
+                   "label":  "slint",
+                   "steady_frames":  590,
+                   "steady_us_max":  4188,
+                   "steady_us_mean":  1981.435593220339,
+                   "steady_us_p50":  1991,
+                   "steady_us_p95":  2976
+               }
+}

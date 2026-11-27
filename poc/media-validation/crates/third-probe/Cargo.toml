@@ -1,0 +1,13 @@
+[package]
+name = "third-probe"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "third-probe"
+path = "src/main.rs"
+
+[dependencies]
+ffmpeg-the-third = "6.0"
+serde_json.workspace = true

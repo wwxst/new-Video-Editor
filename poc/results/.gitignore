@@ -1,0 +1,9 @@
+*.ppm
+*.output.txt
+*.stdout.txt
+*.stderr.txt
+*.startup.json
+*child*.json
+*.child.*
+*.out
+*.err

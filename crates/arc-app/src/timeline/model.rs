@@ -1,6 +1,7 @@
 //! Timeline mock model: track types, clips and the rules that derive a track's type from its
 //! content. No engine types are involved; real integration replaces this module's data source.
 
+use arc_core::model::ClipAudio;
 use arc_core::time::{FrameRate, Round, Time};
 use egui::Color32;
 
@@ -92,6 +93,8 @@ pub struct Clip {
     /// Clip-level disabled state, distinct from a hidden track. A disabled clip stays visible but
     /// is dimmed and cannot be selected or edited.
     pub enabled: bool,
+    /// The same audio parameter struct used by the engine, mixer and exporter.
+    pub audio: ClipAudio,
 }
 
 impl Clip {
@@ -103,6 +106,7 @@ impl Clip {
             duration,
             source: None,
             enabled: true,
+            audio: ClipAudio::default(),
         }
     }
 
@@ -117,6 +121,12 @@ impl Clip {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn with_enabled(mut self, enabled: bool) -> Clip {
         self.enabled = enabled;
+        self
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn with_audio(mut self, audio: ClipAudio) -> Clip {
+        self.audio = audio;
         self
     }
 
@@ -239,8 +249,18 @@ impl TimelineModel {
             2.5,
             4.5,
         ));
-        text.add_clip(Clip::new(TrackKind::Text, "字幕 · 城市街角的人流", 7.0, 3.0));
-        text.add_clip(Clip::new(TrackKind::Text, "字幕 · 集市里的烟火气", 10.0, 3.0));
+        text.add_clip(Clip::new(
+            TrackKind::Text,
+            "字幕 · 城市街角的人流",
+            7.0,
+            3.0,
+        ));
+        text.add_clip(Clip::new(
+            TrackKind::Text,
+            "字幕 · 集市里的烟火气",
+            10.0,
+            3.0,
+        ));
         text.add_clip(Clip::new(TrackKind::Text, "字幕 · 海鸥追随渡轮", 13.0, 4.0));
         text.add_clip(Clip::new(TrackKind::Text, "片尾 · 谢谢观看", 17.5, 2.5));
         tracks.push(text);
@@ -458,7 +478,8 @@ mod tests {
             ]
         );
         assert!(
-            text.iter().all(|name| name.chars().any(|c| c as u32 >= 0x4E00)),
+            text.iter()
+                .all(|name| name.chars().any(|c| c as u32 >= 0x4E00)),
             "the text track must contain Chinese characters"
         );
 
@@ -480,7 +501,10 @@ mod tests {
         for clip in &clips {
             match clip.kind {
                 TrackKind::Video | TrackKind::Image | TrackKind::Audio => {
-                    let source = clip.source.as_ref().expect("media clips have a real source");
+                    let source = clip
+                        .source
+                        .as_ref()
+                        .expect("media clips have a real source");
                     assert!(
                         source.starts_with(&demo),
                         "{} is not demo media",
@@ -548,10 +572,16 @@ mod tests {
             .iter()
             .position(|t| t.name == "Main video")
             .expect("main video");
-        assert!(model.tracks[..main].iter().all(|t| t.kind() != Some(TrackKind::Audio)));
-        assert!(model.tracks[main + 1..]
-            .iter()
-            .all(|t| t.kind() == Some(TrackKind::Audio)));
+        assert!(
+            model.tracks[..main]
+                .iter()
+                .all(|t| t.kind() != Some(TrackKind::Audio))
+        );
+        assert!(
+            model.tracks[main + 1..]
+                .iter()
+                .all(|t| t.kind() == Some(TrackKind::Audio))
+        );
         // 24 + 24 + 24 + 76 + 76 + 76 + 50 + 50 = 400, plus 7 gaps of 4.
         assert_eq!(model.content_height(), 428.0);
     }
@@ -561,12 +591,8 @@ mod tests {
         assert_eq!(snap_to_frame(1.0, FrameRate::Fps24), 1.0);
         assert!((snap_to_frame(2.03, FrameRate::Fps24) - 49.0 / 24.0).abs() < 1e-9);
         // 29.97 is not rounded to 30: frame 30 is exactly at 30 / (30000/1001) s.
-        assert!(
-            (snap_to_frame(1.0, FrameRate::Fps29_97) - 30.0 * 1001.0 / 30_000.0).abs() < 1e-9
-        );
-        assert!(
-            (snap_to_frame(1.0, FrameRate::Fps59_94) - 60.0 * 1001.0 / 60_000.0).abs() < 1e-9
-        );
+        assert!((snap_to_frame(1.0, FrameRate::Fps29_97) - 30.0 * 1001.0 / 30_000.0).abs() < 1e-9);
+        assert!((snap_to_frame(1.0, FrameRate::Fps59_94) - 60.0 * 1001.0 / 60_000.0).abs() < 1e-9);
         assert_eq!(
             snap_to_frame(0.5, FrameRate::Fps30),
             FrameRate::Fps30.time_of_frame(15).to_f64_lossy()

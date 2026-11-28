@@ -1,15 +1,19 @@
 //! Timeline module: toolbar, ruler, track-control column and the lane canvas, driven by mock data.
 //!
-//! Everything here is presentation and local state (zoom, scroll, selection);
-//! no engine types are touched, so the mock model can be replaced by the real document feed later.
+//! Everything here is presentation and local state (zoom, scroll, selection, audio gestures).
+//! The audio parameters use the engine's `ClipAudio` value type but this surface never mutates a
+//! live `Project`; the mock model can be replaced by the real document feed later.
 //! Lane heights are fixed by content type and are not editable state.
 
+pub mod audio;
 pub mod draw;
 pub mod interaction;
 pub mod media;
 pub mod model;
 
+use arc_core::model::ClipAudio;
 use arc_core::time::FrameRate;
+use audio::{AudioDrag, AudioEdit, AudioHistory};
 use draw::{CANVAS_BG, CONTROLS_BG, DIM, TOOLBAR_BG, ToolbarIcon};
 use egui::{Align2, Color32, CornerRadius, FontId, Key, Rect, Sense, Stroke, Ui, Vec2};
 use interaction::{ClipGeometry, ClipHit, ClipRef, HitZone, Marquee, Selection};
@@ -74,11 +78,7 @@ fn zoom_controls(toolbar: Rect) -> Option<ZoomControls> {
         Vec2::new(ZOOM_SLIDER_W, 20.0),
     );
     let input = button(slider.right() + ZOOM_GAP);
-    Some(ZoomControls {
-        out,
-        slider,
-        input,
-    })
+    Some(ZoomControls { out, slider, input })
 }
 
 /// Slider position of a zoom level, 0 at [`MIN_ZOOM`] and 1 at `max_zoom`.
@@ -172,6 +172,10 @@ pub struct Timeline {
     hover: Option<ClipHit>,
     /// Active marquee, if the user is dragging on empty lane space.
     marquee: Option<Marquee>,
+    /// Active volume/fade gesture.
+    audio_drag: Option<AudioDrag>,
+    /// Undo/redo for in-timeline audio gestures.
+    audio_history: AudioHistory,
     pub select_mode: bool,
     pub snap: bool,
     pub link: bool,
@@ -188,6 +192,7 @@ impl std::fmt::Debug for Timeline {
             .field("scroll", &self.scroll)
             .field("selection", &self.selection)
             .field("hover", &self.hover)
+            .field("audio_drag", &self.audio_drag)
             .field("media", &self.media)
             .finish()
     }
@@ -202,6 +207,8 @@ impl Clone for Timeline {
             selection: self.selection.clone(),
             hover: self.hover,
             marquee: self.marquee.clone(),
+            audio_drag: self.audio_drag,
+            audio_history: self.audio_history.clone(),
             select_mode: self.select_mode,
             snap: self.snap,
             link: self.link,
@@ -220,6 +227,8 @@ impl Default for Timeline {
             selection: Selection::default(),
             hover: None,
             marquee: None,
+            audio_drag: None,
+            audio_history: AudioHistory::default(),
             select_mode: true,
             snap: true,
             link: false,
@@ -248,6 +257,91 @@ impl Timeline {
 
     pub fn frame_rate(&self) -> FrameRate {
         self.model.frame_rate
+    }
+
+    /// Right-panel readout for the primary audio-capable clip. Values come from the same
+    /// `ClipAudio` the waveform and mixer use, so they update during a drag without a second model.
+    pub fn audio_inspector(&mut self, ui: &mut Ui) {
+        let Some(r) = self.selection.primary() else {
+            ui.label(
+                egui::RichText::new("No clip selected")
+                    .size(11.0)
+                    .color(DIM),
+            );
+            return;
+        };
+        let Some(track) = self.model.tracks.get(r.track) else {
+            return;
+        };
+        let Some(clip) = track.clips.get(r.clip) else {
+            return;
+        };
+        let (kind, name, audio, enabled, muted, locked) = (
+            clip.kind,
+            clip.name.clone(),
+            clip.audio,
+            clip.enabled,
+            track.muted,
+            track.locked,
+        );
+        let has_audio = kind == model::TrackKind::Audio
+            || (kind == model::TrackKind::Video && self.clip_has_audio(r.track, r.clip));
+        ui.label(
+            egui::RichText::new(name)
+                .size(12.0)
+                .strong()
+                .color(draw::TEXT),
+        );
+        if !has_audio {
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new("No embedded audio")
+                    .size(11.0)
+                    .color(DIM),
+            );
+            return;
+        }
+        ui.add_space(6.0);
+        let row = |ui: &mut Ui, label: &str, value: String| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(label).size(10.5).color(DIM));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(
+                        egui::RichText::new(value)
+                            .size(11.0)
+                            .monospace()
+                            .color(draw::TEXT),
+                    );
+                });
+            });
+        };
+        row(ui, "VOLUME", format!("{:+.1} dB", audio.gain_db));
+        row(
+            ui,
+            "FADE IN",
+            format!("{:.1} s", audio::time_secs(audio.fade_in)),
+        );
+        row(
+            ui,
+            "FADE OUT",
+            format!("{:.1} s", audio::time_secs(audio.fade_out)),
+        );
+        ui.add_space(6.0);
+        let status = if !enabled {
+            "DISABLED"
+        } else if muted {
+            "MUTED · AUDIO CONTROLS HIDDEN"
+        } else if locked {
+            "LOCKED"
+        } else {
+            "Hover the clip to edit its envelope"
+        };
+        let color = if enabled && !muted && !locked {
+            DIM
+        } else {
+            Color32::from_rgb(0xc9, 0xa0, 0x60)
+        };
+        ui.label(egui::RichText::new(status).size(9.5).color(color));
     }
 
     /// Highest horizontal zoom: 200 px per project frame, so it scales with the real rate
@@ -299,7 +393,10 @@ impl Timeline {
 
         // Clamp scroll against the current content, then resolve the view.
         let max = self.max_scroll(l.canvas);
-        self.scroll = Vec2::new(self.scroll.x.clamp(0.0, max.x), self.scroll.y.clamp(0.0, max.y));
+        self.scroll = Vec2::new(
+            self.scroll.x.clamp(0.0, max.x),
+            self.scroll.y.clamp(0.0, max.y),
+        );
         let view_start = self.view_start();
 
         let body = self.body_rect(l.underlay);
@@ -315,8 +412,7 @@ impl Timeline {
         self.ruler(ui, l.ruler, view_start, playhead_x);
         let rows = self.lanes(ui, &l, body, origin, view_start, playhead_x);
         if let Some(m) = &self.marquee {
-            let content =
-                Rect::from_min_max(egui::pos2(l.controls.right(), body.top()), body.max);
+            let content = Rect::from_min_max(egui::pos2(l.controls.right(), body.top()), body.max);
             draw::draw_marquee(&ui.painter().with_clip_rect(content), m.rect(content));
         }
         self.control_panel(ui, &l, body, &rows);
@@ -353,7 +449,10 @@ impl Timeline {
     fn body_rect(&self, underlay: Rect) -> Rect {
         Rect::from_min_max(
             underlay.min,
-            egui::pos2(underlay.right() - SCROLLBAR_W, underlay.bottom() - SCROLLBAR_W),
+            egui::pos2(
+                underlay.right() - SCROLLBAR_W,
+                underlay.bottom() - SCROLLBAR_W,
+            ),
         )
     }
 
@@ -434,7 +533,12 @@ impl Timeline {
                     egui::CursorIcon::Grab
                 });
             }
-            self.paint_zoom_slider(ui, track, fraction, response.dragged() || response.hovered());
+            self.paint_zoom_slider(
+                ui,
+                track,
+                fraction,
+                response.dragged() || response.hovered(),
+            );
             response.on_hover_text("Timeline zoom");
         }
         if (requested - self.zoom).abs() > 0.001 {
@@ -454,7 +558,11 @@ impl Timeline {
     /// frame should show, so a click moves the knob in the same frame that the zoom changes.
     fn paint_zoom_slider(&self, ui: &Ui, track: Rect, fraction: f32, active: bool) {
         let painter = ui.painter();
-        painter.rect_filled(track, CornerRadius::same(2), Color32::from_rgb(0x33, 0x37, 0x3f));
+        painter.rect_filled(
+            track,
+            CornerRadius::same(2),
+            Color32::from_rgb(0x33, 0x37, 0x3f),
+        );
         let knob_x = track.left() + fraction.clamp(0.0, 1.0) * track.width();
         if knob_x > track.left() + 0.5 {
             painter.rect_filled(
@@ -510,13 +618,8 @@ impl Timeline {
         {
             return;
         }
-        let (delta, ctrl, shift) = ui.input(|i| {
-            (
-                i.smooth_scroll_delta,
-                i.modifiers.ctrl,
-                i.modifiers.shift,
-            )
-        });
+        let (delta, ctrl, shift) =
+            ui.input(|i| (i.smooth_scroll_delta, i.modifiers.ctrl, i.modifiers.shift));
         if delta == Vec2::ZERO {
             return;
         }
@@ -592,6 +695,9 @@ impl Timeline {
         let Some(clip) = track.clips.get(clip_index) else {
             return false;
         };
+        if clip.kind == model::TrackKind::Audio {
+            return true;
+        }
         if clip.kind != model::TrackKind::Video {
             return false;
         }
@@ -616,7 +722,8 @@ impl Timeline {
             let Some(track) = self.model.tracks.get(track_index) else {
                 continue;
             };
-            let (visible, locked, clip_count) = (track.visible, track.locked, track.clips.len());
+            let (visible, locked, muted, clip_count) =
+                (track.visible, track.locked, track.muted, track.clips.len());
             if !visible {
                 continue;
             }
@@ -639,9 +746,17 @@ impl Timeline {
                     track: track_index,
                     clip: clip_index,
                 };
-                if let Some(hit) =
-                    interaction::hit_test_clip(r, &g, content, pointer, locked)
-                {
+                if let Some(mut hit) = interaction::hit_test_clip(r, &g, content, pointer, locked) {
+                    // Audio controls live inside the audio region and upgrade the base Audio hit.
+                    // They are inert for locked/muted clips and never overlap trim handles.
+                    if !locked && !muted && has_audio && hit.zone == HitZone::Audio {
+                        let clip = &self.model.tracks[track_index].clips[clip_index];
+                        if let Some(c) = audio::controls(&g, &clip.audio, clip.duration) {
+                            if let Some(zone) = audio::hit_test(&c, pointer) {
+                                hit.zone = zone;
+                            }
+                        }
+                    }
                     return Some(hit);
                 }
             }
@@ -695,14 +810,128 @@ impl Timeline {
 
     /// Phase 3A pointer state: hover, click selection, Ctrl/Cmd multi-select and marquee. No drag,
     /// trim, split, snap or project mutation is performed here.
-    fn clip_input(
-        &mut self,
-        ui: &mut Ui,
-        l: &Layout,
-        body: Rect,
-        origin: f32,
-        view_start: f64,
-    ) {
+    fn begin_audio_drag(&mut self, hit: ClipHit, start: egui::Pos2) {
+        let Some(clip) = self
+            .model
+            .tracks
+            .get(hit.r.track)
+            .and_then(|t| t.clips.get(hit.r.clip))
+        else {
+            return;
+        };
+        self.selection.select_only(hit.r);
+        self.audio_drag = Some(AudioDrag {
+            r: hit.r,
+            zone: hit.zone,
+            before: clip.audio,
+            start,
+        });
+    }
+
+    fn update_audio_drag(&mut self, pointer: egui::Pos2) {
+        let Some(drag) = self.audio_drag else {
+            return;
+        };
+        let Some(clip) = self
+            .model
+            .tracks
+            .get(drag.r.track)
+            .and_then(|t| t.clips.get(drag.r.clip))
+        else {
+            return;
+        };
+        let delta = pointer - drag.start;
+        let duration = clip.duration.max(0.0);
+        let mut next = drag.before;
+        match drag.zone {
+            HitZone::Volume => {
+                next.gain_db = (drag.before.gain_db - delta.y as f64 * 0.8)
+                    .clamp(audio::DB_MIN, audio::DB_MAX);
+            }
+            HitZone::FadeIn => {
+                let secs = (audio::time_secs(drag.before.fade_in)
+                    + delta.x as f64 / self.zoom as f64)
+                    .clamp(0.0, duration);
+                next.fade_in = audio::secs_to_time(secs);
+            }
+            HitZone::FadeOut => {
+                let secs = (audio::time_secs(drag.before.fade_out)
+                    - delta.x as f64 / self.zoom as f64)
+                    .clamp(0.0, duration);
+                next.fade_out = audio::secs_to_time(secs);
+            }
+            _ => return,
+        }
+        if let Some(clip) = self
+            .model
+            .tracks
+            .get_mut(drag.r.track)
+            .and_then(|t| t.clips.get_mut(drag.r.clip))
+        {
+            clip.audio = next;
+        }
+    }
+
+    fn finish_audio_drag(&mut self) {
+        let Some(drag) = self.audio_drag.take() else {
+            return;
+        };
+        let Some(after) = self
+            .model
+            .tracks
+            .get(drag.r.track)
+            .and_then(|t| t.clips.get(drag.r.clip))
+            .map(|c| c.audio)
+        else {
+            return;
+        };
+        self.audio_history.push(AudioEdit {
+            r: drag.r,
+            before: drag.before,
+            after,
+        });
+    }
+
+    fn restore_audio(&mut self, drag: AudioDrag) {
+        if let Some(clip) = self
+            .model
+            .tracks
+            .get_mut(drag.r.track)
+            .and_then(|t| t.clips.get_mut(drag.r.clip))
+        {
+            clip.audio = drag.before;
+        }
+    }
+
+    fn undo_audio(&mut self) {
+        let Some(edit) = self.audio_history.undo() else {
+            return;
+        };
+        if let Some(clip) = self
+            .model
+            .tracks
+            .get_mut(edit.r.track)
+            .and_then(|t| t.clips.get_mut(edit.r.clip))
+        {
+            clip.audio = edit.before;
+        }
+    }
+
+    fn redo_audio(&mut self) {
+        let Some(edit) = self.audio_history.redo() else {
+            return;
+        };
+        if let Some(clip) = self
+            .model
+            .tracks
+            .get_mut(edit.r.track)
+            .and_then(|t| t.clips.get_mut(edit.r.clip))
+        {
+            clip.audio = edit.after;
+        }
+    }
+
+    fn clip_input(&mut self, ui: &mut Ui, l: &Layout, body: Rect, origin: f32, view_start: f64) {
         let content = Rect::from_min_max(egui::pos2(l.controls.right(), body.top()), body.max);
         let response = ui.interact(
             content,
@@ -713,9 +942,11 @@ impl Timeline {
         let modifiers = ui.input(|i| i.modifiers);
         let additive = modifiers.shift || modifiers.ctrl || modifiers.command;
 
-        // Escape cancels a marquee and restores the pre-drag selection, or clears selection.
+        // Escape cancels an audio gesture or marquee and restores the pre-drag state.
         if ui.input(|i| i.key_pressed(Key::Escape)) {
-            if let Some(m) = self.marquee.take() {
+            if let Some(d) = self.audio_drag.take() {
+                self.restore_audio(d);
+            } else if let Some(m) = self.marquee.take() {
                 self.selection = m.before;
             } else {
                 self.selection.clear();
@@ -723,9 +954,23 @@ impl Timeline {
             ui.ctx().request_repaint();
         }
 
-        let hit = pointer.filter(|p| content.contains(*p)).and_then(|p| {
-            self.clip_hit_at(body, content, origin, view_start, p)
-        });
+        // Audio undo/redo is local to this timeline prototype; project-level history remains the
+        // engine's job once the editor is wired to a live project.
+        if modifiers.command || modifiers.ctrl {
+            if ui.input(|i| i.key_pressed(Key::Z)) && !modifiers.shift {
+                self.undo_audio();
+                ui.ctx().request_repaint();
+            } else if (ui.input(|i| i.key_pressed(Key::Z)) && modifiers.shift)
+                || ui.input(|i| i.key_pressed(Key::Y))
+            {
+                self.redo_audio();
+                ui.ctx().request_repaint();
+            }
+        }
+
+        let hit = pointer
+            .filter(|p| content.contains(*p))
+            .and_then(|p| self.clip_hit_at(body, content, origin, view_start, p));
         self.hover = if self.marquee.is_some() { None } else { hit };
 
         if response.drag_started() {
@@ -734,12 +979,25 @@ impl Timeline {
                 .or_else(|| response.interact_pointer_pos());
             if let Some(start) = start
                 && content.contains(start)
-                && self
-                    .clip_hit_at(body, content, origin, view_start, start)
-                    .is_none()
             {
-                self.marquee = Some(Marquee::new(start, additive, self.selection.clone()));
-                ui.ctx().request_repaint();
+                let start_hit = self.clip_hit_at(body, content, origin, view_start, start);
+                match start_hit {
+                    Some(h)
+                        if !h.locked
+                            && matches!(
+                                h.zone,
+                                HitZone::Volume | HitZone::FadeIn | HitZone::FadeOut
+                            ) =>
+                    {
+                        self.begin_audio_drag(h, start);
+                        ui.ctx().request_repaint();
+                    }
+                    Some(_) => {}
+                    None => {
+                        self.marquee = Some(Marquee::new(start, additive, self.selection.clone()));
+                        ui.ctx().request_repaint();
+                    }
+                }
             }
         }
 
@@ -762,11 +1020,22 @@ impl Timeline {
             self.marquee = Some(m);
         }
 
-        if response.drag_stopped() && self.marquee.is_some() {
-            self.marquee = None;
-            self.hover = pointer.filter(|p| content.contains(*p)).and_then(|p| {
-                self.clip_hit_at(body, content, origin, view_start, p)
-            });
+        if self.audio_drag.is_some()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            self.update_audio_drag(pos);
+        }
+
+        if response.drag_stopped() {
+            if self.audio_drag.is_some() {
+                self.finish_audio_drag();
+            }
+            if self.marquee.is_some() {
+                self.marquee = None;
+            }
+            self.hover = pointer
+                .filter(|p| content.contains(*p))
+                .and_then(|p| self.clip_hit_at(body, content, origin, view_start, p));
             ui.ctx().request_repaint();
         }
 
@@ -793,9 +1062,13 @@ impl Timeline {
         if let Some(hit) = self.hover {
             if hit.locked {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
-            } else if matches!(hit.zone, HitZone::TrimLeft | HitZone::TrimRight) {
-                ui.ctx()
-                    .set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            } else if matches!(
+                hit.zone,
+                HitZone::TrimLeft | HitZone::TrimRight | HitZone::FadeIn | HitZone::FadeOut
+            ) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            } else if hit.zone == HitZone::Volume {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
             } else {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
             }
@@ -895,6 +1168,7 @@ impl Timeline {
             media,
             selection,
             hover,
+            audio_drag,
             zoom,
             ..
         } = self;
@@ -903,7 +1177,9 @@ impl Timeline {
             return;
         }
         let kind = track.kind();
-        let clip_h = kind.map(|k| k.clip_height()).unwrap_or(track.height() - 4.0);
+        let clip_h = kind
+            .map(|k| k.clip_height())
+            .unwrap_or(track.height() - 4.0);
         let clip_y = lane.top() + (lane.height() - clip_h) * 0.5;
         for (clip_index, clip) in track.clips.iter().enumerate() {
             let x = origin + ((clip.start - view_start) as f32 * *zoom);
@@ -922,7 +1198,7 @@ impl Timeline {
                     .as_deref()
                     .is_some_and(|source| media.as_mut().is_some_and(|m| m.has_audio(source)))
             } else {
-                false
+                clip.kind == model::TrackKind::Audio
             };
             let g = interaction::clip_geometry(clip.kind, rect, has_audio);
             let is_selected = selection.contains(r);
@@ -937,16 +1213,13 @@ impl Timeline {
                 clip,
                 *zoom,
                 model.frame_rate,
+                track.muted,
             );
             if let Some(h) = hovered
                 && !h.locked
                 && clip.enabled
             {
-                painter.rect_filled(
-                    visible,
-                    CornerRadius::same(4),
-                    Color32::from_white_alpha(4),
-                );
+                painter.rect_filled(visible, CornerRadius::same(4), Color32::from_white_alpha(4));
             }
 
             // Selection is white for every selected clip. Only the primary gets trim handles.
@@ -1007,6 +1280,21 @@ impl Timeline {
                         );
                     }
                 }
+
+                // Audio controls are hover-only, and never appear on locked/muted/disabled clips.
+                // The envelope and nodes are Arcline-owned shapes; the waveform itself is only
+                // scaled by the same gain/fade parameters, never clipped away.
+                let dragging = audio_drag.as_ref().is_some_and(|d| d.r == r);
+                if has_audio && !track.locked && !track.muted && (hovered.is_some() || dragging) {
+                    if let Some(c) = audio::controls(&g, &clip.audio, clip.duration) {
+                        audio::draw(
+                            &painter.with_clip_rect(content),
+                            &c,
+                            &clip.audio,
+                            hovered.map(|h| h.zone),
+                        );
+                    }
+                }
             }
 
             if !clip.enabled {
@@ -1031,11 +1319,7 @@ impl Timeline {
             {
                 let audio = audio.intersect(content);
                 if audio.width() > 1.0 && audio.height() > 1.0 {
-                    painter.rect_filled(
-                        audio,
-                        CornerRadius::ZERO,
-                        Color32::from_black_alpha(115),
-                    );
+                    painter.rect_filled(audio, CornerRadius::ZERO, Color32::from_black_alpha(115));
                     draw::draw_mute_badge(
                         &painter,
                         egui::pos2(audio.right() - 9.0, audio.center().y),
@@ -1076,7 +1360,11 @@ impl Timeline {
                 .pointer_hover_pos()
                 .is_some_and(|p| clipped.contains(p));
             if hovered {
-                column.rect_filled(clipped, CornerRadius::ZERO, Color32::from_rgb(0x1c, 0x1f, 0x24));
+                column.rect_filled(
+                    clipped,
+                    CornerRadius::ZERO,
+                    Color32::from_rgb(0x1c, 0x1f, 0x24),
+                );
             }
             draw::draw_track_controls(
                 ui,
@@ -1124,10 +1412,12 @@ impl Timeline {
             }
         }
         let max = self.max_scroll(canvas);
-        self.scroll = Vec2::new(self.scroll.x.clamp(0.0, max.x), self.scroll.y.clamp(0.0, max.y));
+        self.scroll = Vec2::new(
+            self.scroll.x.clamp(0.0, max.x),
+            self.scroll.y.clamp(0.0, max.y),
+        );
     }
 }
-
 
 /// Header rect a clip label may occupy, clipped to the visible content area.
 ///
@@ -1181,6 +1471,7 @@ fn paint_clip_content(
     clip: &model::Clip,
     zoom: f32,
     frame_rate: FrameRate,
+    muted: bool,
 ) {
     if !matches!(
         clip.kind,
@@ -1218,21 +1509,25 @@ fn paint_clip_content(
                 Vec2::new(clip_rect.width(), thumb_h),
             );
             paint_video(
-                media,
-                painter,
-                body,
-                clip_rect,
-                thumb_rect,
-                source,
-                zoom,
-                frame_rate,
+                media, painter, body, clip_rect, thumb_rect, source, zoom, frame_rate,
             );
             if has_audio {
                 let audio_rect = Rect::from_min_size(
                     egui::pos2(clip_rect.left(), thumb_rect.bottom()),
                     Vec2::new(clip_rect.width(), draw::VIDEO_AUDIO_H),
                 );
-                paint_video_audio(media, painter, body, clip_rect, audio_rect, source, zoom);
+                paint_video_audio(
+                    media,
+                    painter,
+                    body,
+                    clip_rect,
+                    audio_rect,
+                    source,
+                    zoom,
+                    &clip.audio,
+                    clip.duration,
+                    muted,
+                );
             }
         }
         model::TrackKind::Image => {
@@ -1250,7 +1545,18 @@ fn paint_clip_content(
                 egui::pos2(clip_rect.left(), clip_rect.top() + draw::AUDIO_HEADER_H),
                 Vec2::new(clip_rect.width(), draw::AUDIO_WAVE_H),
             );
-            paint_audio(media, painter, body, clip_rect, wave_rect, source, zoom);
+            paint_audio(
+                media,
+                painter,
+                body,
+                clip_rect,
+                wave_rect,
+                source,
+                zoom,
+                &clip.audio,
+                clip.duration,
+                muted,
+            );
         }
         _ => {}
     }
@@ -1291,10 +1597,7 @@ fn paint_video(
     let tile_px = (step as f32 * zoom).max(1.0);
     for index in tiles {
         let rect = Rect::from_min_size(
-            egui::pos2(
-                clip_rect.left() + index as f32 * tile_px,
-                thumb_rect.top(),
-            ),
+            egui::pos2(clip_rect.left() + index as f32 * tile_px, thumb_rect.top()),
             Vec2::new(tile_px, thumb_rect.height()),
         );
         if !rect.intersects(visible) {
@@ -1321,6 +1624,9 @@ fn paint_video_audio(
     audio_rect: Rect,
     source: &Path,
     zoom: f32,
+    audio: &ClipAudio,
+    duration: f64,
+    muted: bool,
 ) {
     let Some(wave) = media.waveform(source) else {
         return;
@@ -1342,7 +1648,18 @@ fn paint_video_audio(
         clip_rect.left(),
         zoom.max(1.0),
         &wave,
-        draw::WAVE_EMBEDDED,
+        if muted {
+            Color32::from_rgba_unmultiplied(
+                draw::WAVE_EMBEDDED.r(),
+                draw::WAVE_EMBEDDED.g(),
+                draw::WAVE_EMBEDDED.b(),
+                105,
+            )
+        } else {
+            draw::WAVE_EMBEDDED
+        },
+        audio,
+        duration,
     );
 }
 
@@ -1388,6 +1705,9 @@ fn paint_audio(
     wave_rect: Rect,
     source: &Path,
     zoom: f32,
+    audio: &ClipAudio,
+    duration: f64,
+    muted: bool,
 ) {
     let Some(wave) = media.waveform(source) else {
         return;
@@ -1409,7 +1729,18 @@ fn paint_audio(
         clip_rect.left(),
         zoom.max(1.0),
         &wave,
-        draw::WAVE_BLUE,
+        if muted {
+            Color32::from_rgba_unmultiplied(
+                draw::WAVE_BLUE.r(),
+                draw::WAVE_BLUE.g(),
+                draw::WAVE_BLUE.b(),
+                95,
+            )
+        } else {
+            draw::WAVE_BLUE
+        },
+        audio,
+        duration,
     );
 }
 
@@ -1482,7 +1813,11 @@ mod tests {
 
         // Horizontal scroll slides the canvas under the rows; it never moves or resizes them.
         t.scroll.x = 480.0;
-        assert_eq!(t.lane_rows(body), rows, "horizontal scroll moved the lane rows");
+        assert_eq!(
+            t.lane_rows(body),
+            rows,
+            "horizontal scroll moved the lane rows"
+        );
 
         // Vertical scroll moves the rows with the lanes, keeping the same fixed heights.
         t.scroll.y = 20.0;
@@ -1498,7 +1833,8 @@ mod tests {
         let content = Rect::from_min_max(egui::pos2(112.0, 0.0), egui::pos2(500.0, 100.0));
 
         // A video clipped on the left by the fixed column starts its label at the content edge.
-        let partly_under_panel = Rect::from_min_size(egui::pos2(40.0, 0.0), egui::vec2(200.0, 72.0));
+        let partly_under_panel =
+            Rect::from_min_size(egui::pos2(40.0, 0.0), egui::vec2(200.0, 72.0));
         let label = clip_label_rect(model::TrackKind::Video, partly_under_panel, content);
         assert_eq!(label.left(), content.left());
         assert_eq!(label.height(), draw::VIDEO_HEADER_H);
@@ -1513,9 +1849,7 @@ mod tests {
 
         // A clip wholly left of the content has no drawable label.
         let behind_panel = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(80.0, 72.0));
-        assert!(
-            clip_label_rect(model::TrackKind::Video, behind_panel, content).width() < 14.0
-        );
+        assert!(clip_label_rect(model::TrackKind::Video, behind_panel, content).width() < 14.0);
 
         // Audio uses its shorter 16 pt header; text/effect/sticker use the whole 20 pt clip.
         let audio = Rect::from_min_size(egui::pos2(200.0, 0.0), egui::vec2(100.0, 46.0));
@@ -1638,20 +1972,39 @@ mod tests {
         );
         let v = vbar.center();
         frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(v)]);
-        frame(&ctx, &mut t, screen, vec![egui::Event::PointerButton {
-            pos: v,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::NONE,
-        }]);
-        frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(v + egui::vec2(0.0, 40.0))]);
-        frame(&ctx, &mut t, screen, vec![egui::Event::PointerButton {
-            pos: v + egui::vec2(0.0, 40.0),
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::NONE,
-        }]);
-        assert!(t.scroll.y > 0.0, "vertical scrollbar drag: scroll.y={}", t.scroll.y);
+        frame(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: v,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        frame(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerMoved(v + egui::vec2(0.0, 40.0))],
+        );
+        frame(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: v + egui::vec2(0.0, 40.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(
+            t.scroll.y > 0.0,
+            "vertical scrollbar drag: scroll.y={}",
+            t.scroll.y
+        );
 
         let hbar = Rect::from_min_max(
             egui::pos2(l.canvas.left(), l.canvas.bottom() - SCROLLBAR_W),
@@ -1659,20 +2012,39 @@ mod tests {
         );
         let h = hbar.center();
         frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(h)]);
-        frame(&ctx, &mut t, screen, vec![egui::Event::PointerButton {
-            pos: h,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::NONE,
-        }]);
-        frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(h + egui::vec2(60.0, 0.0))]);
-        frame(&ctx, &mut t, screen, vec![egui::Event::PointerButton {
-            pos: h + egui::vec2(60.0, 0.0),
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::NONE,
-        }]);
-        assert!(t.scroll.x > 0.0, "horizontal scrollbar drag: scroll.x={}", t.scroll.x);
+        frame(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: h,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        frame(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerMoved(h + egui::vec2(60.0, 0.0))],
+        );
+        frame(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: h + egui::vec2(60.0, 0.0),
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(
+            t.scroll.x > 0.0,
+            "horizontal scrollbar drag: scroll.x={}",
+            t.scroll.x
+        );
     }
 
     /// Lane heights are fixed by content type: a drag on a lane edge must neither resize the lane
@@ -1687,7 +2059,10 @@ mod tests {
         let l = layout(screen);
         let body = Rect::from_min_max(
             l.canvas.min,
-            egui::pos2(l.canvas.right() - SCROLLBAR_W, l.canvas.bottom() - SCROLLBAR_W),
+            egui::pos2(
+                l.canvas.right() - SCROLLBAR_W,
+                l.canvas.bottom() - SCROLLBAR_W,
+            ),
         );
         let heights =
             |t: &Timeline| -> Vec<f32> { t.model.tracks.iter().map(|tr| tr.height()).collect() };
@@ -1701,21 +2076,35 @@ mod tests {
         );
         let moved = edge + egui::vec2(0.0, 40.0);
         frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(edge)]);
-        frame(&ctx, &mut t, screen, vec![egui::Event::PointerButton {
-            pos: edge,
-            button: egui::PointerButton::Primary,
-            pressed: true,
-            modifiers: egui::Modifiers::NONE,
-        }]);
+        frame(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: edge,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
         frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(moved)]);
-        frame(&ctx, &mut t, screen, vec![egui::Event::PointerButton {
-            pos: moved,
-            button: egui::PointerButton::Primary,
-            pressed: false,
-            modifiers: egui::Modifiers::NONE,
-        }]);
+        frame(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerButton {
+                pos: moved,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
 
-        assert_eq!(heights(&t), before, "a lane edge drag must not resize tracks");
+        assert_eq!(
+            heights(&t),
+            before,
+            "a lane edge drag must not resize tracks"
+        );
         assert_eq!(t.model.content_height(), content_h);
         assert_eq!(t.scroll.y, 0.0, "the drag must not scroll either");
     }
@@ -1723,7 +2112,8 @@ mod tests {
     #[test]
     fn horizontal_zoom_does_not_change_track_heights() {
         let mut t = Timeline::default();
-        let heights = |t: &Timeline| -> Vec<f32> { t.model.tracks.iter().map(|tr| tr.height()).collect() };
+        let heights =
+            |t: &Timeline| -> Vec<f32> { t.model.tracks.iter().map(|tr| tr.height()).collect() };
         let before = heights(&t);
         let content_h = t.model.content_height();
         let max_zoom = t.max_zoom();
@@ -1827,6 +2217,186 @@ mod tests {
         );
     }
 
+    fn audio_timeline(audio: ClipAudio) -> Timeline {
+        let mut track = model::Track::new("Audio");
+        track.add_clip(
+            model::Clip::new(model::TrackKind::Audio, "tone.wav", 0.0, 10.0).with_audio(audio),
+        );
+        let mut model = model::TimelineModel::empty();
+        model.duration = 10.0;
+        model.tracks.push(track);
+        Timeline {
+            model,
+            ..Timeline::default()
+        }
+    }
+
+    fn audio_controls_at(
+        t: &Timeline,
+        screen: Rect,
+    ) -> (interaction::ClipGeometry, audio::AudioControls) {
+        let l = layout(screen);
+        let body = t.body_rect(l.underlay);
+        let lane = t.lane_rows(body)[0];
+        let clip = &t.model.tracks[0].clips[0];
+        let origin = l.canvas.left();
+        let x = origin + ((clip.start - t.view_start()) as f32 * t.zoom);
+        let w = (clip.duration as f32 * t.zoom).max(3.0);
+        let h = clip.kind.clip_height();
+        let rect = Rect::from_min_size(egui::pos2(x, lane.center().y - h * 0.5), Vec2::new(w, h));
+        let g = interaction::clip_geometry(clip.kind, rect, false);
+        let c = audio::controls(&g, &clip.audio, clip.duration).expect("audio controls");
+        (g, c)
+    }
+
+    fn ctrl_z(ctx: &egui::Context, t: &mut Timeline, screen: Rect, shift: bool) {
+        let mut m = egui::Modifiers::CTRL;
+        m.shift = shift;
+        frame_mod(
+            ctx,
+            t,
+            screen,
+            vec![egui::Event::Key {
+                key: Key::Z,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: m,
+            }],
+            m,
+        );
+    }
+
+    #[test]
+    fn dragging_the_volume_node_updates_gain_waveform_and_undo_redo() {
+        let ctx = egui::Context::default();
+        let mut t = audio_timeline(ClipAudio::default());
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        frame(&ctx, &mut t, screen, Vec::new());
+        let (_, c) = audio_controls_at(&t, screen);
+        let start = c.volume_node.center();
+        frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(start)]);
+        assert_eq!(
+            t.hover.map(|h| h.zone),
+            Some(HitZone::Volume),
+            "volume node hover: start={start:?} controls={c:?} content={:?}",
+            layout(screen).canvas
+        );
+        drag(
+            &ctx,
+            &mut t,
+            screen,
+            start,
+            start - egui::vec2(0.0, 18.0),
+            egui::Modifiers::NONE,
+        );
+        let gain = t.model.tracks[0].clips[0].audio.gain_db;
+        assert!(gain > 0.0, "volume drag did not raise gain: {gain}");
+        assert!(t.audio_history.can_undo());
+        ctrl_z(&ctx, &mut t, screen, false);
+        assert_eq!(t.model.tracks[0].clips[0].audio.gain_db, 0.0);
+        ctrl_z(&ctx, &mut t, screen, true);
+        assert!((t.model.tracks[0].clips[0].audio.gain_db - gain).abs() < 1e-9);
+    }
+
+    #[test]
+    fn dragging_the_left_and_right_diamonds_sets_fade_in_and_fade_out() {
+        let ctx = egui::Context::default();
+        let mut t = audio_timeline(ClipAudio::default());
+        let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+        frame(&ctx, &mut t, screen, Vec::new());
+        let (_, c) = audio_controls_at(&t, screen);
+        let left = c.fade_in_node.center();
+        drag(
+            &ctx,
+            &mut t,
+            screen,
+            left,
+            left + egui::vec2(40.0, 0.0),
+            egui::Modifiers::NONE,
+        );
+        assert!(t.model.tracks[0].clips[0].audio.fade_in.to_f64_lossy() > 0.0);
+
+        let (_, c) = audio_controls_at(&t, screen);
+        let right = c.fade_out_node.center();
+        drag(
+            &ctx,
+            &mut t,
+            screen,
+            right,
+            right - egui::vec2(40.0, 0.0),
+            egui::Modifiers::NONE,
+        );
+        assert!(t.model.tracks[0].clips[0].audio.fade_out.to_f64_lossy() > 0.0);
+    }
+
+    #[test]
+    fn muted_locked_and_disabled_audio_clips_cannot_be_edited() {
+        for mode in 0..3 {
+            let ctx = egui::Context::default();
+            let mut t = audio_timeline(ClipAudio::default());
+            match mode {
+                0 => t.model.tracks[0].muted = true,
+                1 => t.model.tracks[0].locked = true,
+                _ => t.model.tracks[0].clips[0].enabled = false,
+            }
+            let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+            frame(&ctx, &mut t, screen, Vec::new());
+            let (_, c) = audio_controls_at(&t, screen);
+            let start = c.volume_node.center();
+            drag(
+                &ctx,
+                &mut t,
+                screen,
+                start,
+                start - egui::vec2(0.0, 18.0),
+                egui::Modifiers::NONE,
+            );
+            assert_eq!(
+                t.model.tracks[0].clips[0].audio.gain_db, 0.0,
+                "mode {mode} edited a protected clip"
+            );
+        }
+    }
+
+    #[test]
+    fn audio_controls_work_at_different_zooms() {
+        for zoom in [29.0f32, 58.0, 116.0] {
+            let ctx = egui::Context::default();
+            let mut t = audio_timeline(ClipAudio::default());
+            t.zoom = zoom;
+            let screen = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(900.0, 420.0));
+            frame(&ctx, &mut t, screen, Vec::new());
+            let (_, c) = audio_controls_at(&t, screen);
+            let start = c.volume_node.center();
+            drag(
+                &ctx,
+                &mut t,
+                screen,
+                start,
+                start - egui::vec2(0.0, 12.0),
+                egui::Modifiers::NONE,
+            );
+            assert!(
+                t.model.tracks[0].clips[0].audio.gain_db > 0.0,
+                "zoom {zoom} did not update gain"
+            );
+        }
+    }
+
+    #[test]
+    fn a_video_with_embedded_audio_uses_the_same_controls() {
+        let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(240.0, 72.0));
+        let g = interaction::clip_geometry(model::TrackKind::Video, rect, true);
+        let c = audio::controls(&g, &ClipAudio::default(), 5.0).expect("embedded controls");
+        assert!(g.audio.is_some());
+        assert!(g.wave.is_none());
+        assert_eq!(
+            audio::hit_test(&c, c.volume_node.center()),
+            Some(HitZone::Volume)
+        );
+    }
+
     fn clip_pos(t: &Timeline, screen: Rect, track: usize, clip: usize, dx: f32) -> egui::Pos2 {
         let l = layout(screen);
         let body = t.body_rect(l.underlay);
@@ -1863,7 +2433,12 @@ mod tests {
         );
 
         // Right of the boundary the visible part of the same clip is reachable.
-        click(&ctx, &mut t, screen, egui::pos2(l.canvas.left() + 20.0, row_y));
+        click(
+            &ctx,
+            &mut t,
+            screen,
+            egui::pos2(l.canvas.left() + 20.0, row_y),
+        );
         assert_eq!(t.selection.primary(), Some(ClipRef { track: 0, clip: 0 }));
     }
 
@@ -1913,7 +2488,10 @@ mod tests {
             frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(p)]);
             t.hover
         };
-        assert!(hover.is_some_and(|h| h.locked), "locked hover must be explicit");
+        assert!(
+            hover.is_some_and(|h| h.locked),
+            "locked hover must be explicit"
+        );
         t.model.tracks[0].locked = false;
 
         // Hidden track: no selection and no hover.
@@ -1925,8 +2503,7 @@ mod tests {
         t.model.tracks[0].visible = true;
 
         // Disabled clip: still painted, but not selectable or hoverable.
-        t.model.tracks[0].clips[0] =
-            t.model.tracks[0].clips[0].clone().with_enabled(false);
+        t.model.tracks[0].clips[0] = t.model.tracks[0].clips[0].clone().with_enabled(false);
         click(&ctx, &mut t, screen, p);
         assert!(t.selection.is_empty());
         frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(p)]);
@@ -2014,7 +2591,12 @@ mod tests {
         assert_eq!(t.hover.map(|h| h.zone), Some(HitZone::TrimLeft));
 
         let body_pos = egui::pos2(left.x + 20.0, row.center().y);
-        frame(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(body_pos)]);
+        frame(
+            &ctx,
+            &mut t,
+            screen,
+            vec![egui::Event::PointerMoved(body_pos)],
+        );
         assert_eq!(t.hover.map(|h| h.zone), Some(HitZone::Body));
 
         // Scroll so the clip's real left edge is off-screen: the viewport edge is body, not trim.
@@ -2205,12 +2787,7 @@ mod tests {
 
         let start = egui::pos2(origin + 100.0, l.ruler.center().y);
         let end = start + egui::vec2(240.0, 0.0);
-        painted_playhead(
-            &ctx,
-            &mut t,
-            screen,
-            vec![egui::Event::PointerMoved(start)],
-        );
+        painted_playhead(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(start)]);
         painted_playhead(
             &ctx,
             &mut t,
@@ -2222,12 +2799,7 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             }],
         );
-        let dragged = painted_playhead(
-            &ctx,
-            &mut t,
-            screen,
-            vec![egui::Event::PointerMoved(end)],
-        );
+        let dragged = painted_playhead(&ctx, &mut t, screen, vec![egui::Event::PointerMoved(end)]);
 
         // Same frame: the drag already moved both elements, so the handle cannot trail the line.
         assert!(
@@ -2245,8 +2817,7 @@ mod tests {
             (dragged.line_x - expected_x).abs() < 0.01,
             "the line is on the snapped frame"
         );
-        let half_frame_px =
-            t.zoom / t.frame_rate().rate().to_f64_lossy() as f32 / 2.0 + 0.01;
+        let half_frame_px = t.zoom / t.frame_rate().rate().to_f64_lossy() as f32 / 2.0 + 0.01;
         assert!(
             (dragged.line_x - end.x).abs() <= half_frame_px,
             "the snapped line stays within half a frame of the pointer"
@@ -2383,9 +2954,7 @@ mod tests {
         let fraction = zoom_slider_fraction(default, max_zoom);
         assert!((zoom_from_fraction(fraction, max_zoom) - default).abs() < 0.01);
         // Logarithmic: the midpoint is the geometric mean, not the arithmetic one.
-        assert!(
-            (zoom_from_fraction(0.5, max_zoom) - (MIN_ZOOM * max_zoom).sqrt()).abs() < 0.01
-        );
+        assert!((zoom_from_fraction(0.5, max_zoom) - (MIN_ZOOM * max_zoom).sqrt()).abs() < 0.01);
     }
 
     /// Clicking the right-hand zoom-in/out buttons and dragging the slider all change the scale.
@@ -2407,19 +2976,31 @@ mod tests {
         assert!(t.zoom < after_in, "zoom out: {} -> {}", after_in, t.zoom);
 
         // Clicking at the right end of the slider reaches the dynamic maximum.
-        let track = Rect::from_center_size(
-            z.slider.center(),
-            egui::vec2(z.slider.width() - 10.0, 3.0),
+        let track =
+            Rect::from_center_size(z.slider.center(), egui::vec2(z.slider.width() - 10.0, 3.0));
+        click(
+            &ctx,
+            &mut t,
+            screen,
+            egui::pos2(track.right(), track.center().y),
         );
-        click(&ctx, &mut t, screen, egui::pos2(track.right(), track.center().y));
         assert!(
             (t.zoom - max_zoom).abs() < 0.5,
             "slider right edge: {} (max {max_zoom})",
             t.zoom
         );
         // And the left end reaches the minimum.
-        click(&ctx, &mut t, screen, egui::pos2(track.left(), track.center().y));
-        assert!((t.zoom - MIN_ZOOM).abs() < 0.5, "slider left edge: {}", t.zoom);
+        click(
+            &ctx,
+            &mut t,
+            screen,
+            egui::pos2(track.left(), track.center().y),
+        );
+        assert!(
+            (t.zoom - MIN_ZOOM).abs() < 0.5,
+            "slider left edge: {}",
+            t.zoom
+        );
     }
 
     #[test]

@@ -1,11 +1,12 @@
 //! Drawing primitives for the timeline: lanes, clips, ruler, playhead, track controls, toolbar
 //! icons and scrollbars. Everything is painted with vector strokes, so no icon font is needed.
 
-use arc_core::time::{FrameRate, Round, Time};
 use super::model::TrackKind;
+use arc_core::model::ClipAudio;
+use arc_core::time::{FrameRate, Round, Time};
 use egui::{
-    Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Response, Sense, Stroke, StrokeKind,
-    Ui,
+    Align2, Color32, CornerRadius, FontId, Painter, Pos2, Rect, Response, Sense, Stroke,
+    StrokeKind, Ui,
 };
 
 pub const CANVAS_BG: Color32 = Color32::from_rgb(0x16, 0x18, 0x1c);
@@ -40,11 +41,7 @@ pub const WAVE_BLUE: Color32 = Color32::from_rgb(0x2b, 0xb3, 0xff);
 pub const WAVE_EMBEDDED: Color32 = Color32::from_rgb(0x3d, 0xd6, 0xb4);
 
 pub fn lane_bg(index: usize) -> Color32 {
-    if index % 2 == 0 {
-        LANE_BG_A
-    } else {
-        LANE_BG_B
-    }
+    if index % 2 == 0 { LANE_BG_A } else { LANE_BG_B }
 }
 
 /// Boundary between the fixed control column and the scrolling canvas: a hairline at the column's
@@ -53,10 +50,7 @@ pub fn lane_bg(index: usize) -> Color32 {
 pub fn draw_panel_edge(painter: &Painter, column: Rect, bounds: Rect) {
     let x = column.right() - 0.5;
     painter.line_segment(
-        [
-            egui::pos2(x, column.top()),
-            egui::pos2(x, column.bottom()),
-        ],
+        [egui::pos2(x, column.top()), egui::pos2(x, column.bottom())],
         Stroke::new(1.0, Color32::from_rgb(0x0e, 0x0f, 0x12)),
     );
     const STEPS: usize = 6;
@@ -187,7 +181,11 @@ pub fn draw_clip_label(painter: &Painter, label_rect: Rect, text: &str) {
 /// Clear fallback for missing or undecodable media: a hatched body and a warning label. Never a
 /// fake thumbnail or waveform, so a broken file cannot masquerade as real content.
 pub fn draw_missing(painter: &Painter, rect: Rect, message: &str) {
-    painter.rect_filled(rect, CornerRadius::same(4), Color32::from_rgb(0x2b, 0x1e, 0x1e));
+    painter.rect_filled(
+        rect,
+        CornerRadius::same(4),
+        Color32::from_rgb(0x2b, 0x1e, 0x1e),
+    );
     let hatch = Color32::from_rgba_unmultiplied(0x8a, 0x4a, 0x44, 90);
     let mut x = rect.left() - rect.height();
     while x < rect.right() {
@@ -222,6 +220,8 @@ pub fn draw_waveform_bars(
     zoom: f32,
     wave: &super::media::Waveform,
     color: Color32,
+    audio: &ClipAudio,
+    duration: f64,
 ) {
     if rect.width() < 2.0 || rect.height() < 4.0 || zoom <= 0.0 {
         return;
@@ -243,7 +243,15 @@ pub fn draw_waveform_bars(
         let t0 = ((x - clip_left) / zoom) as f64;
         let t1 = t0 + 1.0 / zoom as f64;
         if let Some(peak) = wave.envelope_at(t0, t1, zoom as f64) {
-            let level = peak.max.max(-peak.min).clamp(0.0, 1.0);
+            let mut level = peak.max.max(-peak.min).clamp(0.0, 1.0);
+            let envelope = super::audio::db_to_amp(audio.gain_db)
+                * super::audio::fade_gain(
+                    t0.max(0.0),
+                    duration.max(0.0),
+                    audio.fade_in.to_f64_lossy(),
+                    audio.fade_out.to_f64_lossy(),
+                );
+            level = (level * envelope).clamp(0.0, 1.25);
             if level > 0.004 {
                 let top = (baseline - level * amplitude).max(rect.top());
                 painter.line_segment(
@@ -292,11 +300,7 @@ pub fn elide_text(text: &str, max_width: f32, measure: impl Fn(&str) -> f32) -> 
 fn elide(painter: &Painter, text: &str, font: &FontId, max_width: f32) -> String {
     elide_text(text, max_width, |candidate| {
         painter
-            .layout_no_wrap(
-                candidate.to_string(),
-                font.clone(),
-                Color32::WHITE,
-            )
+            .layout_no_wrap(candidate.to_string(), font.clone(), Color32::WHITE)
             .size()
             .x
     })
@@ -427,9 +431,7 @@ pub fn draw_ruler(
     let mode = ruler_mode(px_per_sec, rate);
     match mode {
         TickMode::Seconds {
-            grid,
-            major_frames,
-            ..
+            grid, major_frames, ..
         } => draw_second_ticks(
             painter,
             rect,
@@ -467,7 +469,9 @@ fn draw_second_ticks(
 ) {
     // Major labels sit on frame-aligned second boundaries. The five minor ticks between them are
     // evenly spaced in real time and stay unlabelled, as before.
-    let first = ((view_start * grid.fps()) / major_frames as f64).floor().max(0.0) as u64
+    let first = ((view_start * grid.fps()) / major_frames as f64)
+        .floor()
+        .max(0.0) as u64
         * major_frames;
     let mut frame = first;
     loop {
@@ -592,8 +596,11 @@ pub fn draw_track_controls(
         draw_track_icon(painter, kind, egui::pos2(x, center_y), TEXT, 12.0);
         let hit = Rect::from_center_size(egui::pos2(x, center_y), egui::vec2(16.0, 16.0));
         let id = ui.make_persistent_id(("track-kind", track_index));
-        ui.interact(hit, id, Sense::hover())
-            .on_hover_text(format!("{} · {}", kind.label(), track.name));
+        ui.interact(hit, id, Sense::hover()).on_hover_text(format!(
+            "{} · {}",
+            kind.label(),
+            track.name
+        ));
     }
     x += 22.0;
 
@@ -711,7 +718,13 @@ fn draw_control_icon(painter: &Painter, icon: ControlIcon, rect: Rect, color: Co
 }
 
 /// Type icon per content kind, drawn from strokes so it scales with DPI.
-pub fn draw_track_icon(painter: &Painter, kind: TrackKind, center: Pos2, color: Color32, size: f32) {
+pub fn draw_track_icon(
+    painter: &Painter,
+    kind: TrackKind,
+    center: Pos2,
+    color: Color32,
+    size: f32,
+) {
     let h = size * 0.5;
     let s = Stroke::new(1.0, color);
     match kind {
@@ -760,7 +773,10 @@ pub fn draw_track_icon(painter: &Painter, kind: TrackKind, center: Pos2, color: 
             for i in 0..3 {
                 let x = center.x - size * 0.3 + i as f32 * size * 0.3;
                 painter.line_segment(
-                    [egui::pos2(x, center.y - h * 0.55), egui::pos2(x, center.y - h * 0.3)],
+                    [
+                        egui::pos2(x, center.y - h * 0.55),
+                        egui::pos2(x, center.y - h * 0.3),
+                    ],
                     s,
                 );
             }
@@ -787,7 +803,10 @@ pub fn draw_track_icon(painter: &Painter, kind: TrackKind, center: Pos2, color: 
             for i in 0..4 {
                 let x = center.x - size * 0.4 + i as f32 * size * 0.27;
                 let ah = h * (0.35 + 0.2 * (i as f32 * 1.1).sin().abs());
-                painter.line_segment([egui::pos2(x, center.y - ah), egui::pos2(x, center.y + ah)], s);
+                painter.line_segment(
+                    [egui::pos2(x, center.y - ah), egui::pos2(x, center.y + ah)],
+                    s,
+                );
             }
         }
     }
@@ -851,8 +870,7 @@ pub fn icon_button(
     } else {
         Color32::TRANSPARENT
     };
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(5), bg);
+    ui.painter().rect_filled(rect, CornerRadius::same(5), bg);
     let color = if active {
         Color32::from_rgb(0x9d, 0xc0, 0xff)
     } else if hovered {
@@ -919,16 +937,8 @@ fn draw_toolbar_icon(painter: &Painter, icon: ToolbarIcon, rect: Rect, color: Co
                 ],
                 s,
             );
-            painter.circle_stroke(
-                egui::pos2(c.x - h * 0.55, c.y + h * 0.6),
-                2.2,
-                s,
-            );
-            painter.circle_stroke(
-                egui::pos2(c.x + h * 0.55, c.y + h * 0.6),
-                2.2,
-                s,
-            );
+            painter.circle_stroke(egui::pos2(c.x - h * 0.55, c.y + h * 0.6), 2.2, s);
+            painter.circle_stroke(egui::pos2(c.x + h * 0.55, c.y + h * 0.6), 2.2, s);
         }
         ToolbarIcon::Delete => {
             painter.rect_stroke(
@@ -1004,15 +1014,15 @@ fn draw_toolbar_icon(painter: &Painter, icon: ToolbarIcon, rect: Rect, color: Co
             );
             let cx = c.x - h * 0.15;
             painter.line_segment(
-                [egui::pos2(cx - h * 0.25, c.y - h * 0.15), egui::pos2(cx + h * 0.25, c.y - h * 0.15)],
+                [
+                    egui::pos2(cx - h * 0.25, c.y - h * 0.15),
+                    egui::pos2(cx + h * 0.25, c.y - h * 0.15),
+                ],
                 s,
             );
             if icon == ToolbarIcon::ZoomIn {
                 painter.line_segment(
-                    [
-                        egui::pos2(cx, c.y - h * 0.4),
-                        egui::pos2(cx, c.y + h * 0.1),
-                    ],
+                    [egui::pos2(cx, c.y - h * 0.4), egui::pos2(cx, c.y + h * 0.1)],
                     s,
                 );
             }
@@ -1021,10 +1031,20 @@ fn draw_toolbar_icon(painter: &Painter, icon: ToolbarIcon, rect: Rect, color: Co
 }
 
 /// Thin scrollbar; returns the thumb rect for dragging.
-pub fn draw_scrollbar(painter: &Painter, rect: Rect, content: f32, scroll: f32, vertical: bool) -> Rect {
+pub fn draw_scrollbar(
+    painter: &Painter,
+    rect: Rect,
+    content: f32,
+    scroll: f32,
+    vertical: bool,
+) -> Rect {
     let color = Color32::from_rgb(0x33, 0x37, 0x3e);
     if vertical {
-        painter.rect_filled(rect, CornerRadius::same(3), Color32::from_rgb(0x14, 0x16, 0x1a));
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(3),
+            Color32::from_rgb(0x14, 0x16, 0x1a),
+        );
         let frac = (rect.height() / content.max(1.0)).min(1.0);
         let len = (rect.height() * frac).max(18.0);
         let max_scroll = (content - rect.height()).max(1.0);
@@ -1034,7 +1054,11 @@ pub fn draw_scrollbar(painter: &Painter, rect: Rect, content: f32, scroll: f32, 
         painter.rect_filled(thumb, CornerRadius::same(3), color);
         thumb
     } else {
-        painter.rect_filled(rect, CornerRadius::same(3), Color32::from_rgb(0x14, 0x16, 0x1a));
+        painter.rect_filled(
+            rect,
+            CornerRadius::same(3),
+            Color32::from_rgb(0x14, 0x16, 0x1a),
+        );
         let frac = (rect.width() / content.max(1.0)).min(1.0);
         let len = (rect.width() * frac).max(24.0);
         let max_scroll = (content - rect.width()).max(1.0);
@@ -1165,19 +1189,17 @@ mod tests {
         ] {
             let max = rate.rate().to_f64_lossy() as f32 * 200.0;
             for zoom in [
-                12.0f32, 20.0, 30.0, 58.0, 78.0, 120.0, 156.0, 180.0, 240.0, 480.0, 600.0,
-                1_200.0, 1_500.0, 2_400.0, 3_000.0, 4_800.0, 6_000.0, 12_000.0,
+                12.0f32, 20.0, 30.0, 58.0, 78.0, 120.0, 156.0, 180.0, 240.0, 480.0, 600.0, 1_200.0,
+                1_500.0, 2_400.0, 3_000.0, 4_800.0, 6_000.0, 12_000.0,
             ] {
                 if zoom > max {
                     continue;
                 }
                 let spacing = match ruler_mode(zoom, rate) {
-                    TickMode::Seconds { grid, major_frames, .. } => {
-                        major_frames as f64 / grid.fps() * zoom as f64
-                    }
-                    TickMode::Frames { grid, step } => {
-                        step as f64 / grid.fps() * zoom as f64
-                    }
+                    TickMode::Seconds {
+                        grid, major_frames, ..
+                    } => major_frames as f64 / grid.fps() * zoom as f64,
+                    TickMode::Frames { grid, step } => step as f64 / grid.fps() * zoom as f64,
                 };
                 assert!(
                     spacing >= LABEL_GAP as f64 - 0.01,
@@ -1246,10 +1268,12 @@ mod tests {
     #[test]
     fn internal_clip_regions_fill_the_approved_heights() {
         assert_eq!(VIDEO_HEADER_H + VIDEO_THUMB_H + VIDEO_AUDIO_H, 72.0);
-        assert_eq!(VIDEO_HEADER_H + 54.0, 72.0, "silent video uses the full rest");
+        assert_eq!(
+            VIDEO_HEADER_H + 54.0,
+            72.0,
+            "silent video uses the full rest"
+        );
         assert_eq!(IMAGE_HEADER_H + 54.0, 72.0);
         assert_eq!(AUDIO_HEADER_H + AUDIO_WAVE_H, 46.0);
     }
 }
-
-

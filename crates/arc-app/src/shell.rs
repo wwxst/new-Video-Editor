@@ -92,9 +92,8 @@ pub fn layout(rect: Rect, sizes: PanelSizes) -> Panels {
         Vec2::new(right_w.min(top.max.x - (center.max.x + GAP)), top_h),
     );
 
-    let splitter = |x: f32, y: f32, w: f32, h: f32| {
-        Rect::from_min_size(egui::pos2(x, y), Vec2::new(w, h))
-    };
+    let splitter =
+        |x: f32, y: f32, w: f32, h: f32| Rect::from_min_size(egui::pos2(x, y), Vec2::new(w, h));
     Panels {
         left,
         center,
@@ -137,13 +136,14 @@ impl Shell {
     /// Draw the four panels into the root UI of one frame.
     pub fn ui(&mut self, ui: &mut Ui) {
         let rect = ui.max_rect();
-        ui.painter().rect_filled(rect, CornerRadius::ZERO, WINDOW_BG);
+        ui.painter()
+            .rect_filled(rect, CornerRadius::ZERO, WINDOW_BG);
 
         let panels = layout(rect, self.sizes);
 
         card(ui, "MEDIA", panels.left);
         card(ui, "PREVIEW", panels.center);
-        card(ui, "INSPECTOR", panels.right);
+        inspector_card(ui, panels.right, &mut self.timeline);
         // The timeline is a working surface, not a titled placeholder: no card title, so the
         // timeline toolbar is the first row of the module.
         card_body(ui, panels.bottom, |ui, content| {
@@ -176,7 +176,9 @@ impl Shell {
                 match index {
                     0 => self.sizes.left = (self.sizes.left + delta.x / width).clamp(0.12, 0.40),
                     1 => self.sizes.right = (self.sizes.right - delta.x / width).clamp(0.12, 0.40),
-                    _ => self.sizes.bottom = (self.sizes.bottom - delta.y / height).clamp(0.18, 0.50),
+                    _ => {
+                        self.sizes.bottom = (self.sizes.bottom - delta.y / height).clamp(0.18, 0.50)
+                    }
                 }
             }
             let color = if active {
@@ -214,6 +216,29 @@ fn card_body(ui: &mut Ui, rect: Rect, add: impl FnOnce(&mut Ui, Rect)) {
     );
     add(&mut child, inner);
 }
+fn inspector_card(ui: &mut Ui, rect: Rect, timeline: &mut crate::timeline::Timeline) {
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(10),
+        CARD_BG,
+        Stroke::new(1.0, BORDER),
+        egui::StrokeKind::Inside,
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(14.0, 12.0)))
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    child.label(
+        egui::RichText::new("INSPECTOR")
+            .size(13.0)
+            .strong()
+            .color(TEXT),
+    );
+    child.add_space(6.0);
+    timeline.audio_inspector(&mut child);
+}
+
 fn card(ui: &mut Ui, title: &str, rect: Rect) {
     // The card fills its rect; the inner Ui only lays out the title block.
     ui.painter().rect(
@@ -273,7 +298,10 @@ mod tests {
 
     #[test]
     fn tiny_windows_keep_every_card_usable() {
-        let p = layout(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 320.0)), PanelSizes::default());
+        let p = layout(
+            Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(420.0, 320.0)),
+            PanelSizes::default(),
+        );
         for r in [p.left, p.center, p.right, p.bottom] {
             assert!(r.width() >= MIN_CARD - 0.01, "{r:?}");
             assert!(r.height() >= MIN_CARD - 0.01, "{r:?}");
@@ -295,7 +323,12 @@ mod tests {
 
         run(&ctx, &mut shell, screen, Vec::new());
         let splitter = layout(screen, PanelSizes::default()).splitters[0].center();
-        run(&ctx, &mut shell, screen, vec![egui::Event::PointerMoved(splitter)]);
+        run(
+            &ctx,
+            &mut shell,
+            screen,
+            vec![egui::Event::PointerMoved(splitter)],
+        );
         run(
             &ctx,
             &mut shell,

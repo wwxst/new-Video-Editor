@@ -90,6 +90,10 @@ pub enum HitZone {
     TrimLeft,
     TrimRight,
     Audio,
+    /// Volume node / horizontal envelope line.
+    Volume,
+    FadeIn,
+    FadeOut,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,10 +125,8 @@ pub fn clip_geometry(kind: TrackKind, rect: Rect, has_audio: bool) -> ClipGeomet
     };
     match kind {
         TrackKind::Video => {
-            g.header = Rect::from_min_size(
-                rect.min,
-                egui::vec2(rect.width(), draw::VIDEO_HEADER_H),
-            );
+            g.header =
+                Rect::from_min_size(rect.min, egui::vec2(rect.width(), draw::VIDEO_HEADER_H));
             let thumb_h = if has_audio {
                 draw::VIDEO_THUMB_H
             } else {
@@ -136,26 +138,28 @@ pub fn clip_geometry(kind: TrackKind, rect: Rect, has_audio: bool) -> ClipGeomet
             ));
             if has_audio {
                 g.audio = Some(Rect::from_min_size(
-                    egui::pos2(rect.left(), rect.top() + draw::VIDEO_HEADER_H + draw::VIDEO_THUMB_H),
+                    egui::pos2(
+                        rect.left(),
+                        rect.top() + draw::VIDEO_HEADER_H + draw::VIDEO_THUMB_H,
+                    ),
                     egui::vec2(rect.width(), draw::VIDEO_AUDIO_H),
                 ));
             }
         }
         TrackKind::Image => {
-            g.header = Rect::from_min_size(
-                rect.min,
-                egui::vec2(rect.width(), draw::IMAGE_HEADER_H),
-            );
+            g.header =
+                Rect::from_min_size(rect.min, egui::vec2(rect.width(), draw::IMAGE_HEADER_H));
             g.image = Some(Rect::from_min_size(
                 egui::pos2(rect.left(), rect.top() + draw::IMAGE_HEADER_H),
-                egui::vec2(rect.width(), (rect.height() - draw::IMAGE_HEADER_H).max(1.0)),
+                egui::vec2(
+                    rect.width(),
+                    (rect.height() - draw::IMAGE_HEADER_H).max(1.0),
+                ),
             ));
         }
         TrackKind::Audio => {
-            g.header = Rect::from_min_size(
-                rect.min,
-                egui::vec2(rect.width(), draw::AUDIO_HEADER_H),
-            );
+            g.header =
+                Rect::from_min_size(rect.min, egui::vec2(rect.width(), draw::AUDIO_HEADER_H));
             g.wave = Some(Rect::from_min_size(
                 egui::pos2(rect.left(), rect.top() + draw::AUDIO_HEADER_H),
                 egui::vec2(rect.width(), draw::AUDIO_WAVE_H),
@@ -235,8 +239,8 @@ pub fn hit_test_clip(
             locked: false,
         });
     }
-    if g
-        .audio
+    if g.audio
+        .or(g.wave)
         .is_some_and(|audio| audio.intersect(content).contains(pointer))
     {
         return Some(ClipHit {
@@ -377,11 +381,7 @@ mod tests {
     #[test]
     fn marquee_is_clipped_to_content() {
         let content = Rect::from_min_size(egui::pos2(100.0, 10.0), egui::vec2(200.0, 100.0));
-        let m = Marquee::new(
-            egui::pos2(90.0, 0.0),
-            false,
-            Selection::default(),
-        );
+        let m = Marquee::new(egui::pos2(90.0, 0.0), false, Selection::default());
         let mut m = m;
         m.current = egui::pos2(400.0, 200.0);
         assert_eq!(m.rect(content), content);

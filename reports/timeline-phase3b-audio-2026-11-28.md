@@ -9,8 +9,8 @@
 
 Phase 3B adds Arcline-owned volume and fade controls to the timeline. The controls use the existing
 `arc_core::model::ClipAudio` value type and the existing `arc-audio` mixer / `arc-cli` export path.
-The visual language is not a copy of the reference: blue haloed curve, rounded-square level node,
-teal diamond duration nodes, translucent fade wedges and a compact lower-right dB chip.
+The visual language is not a copy of the reference: blue haloed curve, white directional chevron
+level node, teal diamond duration nodes, translucent fade wedges and a compact lower-right dB chip.
 
 ## 2. Interaction implemented
 
@@ -28,9 +28,16 @@ teal diamond duration nodes, translucent fade wedges and a compact lower-right d
 | Locked / muted / disabled | No controls; mute dims only the audio region; lock/disable remain distinct |
 
 The waveform is scaled by gain and by the fade envelope. It is not shortened or clipped by a fade.
-The controls are painted, not widget-per-clip; hover does not request decoding or a second waveform.
+The volume node is a pure-white directional chevron (see the chevron report below); the fade
+diamonds, envelope, Inspector, model and engine path are unchanged. The controls are painted, not
+widget-per-clip; hover does not request decoding or a second waveform.
 
 ## 3. Screenshots (actual running app, 1600 × 1000)
+
+> These captures predate the 2026-11-28 chevron adjustment. The current volume node is the white
+> directional chevron documented in
+> [timeline-phase3b-chevron-2026-11-28.md](timeline-phase3b-chevron-2026-11-28.md); the rest of the
+> states are unchanged.
 
 Normal — no selection, no audio chrome:
 
@@ -85,7 +92,7 @@ The same video with the audio strip controls visible:
 
 | Command | Result |
 |---|---|
-| `cargo test -p arc-app` | **81 passed**, 0 failed, 9 ignored |
+| `cargo test -p arc-app` | **82 passed**, 0 failed, 9 ignored |
 | `cargo test -p arc-audio` | **3 passed** (`positions_gain_pan_fades_speed`, parity, WAV writer) |
 | `cargo test -p arc-cli --test preview` | **17 passed** (T1 regression) |
 | `cargo test -p arc-cli --test render_e2e` | **6 passed** (T1 regression) |
@@ -94,6 +101,7 @@ The same video with the audio strip controls visible:
 New `arc-app` tests:
 
 - volume node drag updates gain and undo/redo;
+- the white chevron rotates above/below the audio-region centre;
 - left and right diamond drags set fade-in/fade-out;
 - muted, locked and disabled clips cannot be edited;
 - the geometry works at 29/58/116 px/s;
@@ -108,7 +116,8 @@ layer.
 ## 5. Demo steps
 
 1. Hover the `piano_theme.wav` clip: the blue curve and three nodes appear.
-2. Drag the rounded square up: Inspector moves from `+0.0 dB` toward `+6.0 dB`; waveform grows.
+2. Drag the white chevron up: Inspector moves from `+0.0 dB` toward `+6.0 dB`; waveform grows and
+   the chevron rotates with the node.
 3. Drag the left diamond right: `FADE IN` becomes non-zero; the left ramp grows.
 4. Drag the right diamond left: `FADE OUT` becomes non-zero; the right ramp grows.
 5. Press Ctrl+Z twice: the fade and volume changes return in order.

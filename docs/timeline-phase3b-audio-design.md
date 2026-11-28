@@ -14,8 +14,11 @@ Arcline's own envelope language:
 
 - **Volume envelope** — a thin brand-blue curve with a soft dark halo so it remains legible over a
   waveform. It is a *curve*, not a borrowed white rule.
-- **Volume node** — a 12 × 12 rounded square, brand-blue fill with a white keyline. A square says
-  "one scalar parameter"; it is deliberately unlike the vertical trim bars and the fade diamonds.
+- **Volume node** — a pure-white `>` chevron, rotated 90°: tip down when the node is above the
+  audio-region centre, tip up when it is below. The visual is 16 × 14 pt of two 2 pt rounded
+  strokes with a 18 × 18 pt hit box. No base, fill, shadow or glow. A chevron says "drag me
+  vertically" without borrowing a transport icon; the two directions stay distinct from the trim
+  bars and fade diamonds.
 - **Fade nodes** — two 10 × 10 diamonds in the waveform teal (`WAVE_EMBEDDED`) with a white keyline.
   A diamond says "a duration endpoint", not "a level".
 - **Fade regions** — translucent brand-blue triangles under the ramps, at 18/255 alpha.
@@ -26,8 +29,11 @@ Arcline's own envelope language:
 The visual relationship is intentional:
 
 ```
-volume level  ──────■────────      rounded square = scalar level
-fade duration ◇─────┘       ◇     diamonds       = duration endpoints
+volume level  ──────∨────────      white chevron = scalar level (tip toward centre)
+fade duration ◇─────┘       ◇     diamonds      = duration endpoints
+
+above centre:  ∨   (chevron tip down)
+below centre:  ∧   (chevron tip up)
 ```
 
 ## 2. State model
@@ -156,7 +162,7 @@ What was learned from references: hover reveals controls; left fade ramps up and
 video audio lives in the video's bottom strip; values are shown in an inspector. Those are functional
 facts.
 
-What is Arcline-specific: the blue haloed curve, rounded-square level node, teal diamond duration
-nodes, translucent fade wedges, the lower-right dB chip, the Inspector vocabulary, and the priority
-model. No reference bitmap, icon, waveform, font, or panel composition is embedded in the product or
+What is Arcline-specific: the blue haloed curve, the pure-white directional chevron level node,
+teal diamond duration nodes, translucent fade wedges, the lower-right dB chip, the Inspector
+vocabulary, and the priority model. No reference bitmap, icon, waveform, font, or panel composition is embedded in the product or
 used as a pixel acceptance target.

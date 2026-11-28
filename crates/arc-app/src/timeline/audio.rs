@@ -76,7 +76,7 @@ pub fn controls(g: &ClipGeometry, audio: &ClipAudio, duration: f64) -> Option<Au
         line_y,
         fade_in_x,
         fade_out_x,
-        volume_node: node(egui::pos2(region.center().x, line_y), 12.0),
+        volume_node: node(egui::pos2(region.center().x, line_y), 18.0),
         fade_in_node: node(egui::pos2(fade_in_x, line_y), 10.0),
         fade_out_node: node(egui::pos2(fade_out_x, line_y), 10.0),
         fade_in: fade_in as f32,
@@ -101,15 +101,57 @@ pub fn hit_test(c: &AudioControls, p: Pos2) -> Option<HitZone> {
     None
 }
 
-fn node_color(zone: HitZone, hovered: Option<HitZone>) -> Color32 {
-    if hovered == Some(zone) {
+/// A `>` chevron rotated by 90°: tip down when the node is above the audio-region centre,
+/// tip up when it is below. At dead centre it points down (a stable, non-flickering default).
+pub fn volume_tip_down(c: &AudioControls) -> bool {
+    c.volume_node.center().y <= c.region.center().y
+}
+
+/// Two rounded white strokes, no base, no shadow. This is a direct-on-blue control.
+fn draw_volume_chevron(painter: &Painter, c: &AudioControls, active: bool) {
+    let center = c.volume_node.center();
+    let w = 8.0;
+    let h = 7.0;
+    let color = if active {
         Color32::WHITE
     } else {
-        draw::ACCENT
+        Color32::from_white_alpha(235)
+    };
+    let (points, stroke) = if volume_tip_down(c) {
+        (
+            [
+                egui::pos2(center.x - w, center.y - h),
+                egui::pos2(center.x, center.y + h),
+                egui::pos2(center.x + w, center.y - h),
+            ],
+            Stroke::new(if active { 2.4 } else { 2.0 }, color),
+        )
+    } else {
+        (
+            [
+                egui::pos2(center.x - w, center.y + h),
+                egui::pos2(center.x, center.y - h),
+                egui::pos2(center.x + w, center.y + h),
+            ],
+            Stroke::new(if active { 2.4 } else { 2.0 }, color),
+        )
+    };
+    // Two separate segments keep the tip crisp; small end caps keep the line soft rather than
+    // square. The caps are part of the stroke, not a shadow or a base.
+    painter.line_segment([points[0], points[1]], stroke);
+    painter.line_segment([points[1], points[2]], stroke);
+    for p in points {
+        painter.circle_filled(p, stroke.width * 0.5, stroke.color);
     }
 }
 
-pub fn draw(painter: &Painter, c: &AudioControls, audio: &ClipAudio, hovered: Option<HitZone>) {
+pub fn draw(
+    painter: &Painter,
+    c: &AudioControls,
+    audio: &ClipAudio,
+    hovered: Option<HitZone>,
+    dragging: bool,
+) {
     let left = c.region.left();
     let right = c.region.right();
     let y = c.line_y;
@@ -153,7 +195,7 @@ pub fn draw(painter: &Painter, c: &AudioControls, audio: &ClipAudio, hovered: Op
     ));
     painter.add(Shape::line(curve, Stroke::new(1.8, draw::ACCENT)));
 
-    // Fades: diamonds, visually distinct from the square volume node and trim bars.
+    // Fades: diamonds, visually distinct from the chevron volume node and trim bars.
     for (zone, rect) in [
         (HitZone::FadeIn, c.fade_in_node),
         (HitZone::FadeOut, c.fade_out_node),
@@ -199,18 +241,8 @@ pub fn draw(painter: &Painter, c: &AudioControls, audio: &ClipAudio, hovered: Op
         Color32::WHITE,
     );
 
-    // Draw the volume node last so neither the readout nor the envelope can obscure it.
-    painter.rect_filled(
-        c.volume_node,
-        CornerRadius::same(3),
-        node_color(HitZone::Volume, hovered),
-    );
-    painter.rect_stroke(
-        c.volume_node,
-        CornerRadius::same(3),
-        Stroke::new(1.4, Color32::WHITE),
-        egui::StrokeKind::Inside,
-    );
+    // White `>` chevron, rotated by the node's side. No base, fill, shadow or glow.
+    draw_volume_chevron(painter, c, dragging || hovered == Some(HitZone::Volume));
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -312,6 +344,23 @@ mod tests {
             Some(HitZone::FadeOut)
         );
         assert_eq!(hit_test(&c, c.volume_node.center()), Some(HitZone::Volume));
+    }
+
+    #[test]
+    fn chevron_rotates_when_the_node_crosses_the_audio_centre() {
+        let up = ClipAudio {
+            gain_db: 6.0,
+            ..ClipAudio::default()
+        };
+        let c = controls(&geometry(), &up, 10.0).expect("high controls");
+        assert!(volume_tip_down(&c), "above the centre must point down");
+        let down = ClipAudio {
+            gain_db: -30.0,
+            ..ClipAudio::default()
+        };
+        let c = controls(&geometry(), &down, 10.0).expect("low controls");
+        assert!(!volume_tip_down(&c), "below the centre must point up");
+        assert_eq!(c.volume_node.width(), 18.0, "larger visual hit target");
     }
 
     #[test]

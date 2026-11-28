@@ -1292,6 +1292,7 @@ impl Timeline {
                             &c,
                             &clip.audio,
                             hovered.map(|h| h.zone),
+                            dragging,
                         );
                     }
                 }
